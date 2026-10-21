@@ -29,6 +29,7 @@ une petite intelligence avec du caractère, qui commente, se souvient, et se dé
 | [`docs/NACELLE.md`](docs/NACELLE.md) | La tête : nacelle Feiyu SPG, enregistrer et décoder son Bluetooth, montage |
 | [`docs/PERSONNALITE.md`](docs/PERSONNALITE.md) | Premier jet du caractère de Joey, de sa voix et de ses comportements |
 | [`reuse/aidrone/`](reuse/aidrone/) | Code repris du projet drone (pilote Roomba testé, Gemini en direct, vision sur le téléphone…) |
+| [`hardware/gimbal-spg/`](hardware/gimbal-spg/) | Protocole Bluetooth décodé de la nacelle, code Kotlin, capture |
 | [`hardware/roomba-mount/`](hardware/roomba-mount/) | Support imprimable en 3D (téléphone + carte USB) — à retourner pour l'écran vers l'avant |
 
 ## Matériel (résumé)

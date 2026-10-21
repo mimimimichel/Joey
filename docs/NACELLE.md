@@ -9,7 +9,7 @@ il tourne et lève la tête sans bouger les roues, et l'image de la caméra rest
 - Rotation 360°, inclinaison 320°, roulis 320°. Vitesses : rotation 3 à 150°/s, inclinaison 2 à 75°/s.
 - Batterie 22650 interne, ~8 h. À recharger à part (pas reliée au Roomba).
 - **Pilotable depuis le téléphone** : l'app **Feiyu ON** la trouve en Bluetooth et la dirige (testé par Michael).
-  Le protocole n'est pas public : il faut l'enregistrer puis le décoder (ci-dessous).
+  Le protocole n'est pas public : enregistré puis **décodé** (voir `hardware/gimbal-spg/PROTOCOLE.md`).
 - Travaux voisins (autre modèle, Mini 3D, en série et non en Bluetooth) :
   [scanlime](https://scanlime.org/2017/06/feiyu-gimbal-serial-hack-scanlime021/),
   [heroineworshiper/gimbal](https://github.com/heroineworshiper/gimbal). Les trames peuvent ressembler.
@@ -41,7 +41,12 @@ il tourne et lève la tête sans bouger les roues, et l'image de la caméra rest
    Le mettre sur Google Drive (ou dans le dépôt, dossier `captures/`) et le donner à Claude.
 6. Désactiver ensuite le journal HCI (il grossit et enregistre tout le Bluetooth).
 
-## Étape 2 — décoder (Claude)
+## Étape 2 — décoder (Claude) ✅ fait le 2026-10-21
+
+Résultat : [`hardware/gimbal-spg/PROTOCOLE.md`](../hardware/gimbal-spg/PROTOCOLE.md) (joystick, recentrage, angles,
+CRC) + `SpgProtocol.kt` prêt pour l'app + `spg.py` pour vérifier une capture.
+
+Méthode utilisée :
 
 - Lire le journal (Wireshark / `btsnoop` en Python), trouver l'appareil Feiyu, son service et ses caractéristiques
   BLE (UUID), puis les écritures envoyées pendant chaque action.

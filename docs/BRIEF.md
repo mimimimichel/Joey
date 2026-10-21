@@ -19,7 +19,8 @@
   au besoin (modèles robotique d'abord : `gemini-robotics-er-2-preview`, puis flash).
 - **À distance** : Tailscale sur le S8+ et le téléphone de Michael (pas de port ouvert sur Internet).
 - **Nacelle Feiyu SPG (premier modèle) = le cou de Joey** : le téléphone est dessus, elle tourne/incline la tête.
-  Elle se pilote en Bluetooth avec l'app Feiyu ON (testé) ; protocole à enregistrer et décoder. Voir `NACELLE.md`.
+  Elle se pilote en Bluetooth (BLE, nom `FY_Spg_82`) ; protocole **décodé** : `hardware/gimbal-spg/PROTOCOLE.md`,
+  code prêt `hardware/gimbal-spg/SpgProtocol.kt`. Voir `NACELLE.md`.
 
 ## Ce qui existe déjà (copié dans `reuse/aidrone/`, testé dans le projet drone)
 

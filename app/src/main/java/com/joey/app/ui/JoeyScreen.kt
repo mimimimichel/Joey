@@ -1,0 +1,308 @@
+package com.joey.app.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.joey.app.MainViewModel
+import com.joey.app.brain.LiveState
+import com.joey.app.face.Face
+import com.joey.app.gimbal.GimbalState
+import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
+
+private val PANEL = Color(0xCC111820)
+private val ACCENT = Color(0xFF4FC3F7)
+
+/** Écran unique : le visage plein écran ; un appui affiche ou cache les commandes. */
+@Composable
+fun JoeyScreen(vm: MainViewModel) {
+    val s by vm.state.collectAsState()
+    var controls by remember { mutableStateOf(true) }
+    var headPanel by remember { mutableStateOf(false) }
+    var settings by remember { mutableStateOf(false) }
+    var gaze by remember { mutableStateOf(0f to 0f) }
+    var pose by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        while (true) {
+            gaze = vm.gaze()
+            pose = vm.poseText()
+            delay(100)
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        Face(
+            mood = s.mood,
+            activity = vm.faceActivity(s),
+            level = vm::voiceLevel,
+            gazeX = gaze.first,
+            gazeY = gaze.second,
+            modifier = Modifier.fillMaxSize().clickable(
+                interactionSource = remember { MutableInteractionSource() }, indication = null,
+            ) { controls = !controls },
+        )
+
+        // Sous-titres
+        if (s.subtitles && s.lines.isNotEmpty() && s.live != LiveState.OFF) {
+            Column(
+                Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(bottom = 88.dp, start = 16.dp, end = 16.dp)
+                    .fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                s.lines.takeLast(2).forEach { l ->
+                    Text(
+                        (if (l.joey) "" else "🗣 ") + l.text.trim(),
+                        color = if (l.joey) ACCENT else Color(0xFFB0BEC5),
+                        fontSize = 15.sp,
+                        maxLines = 3,
+                    )
+                }
+            }
+        }
+
+        if (controls) {
+            // Barre d'état
+            Row(
+                Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(12.dp).fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Chip(when (s.gimbal) {
+                    GimbalState.READY -> "🦒 Nacelle prête" + (if (s.battery >= 0) " · 🔋${s.battery}%" else "")
+                    GimbalState.SEARCHING -> "🦒 Recherche…"
+                    GimbalState.CONNECTING -> "🦒 Connexion…"
+                    GimbalState.OFF -> "🦒 Nacelle déconnectée"
+                }) { headPanel = true }
+                Chip(when (s.live) {
+                    LiveState.OFF -> "💤 En veille"
+                    LiveState.CONNECTING -> "… Réveil"
+                    LiveState.LISTENING -> "👂 J'écoute"
+                    LiveState.SPEAKING -> "🗨 Je parle"
+                })
+                Spacer(Modifier.weight(1f))
+                RoundButton("⚙") { settings = true }
+            }
+            // Boutons du bas
+            Row(
+                Modifier.align(Alignment.BottomEnd).safeDrawingPadding().padding(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RoundButton("🦒", size = 56) { headPanel = !headPanel }
+                RoundButton(if (s.live == LiveState.OFF) "🎤" else "■", size = 72,
+                    color = if (s.live == LiveState.OFF) ACCENT else Color(0xFFE57373)) { vm.micPressed() }
+            }
+        }
+
+        if (headPanel) HeadPanel(vm, s, pose) { headPanel = false }
+        if (settings) SettingsDialog(vm, s) { settings = false }
+
+        s.message?.let { m ->
+            AlertDialog(
+                onDismissRequest = { vm.message(null) },
+                text = { Text(m) },
+                confirmButton = { TextButton(onClick = { vm.message(null) }) { Text("OK") } },
+            )
+        }
+    }
+}
+
+@Composable
+private fun Chip(text: String, onClick: (() -> Unit)? = null) {
+    Text(
+        text,
+        color = Color.White,
+        fontSize = 13.sp,
+        modifier = Modifier.background(PANEL, RoundedCornerShape(16.dp))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    )
+}
+
+@Composable
+private fun RoundButton(label: String, size: Int = 44, color: Color = PANEL, onClick: () -> Unit) {
+    Box(
+        Modifier.size(size.dp).background(color, CircleShape).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { Text(label, fontSize = (size / 2.4).sp, color = Color.White) }
+}
+
+/** Panneau « tête » : connexion de la nacelle, joystick, gestes, journal. */
+@Composable
+private fun HeadPanel(vm: MainViewModel, s: com.joey.app.UiState, pose: String, close: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    Box(Modifier.fillMaxSize().safeDrawingPadding().padding(12.dp), contentAlignment = Alignment.CenterStart) {
+        Column(
+            Modifier.width(340.dp).heightIn(max = 640.dp).background(PANEL, RoundedCornerShape(16.dp)).padding(12.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Tête (nacelle SPG)", color = Color.White, fontSize = 17.sp, modifier = Modifier.weight(1f))
+                TextButton(onClick = close) { Text("Fermer") }
+            }
+            if (s.gimbal == GimbalState.OFF) {
+                Button(onClick = vm::connectGimbal, modifier = Modifier.fillMaxWidth()) { Text("Connecter la nacelle") }
+                Text("Allume la nacelle et ferme l'app Feiyu (une seule app à la fois).", color = Color.Gray, fontSize = 12.sp)
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(pose.ifBlank { s.gimbal.name.lowercase() }, color = ACCENT, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    TextButton(onClick = vm::disconnectGimbal) { Text("Déconnecter") }
+                }
+            }
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { Joystick { x, y -> vm.manualStick(x, y) } }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilledTonalButton(onClick = vm::recenter) { Text("Centrer") }
+                FilledTonalButton(onClick = vm::nod) { Text("Oui") }
+                FilledTonalButton(onClick = vm::shake) { Text("Non") }
+            }
+            FilledTonalButton(onClick = vm::sweep, modifier = Modifier.fillMaxWidth()) { Text("Regarder autour") }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Journal", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                TextButton(onClick = { clipboard.setText(AnnotatedString(s.log.joinToString("\n"))) }) { Text("Copier") }
+            }
+            val listState = rememberLazyListState()
+            LaunchedEffect(s.log.size) { if (s.log.isNotEmpty()) listState.scrollToItem(s.log.size - 1) }
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 180.dp), state = listState) {
+                items(s.log) { Text(it, color = Color(0xFFB0BEC5), fontSize = 11.sp) }
+            }
+        }
+    }
+}
+
+/** Joystick à l'écran : on tire le rond, la tête tourne ; on lâche, elle s'arrête. */
+@Composable
+private fun Joystick(onMove: (Float, Float) -> Unit) {
+    val radius = 70f
+    var dx by remember { mutableFloatStateOf(0f) }
+    var dy by remember { mutableFloatStateOf(0f) }
+    Box(
+        Modifier.size(160.dp).border(2.dp, ACCENT.copy(alpha = 0.6f), CircleShape)
+            .pointerInput(Unit) {
+                val r = radius * density
+                detectDragGestures(
+                    onDragEnd = { dx = 0f; dy = 0f; onMove(0f, 0f) },
+                    onDragCancel = { dx = 0f; dy = 0f; onMove(0f, 0f) },
+                ) { change, drag ->
+                    change.consume()
+                    var nx = dx + drag.x
+                    var ny = dy + drag.y
+                    val d = sqrt(nx * nx + ny * ny)
+                    if (d > r) { nx *= r / d; ny *= r / d }
+                    dx = nx; dy = ny
+                    onMove(nx / r, -ny / r)
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.offset { IntOffset(dx.roundToInt(), dy.roundToInt()) }.size(56.dp).background(ACCENT, CircleShape))
+    }
+}
+
+@Composable
+private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: () -> Unit) {
+    var key by remember { mutableStateOf(vm.geminiKey) }
+    var robot by remember { mutableStateOf(s.robotVoice) }
+    var camera by remember { mutableStateOf(s.camera) }
+    var front by remember { mutableStateOf(s.frontCamera) }
+    var invert by remember { mutableStateOf(s.invertPan) }
+    var barge by remember { mutableStateOf(s.bargeIn) }
+    var subs by remember { mutableStateOf(s.subtitles) }
+    var confirmForget by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = close,
+        title = { Text("Réglages") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                OutlinedTextField(
+                    value = key, onValueChange = { key = it.trim() }, label = { Text("Clé Gemini") }, singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text("Gratuite sur aistudio.google.com (« Get API key »).", fontSize = 12.sp, color = Color.Gray)
+                Toggle("Voix de robot", robot) { robot = it }
+                Toggle("Joey voit (caméra)", camera) { camera = it }
+                Toggle("Caméra avant (côté écran)", front) { front = it }
+                Toggle("Inverser gauche / droite de la tête", invert) { invert = it }
+                Toggle("Pouvoir lui couper la parole", barge) { barge = it }
+                Toggle("Sous-titres", subs) { subs = it }
+                Text("Souvenirs : ${s.memories}", fontSize = 13.sp)
+                TextButton(onClick = { confirmForget = true }) { Text("Effacer sa mémoire") }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                vm.saveSettings(key, robot, camera, front, invert, barge, subs)
+                close()
+            }) { Text("Enregistrer") }
+        },
+        dismissButton = { TextButton(onClick = close) { Text("Annuler") } },
+    )
+    if (confirmForget) {
+        AlertDialog(
+            onDismissRequest = { confirmForget = false },
+            text = { Text("Effacer tout ce que Joey a retenu ?") },
+            confirmButton = { TextButton(onClick = { vm.forgetAll(); confirmForget = false }) { Text("Effacer") } },
+            dismissButton = { TextButton(onClick = { confirmForget = false }) { Text("Non") } },
+        )
+    }
+}
+
+@Composable
+private fun Toggle(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Text(label, modifier = Modifier.weight(1f), fontSize = 14.sp)
+        Switch(checked = value, onCheckedChange = onChange)
+    }
+}

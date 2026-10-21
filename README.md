@@ -4,7 +4,8 @@ Un Roomba (série 600) + un vieux téléphone Android posé dessus = un petit ro
 une voix, une personnalité et de la mémoire. Inspiré de Joey, le robot de *Beneath a Steel Sky* :
 une petite intelligence avec du caractère, qui commente, se souvient, et se déplace dans la maison.
 
-> État : **démarrage**. Rien n'est encore codé ici. Le pilote du Roomba, la voix et la vision existent déjà
+> État : **version 0.1 de l'app** (`app/`) : visage, conversation Gemini Live avec la voix de robot, tête sur la nacelle SPG.
+> Le Roomba n'est pas encore branché. Le pilote du Roomba, la voix et la vision existent déjà
 > (et sont testés) dans le projet drone [`mimimimichel/AiDrone`](https://github.com/mimimimichel/AiDrone) :
 > une copie est dans [`reuse/aidrone/`](reuse/aidrone/) pour démarrer.
 
@@ -19,6 +20,15 @@ une petite intelligence avec du caractère, qui commente, se souvient, et se dé
   raconte ce qu'il a vu, va se recharger seul sur sa base.
 - **Il s'exprime aussi avec le Roomba** : petites mélodies, voyants, petits mouvements (joie, hésitation).
 - **À distance** : on peut lui parler et voir par ses yeux depuis son téléphone, hors de la maison (Tailscale).
+
+## L'app (version 0.1)
+
+- **Visage** plein écran (yeux animés : clignements, expressions, regard qui suit les mouvements de tête, bouche qui bouge avec la voix).
+- **Conversation** : bouton 🎤 → Gemini Live (même client et même voix de robot que Bebop IA), personnalité de Joey,
+  une image de la caméra par seconde, mémoire entre les conversations.
+- **Tête** : se connecte seule à la nacelle SPG (`FY_Spg_…`) ; Joey peut regarder à gauche/droite/haut/bas, balayer la pièce,
+  faire oui/non. Panneau 🦒 : joystick à l'écran, centrer, journal (avec les UUID Bluetooth à noter).
+- Clé Gemini : réglages ⚙ (ou `-PgeminiKey=...` à la compilation). Compiler : `./gradlew assembleDebug`.
 
 ## Documents
 

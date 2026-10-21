@@ -90,6 +90,7 @@ class GeminiLive(
     @Volatile private var setupDone = false
     @Volatile private var handle: String? = null
     private var modelIndex = 0
+    private var quotaHits = 0
     private val failures = ArrayDeque<Long>()
 
     private val audio = context.getSystemService(AudioManager::class.java)
@@ -125,6 +126,8 @@ class GeminiLive(
     }
     private val robotFx = RobotVoice(OUT_RATE)
     @Volatile private var framesWritten = 0L
+    /** Son du micro du téléphone (pour danser en rythme), sur le fil du micro. */
+    @Volatile var onMicPcm: ((ShortArray, Int) -> Unit)? = null
     /** Volume de la voix en ce moment (0..1), pour animer la bouche / les yeux. */
     @Volatile var level = 0f
         private set
@@ -155,6 +158,7 @@ class GeminiLive(
         if (active) return
         active = true
         modelIndex = 0
+        quotaHits = 0
         failures.clear()
         state(LiveState.CONNECTING)
         try {
@@ -226,6 +230,18 @@ class GeminiLive(
         ws = null
         if (!active) return
         Log.w(TAG, "fermé : $why (${MODELS[modelIndex]})")
+        // Quota épuisé pour CE modèle : on passe au suivant (chacun a son propre quota) avant d'abandonner.
+        if (Regex("quota|exceeded", RegexOption.IGNORE_CASE).containsMatchIn(why)) {
+            quotaHits++
+            if (quotaHits < MODELS.size) {
+                Log.w(TAG, "quota épuisé pour ${MODELS[modelIndex]}, modèle suivant")
+                modelIndex = (modelIndex + 1) % MODELS.size
+                handle = null
+                state(LiveState.CONNECTING)
+                thread(isDaemon = true) { Thread.sleep(300); if (active) connect() }
+                return
+            }
+        }
         friendly(why)?.let {
             onError(it)
             stop()
@@ -257,7 +273,7 @@ class GeminiLive(
         Regex("API key not valid|API_KEY_INVALID|PERMISSION_DENIED", RegexOption.IGNORE_CASE).containsMatchIn(why) ->
             "Clé Gemini refusée par Google : vérifie-la dans les réglages (⚙)."
         Regex("PerDay|quota", RegexOption.IGNORE_CASE).containsMatchIn(why) ->
-            "Quota gratuit Gemini atteint : réessaie plus tard (ou demain)."
+            "Quota gratuit Gemini atteint sur tous les modèles : réessaie plus tard (ou demain)."
         Regex("Unable to resolve host|UnknownHost|Failed to connect", RegexOption.IGNORE_CASE).containsMatchIn(why) && failures.size >= 3 ->
             "Impossible de joindre Gemini : vérifie le Wi-Fi ou les données mobiles."
         else -> null
@@ -270,7 +286,8 @@ class GeminiLive(
             .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
                 .put("mediaResolution", "MEDIA_RESOLUTION_LOW"))
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
-            .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", tools)))
+            // Ses outils, plus la recherche Google (météo, actualités, horaires…).
+            .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", tools)).put(JSONObject().put("googleSearch", JSONObject())))
             .put("inputAudioTranscription", JSONObject())
             .put("outputAudioTranscription", JSONObject())
             // Sans ça, audio + vidéo = 2 minutes de conversation au maximum.
@@ -296,6 +313,7 @@ class GeminiLive(
         val m = try { JSONObject(text) } catch (e: Exception) { return }
         if (m.has("setupComplete")) {
             setupDone = true
+            quotaHits = 0
             state(LiveState.LISTENING)
         }
         m.optJSONObject("sessionResumptionUpdate")?.let { u ->
@@ -472,6 +490,7 @@ class GeminiLive(
         while (active && record === rec) {
             val n = rec.read(buf, 0, buf.size)
             if (n <= 0) continue
+            onMicPcm?.let { cb -> runCatching { cb(buf, n) } }
             if (!setupDone) continue
             // Le micro du casque est utilisé : celui du téléphone se tait.
             if (System.currentTimeMillis() - externalMicAt < 500) continue

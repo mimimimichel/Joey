@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Photos dans la galerie : nécessaire seulement jusqu'à Android 9 (Galaxy S8+) -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
     <!-- Nacelle Feiyu SPG en Bluetooth basse consommation -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />

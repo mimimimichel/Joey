@@ -114,11 +114,53 @@ class Camera : Eyes {
                     }
                 }
                 val selector = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
-                p.bindToLifecycle(owner, selector, analysis)
+                val capture = androidx.camera.core.ImageCapture.Builder()
+                    .setCaptureMode(androidx.camera.core.ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    .build()
+                imageCapture = capture
+                appContext = ctx.applicationContext
+                try {
+                    p.bindToLifecycle(owner, selector, analysis, capture)
+                } catch (e: Exception) {
+                    // Certains téléphones refusent les deux ensemble : on garde l'analyse (photo = image d'analyse).
+                    imageCapture = null
+                    p.unbindAll()
+                    p.bindToLifecycle(owner, selector, analysis)
+                }
             } catch (e: Exception) {
                 onError("Caméra indisponible : ${e.message}")
             }
         }, ContextCompat.getMainExecutor(ctx))
+    }
+
+    @Volatile private var imageCapture: androidx.camera.core.ImageCapture? = null
+    private var appContext: android.content.Context? = null
+
+    /** Prend une vraie photo (pleine définition) et l'enregistre dans la galerie (Images/Joey). [done] : message. */
+    fun takePhoto(done: (String) -> Unit) {
+        val ctx = appContext ?: return done("caméra pas prête")
+        val name = "Joey_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.FRENCH).format(java.util.Date())
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            if (android.os.Build.VERSION.SDK_INT >= 29) put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/Joey")
+        }
+        val cap = imageCapture
+        if (cap == null) {
+            // Repli : la dernière image d'analyse.
+            val b = frame(2000) ?: return done("pas d'image")
+            runCatching {
+                val uri = ctx.contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)!!
+                ctx.contentResolver.openOutputStream(uri)!!.use { b.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+            }.onSuccess { done("photo enregistrée (Images/Joey)") }.onFailure { done("photo impossible : ${it.message}") }
+            return
+        }
+        val out = androidx.camera.core.ImageCapture.OutputFileOptions.Builder(
+            ctx.contentResolver, android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values).build()
+        cap.takePicture(out, worker, object : androidx.camera.core.ImageCapture.OnImageSavedCallback {
+            override fun onImageSaved(r: androidx.camera.core.ImageCapture.OutputFileResults) = done("photo enregistrée dans la galerie (Images/Joey)")
+            override fun onError(e: androidx.camera.core.ImageCaptureException) = done("photo ratée : ${e.message}")
+        })
     }
 
     fun stop() {

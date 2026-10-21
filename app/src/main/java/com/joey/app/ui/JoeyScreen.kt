@@ -92,6 +92,16 @@ fun JoeyScreen(vm: MainViewModel) {
             ) { controls = !controls },
         )
 
+        // Photo : compte à rebours en grand, puis flash blanc.
+        s.countdown?.let { n ->
+            Text("$n", color = Color.White, fontSize = 160.sp, modifier = Modifier.align(Alignment.Center))
+        }
+        var flash by remember { mutableStateOf(0f) }
+        LaunchedEffect(s.flashAt) {
+            if (s.flashAt > 0) { flash = 1f; repeat(10) { delay(30); flash -= 0.1f }; flash = 0f }
+        }
+        if (flash > 0f) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = flash.coerceIn(0f, 1f))))
+
         // Sous-titres
         if (s.subtitles && s.lines.isNotEmpty() && s.live != LiveState.OFF) {
             Column(
@@ -123,6 +133,7 @@ fun JoeyScreen(vm: MainViewModel) {
                     GimbalState.CONNECTING -> "🦒 Connexion…"
                     GimbalState.OFF -> "🦒 Nacelle déconnectée"
                 }) { headPanel = true }
+                if (s.watch) Chip("🛡 Garde")
                 if (s.headsetFollow) Chip("🥽 Suit le casque")
                 else if (s.tracking != null) Chip("🔎 ${s.tracking}")
                 else if (s.followFace && s.gimbal == GimbalState.READY) Chip(when {
@@ -131,7 +142,7 @@ fun JoeyScreen(vm: MainViewModel) {
                     else -> "👤 Personne"
                 })
                 Chip(when (s.live) {
-                    LiveState.OFF -> "💤 En veille"
+                    LiveState.OFF -> if (s.wakeWord) "💤 Dis « Joey »" else "💤 En veille"
                     LiveState.CONNECTING -> "… Réveil"
                     LiveState.LISTENING -> "👂 J'écoute"
                     LiveState.SPEAKING -> "🗨 Je parle"
@@ -273,6 +284,9 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
     var barge by remember { mutableStateOf(s.bargeIn) }
     var subs by remember { mutableStateOf(s.subtitles) }
     var follow by remember { mutableStateOf(s.followFace) }
+    var wakeWord by remember { mutableStateOf(s.wakeWord) }
+    var life by remember { mutableStateOf(s.idleLife) }
+    var ntfy by remember { mutableStateOf(s.ntfyTopic) }
     var speed by remember { mutableStateOf(s.headSpeed) }
     var confirmForget by remember { mutableStateOf(false) }
     var showMemories by remember { mutableStateOf(false) }
@@ -292,6 +306,16 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Voix de robot", robot) { robot = it }
                 Toggle("Joey voit (caméra)", camera) { camera = it }
                 Toggle("Caméra avant (côté écran)", front) { front = it }
+                Toggle("Mot de réveil « Joey » (sans bouton)", wakeWord) { wakeWord = it }
+                Toggle("Vie propre (curiosité, ennui, sommeil)", life) { life = it }
+                Toggle("🛡 Mode garde (journal, rondes, alertes)", s.watch) { vm.setWatch(it) }
+                OutlinedTextField(value = ntfy, onValueChange = { ntfy = it.trim() }, singleLine = true,
+                    label = { Text("Alertes sur ton téléphone : sujet ntfy") }, modifier = Modifier.fillMaxWidth())
+                Row {
+                    TextButton(onClick = { ntfy = "joey-" + java.util.UUID.randomUUID().toString().take(10) }) { Text("Inventer un sujet") }
+                    TextButton(onClick = { vm.setNtfy(ntfy) }) { Text("Tester l'alerte") }
+                }
+                Text("Installe l'app « ntfy » sur ton téléphone et abonne-toi à ce sujet.", fontSize = 12.sp, color = Color.Gray)
                 Toggle("Suivre mon visage", follow) { follow = it }
                 Text("Vitesse de la tête", fontSize = 14.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -322,7 +346,8 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
         },
         confirmButton = {
             TextButton(onClick = {
-                vm.saveSettings(key, robot, camera, front, invert, barge, subs, follow, speed)
+                if (ntfy != s.ntfyTopic) vm.setNtfy(ntfy)
+                vm.saveSettings(key, robot, camera, front, invert, barge, subs, follow, speed, wakeWord, life)
                 close()
             }) { Text("Enregistrer") }
         },

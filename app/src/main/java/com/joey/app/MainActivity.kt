@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
             } else {
                 add(Manifest.permission.ACCESS_FINE_LOCATION)
             }
+            if (Build.VERSION.SDK_INT < 29) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }.toTypedArray()
 
     private fun granted(p: String) = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
@@ -57,6 +58,7 @@ class MainActivity : ComponentActivity() {
             granted(Manifest.permission.BLUETOOTH_SCAN) else granted(Manifest.permission.ACCESS_FINE_LOCATION)
         if (bt) vm.connectGimbal() else vm.log("Permission Bluetooth refusée : la tête ne pourra pas bouger.")
         if (!granted(Manifest.permission.RECORD_AUDIO)) vm.log("Permission micro refusée : Joey ne t'entendra pas.")
+        vm.updateWake()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

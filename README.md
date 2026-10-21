@@ -35,6 +35,12 @@ une petite intelligence avec du caractère, qui commente, se souvient, et se dé
   demandent ; seules des empreintes (192 nombres) sont gardées, jamais de photo. Seuil 0,50 mesuré sur LFW.
 - **Mémoire** : souvenirs sur le téléphone, notés par Joey et extraits automatiquement des conversations.
 - **Vue casque Quest** : 🦒 → « Vue dans le casque », https://<téléphone>:8443, la tête suit la tienne.
+- **Mot de réveil « Joey »** (reconnaissance vocale du téléphone), fin de conversation seule après 45 s de silence.
+- **Recherche Google** (météo, actualités…) dans la conversation ; passage au modèle suivant si un quota est épuisé.
+- **Photographe** (compte à rebours sur le visage, galerie Images/Joey), **danse** sur le rythme entendu.
+- **Vie propre** : coup d'œil vers ce qui bouge, ennui, sommeil après 10 min, réveil.
+- **Mode garde** : journal avec photos, rondes du regard, personne inconnue / bêtise du chien (jugée par Gemini) ->
+  alerte sur le téléphone de Michael par [ntfy](https://ntfy.sh) ; page à distance (Tailscale) avec flèches et journal.
 - Clé Gemini : réglages ⚙ (ou `-PgeminiKey=...` à la compilation). Compiler : `./gradlew assembleDebug`.
 
 ## Documents

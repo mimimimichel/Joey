@@ -38,21 +38,29 @@ class HeadsetServer(
     private val onAudioClients: (Int) -> Unit = {},
     /** Tuile de carte (z, x, y) en JPEG, téléchargée par le téléphone (null si indisponible). */
     private val onTile: (Int, Int, Int) -> ByteArray? = { _, _, _ -> null },
+    /** Autres adresses (journal de garde…) : chemin -> (type, contenu), ou null. */
+    private val extra: (String) -> Pair<String, ByteArray>? = { null },
 ) {
     companion object {
         private const val TAG = "HeadsetStream"
         private const val BOUNDARY = "joeyframe"
 
         /** Adresses IPv4 du téléphone sur ses réseaux locaux (Wi-Fi, partage de connexion). */
+        /** Adresse Tailscale (100.64.0.0/10) : pour voir Joey depuis dehors. */
+        fun isTailscale(a: Inet4Address): Boolean {
+            val b = a.address
+            return (b[0].toInt() and 0xFF) == 100 && (b[1].toInt() and 0xC0) == 64
+        }
+
         fun localAddresses(): List<String> = runCatching {
             NetworkInterface.getNetworkInterfaces().toList()
                 .filter { it.isUp && !it.isLoopback }
-                // Pas les interfaces 4G/5G (rmnet, ccmni…) : seulement Wi-Fi et partage de connexion
-                .filter { nif -> listOf("rmnet", "ccmni", "pdp", "v4-", "dummy", "tun").none { nif.name.startsWith(it) } }
+                // Pas les interfaces 4G/5G (rmnet, ccmni…) : Wi-Fi, partage de connexion, et Tailscale (tun, 100.x)
+                .filter { nif -> listOf("rmnet", "ccmni", "pdp", "v4-", "dummy").none { nif.name.startsWith(it) } }
                 .sortedBy { if (it.name.startsWith("wlan")) 0 else 1 }
                 .flatMap { nif ->
                     nif.inetAddresses.toList().filterIsInstance<Inet4Address>()
-                        .filter { it.isSiteLocalAddress }
+                        .filter { a -> a.isSiteLocalAddress || isTailscale(a) }
                         .mapNotNull { it.hostAddress }
                 }
                 .distinct()
@@ -202,7 +210,10 @@ class HeadsetServer(
                 if (f == null) send(out, "text/plain", "pas d'image".toByteArray(), "404 Not Found")
                 else send(out, "image/jpeg", f)
             }
-            else -> send(out, "text/html; charset=utf-8", PAGE.toByteArray())
+            else -> {
+                val x = runCatching { extra(path) }.getOrNull()
+                if (x != null) send(out, x.first, x.second) else send(out, "text/html; charset=utf-8", PAGE.toByteArray())
+            }
         }
     }
 
@@ -341,12 +352,25 @@ class HeadsetServer(
   #vr{background:#66bb6a;font-weight:bold}
   #note{font-size:14px;color:#cfd8dc}
   #gl{display:none}
+  #pad{position:absolute;left:10px;top:10px;text-align:center}
+  #pad button{width:56px;height:56px;margin:3px;font-size:22px;background:rgba(79,195,247,.75)}
+  #journal{position:absolute;right:10px;top:10px;width:300px;max-height:60%;overflow:auto;background:rgba(0,0,0,.6);padding:8px;border-radius:10px;font-size:14px}
+  #journal img{width:100%;border-radius:6px;margin-top:4px}
+  .alert{color:#ff8a65}
 </style></head><body>
 <canvas id="view" width="1280" height="800"></canvas>
+<div id="pad">
+  <button data-d="haut">▲</button><br>
+  <button data-d="gauche">◀</button><button data-d="devant">●</button><button data-d="droite">▶</button><br>
+  <button data-d="bas">▼</button></div>
+<div id="journal"><b>🛡 Journal de garde</b><div id="ev"></div></div>
 <div id="btns">
   <button id="vr" style="display:none">🥽 Entrer en VR</button>
   <button id="talk">🎙 Parler à Joey</button>
   <button id="find">👀 Cherche-moi</button>
+  <button onclick="button('photo')">📸 Photo</button>
+  <button onclick="button('dance')">🕺 Danse</button>
+  <button onclick="button('watch')">🛡 Garde on/off</button>
   <button onclick="document.documentElement.requestFullscreen&&document.documentElement.requestFullscreen()">Plein écran</button>
   <span id="note"></span></div>
 <canvas id="gl"></canvas>
@@ -395,6 +419,16 @@ function button(b){fetch('/head?bt='+b,{cache:'no-store'}).catch(()=>{});}
 vrBtn.onclick=()=>{startVR();};
 document.getElementById('talk').onclick=()=>{startAudio();button('talk');};
 document.getElementById('find').onclick=()=>button('find_me');
+document.querySelectorAll('#pad button').forEach(b=>b.onclick=()=>button('look_'+b.dataset.d));
+async function journal(){
+  while(true){
+    try{const ev=await (await fetch('/events',{cache:'no-store'})).json();
+      document.getElementById('ev').innerHTML=ev.map(e=>'<div class="'+(e.alert?'alert':'')+'">'+new Date(e.time).toLocaleString('fr-FR')+
+        ' — '+e.text.replace(/</g,'&lt;')+(e.photo?'<br><img loading="lazy" src="/snap?id='+e.id+'">':'')+'</div><hr>').join('')||'(rien)';}catch(e){}
+    await new Promise(r=>setTimeout(r,15000));
+  }
+}
+journal();
 
 // ---- réalité virtuelle ----
 let recenter=true, lastHead=0;

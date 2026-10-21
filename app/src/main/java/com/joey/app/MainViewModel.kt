@@ -57,6 +57,11 @@ data class UiState(
     val bargeIn: Boolean = true,
     val subtitles: Boolean = true,
     val followFace: Boolean = true,
+    val wakeWord: Boolean = true,
+    /** Mode garde (journal + alertes), et sujet ntfy pour les alertes sur le téléphone de Michael. */
+    val watch: Boolean = false,
+    val ntfyTopic: String = "",
+    val idleLife: Boolean = true,
     /** Vitesse de la tête, en % de la vitesse max mesurée. */
     val headSpeed: Int = 100,
     val seesFace: Boolean = false,
@@ -70,6 +75,9 @@ data class UiState(
     /** Gens de la maison que Joey reconnaît, et qui il voit en ce moment. */
     val people: List<String> = emptyList(),
     val seeing: String? = null,
+    /** Compte à rebours de la photo affiché sur le visage (null : pas de photo), et flash. */
+    val countdown: Int? = null,
+    val flashAt: Long = 0L,
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -92,6 +100,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val memory = Memory(File(app.filesDir, "memoire.json"))
     private val people = com.joey.app.brain.People(File(app.filesDir, "personnes.json"))
     private val faceId = com.joey.app.senses.FaceId(app)
+    val watch = com.joey.app.remote.Watch(File(app.filesDir, "garde"), { prefs.getString("ntfy_topic", null) }, ::log)
     val camera = Camera()
     private val faces = FaceSense()
     private val objects = ObjectSense(app, ::log)
@@ -153,6 +162,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             bargeIn = flag("barge_in", true),
             subtitles = flag("subtitles", false),
             followFace = flag("follow_face", true),
+            wakeWord = flag("wake_word", true),
+            watch = flag("watch", false),
+            ntfyTopic = prefs.getString("ntfy_topic", "") ?: "",
+            idleLife = flag("idle_life", true),
             headSpeed = headSpeed,
             memories = memory.size,
             people = people.names(),
@@ -169,7 +182,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun message(text: String?) = _state.update { it.copy(message = text) }
 
     // ---- réglages ---------------------------------------------------------------------------
-    fun saveSettings(key: String, robotVoice: Boolean, camera: Boolean, front: Boolean, invertPan: Boolean, bargeIn: Boolean, subtitles: Boolean, followFace: Boolean, speed: Int) {
+    fun saveSettings(key: String, robotVoice: Boolean, camera: Boolean, front: Boolean, invertPan: Boolean, bargeIn: Boolean, subtitles: Boolean, followFace: Boolean, speed: Int,
+                     wakeWord: Boolean = flag("wake_word", true), idleLife: Boolean = flag("idle_life", true)) {
         val cameraChanged = camera != flag("camera", true) || front != flag("front_camera", true)
         geminiKey = key
         setFlag("robot_voice", robotVoice)
@@ -179,6 +193,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         setFlag("barge_in", bargeIn)
         setFlag("subtitles", subtitles)
         setFlag("follow_face", followFace)
+        setFlag("wake_word", wakeWord)
+        setFlag("idle_life", idleLife)
+        updateWake()
         prefs.edit().putInt("head_speed_pct", speed).apply()
         follower.enabled = followFace
         if (!followFace) gimbal.stick(0, 0)
@@ -235,6 +252,156 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         val sees = follower.sees
         if (sees != _state.value.seesFace) _state.update { it.copy(seesFace = sees) }
+        detectMotion(bmp)
+        if (flag("watch", false)) guard(bmp)
+    }
+
+    // ---- mode garde ------------------------------------------------------------------------------
+    @Volatile private var lastGuardAt = 0L
+    @Volatile private var lastMischiefCheck = 0L
+
+    fun setWatch(on: Boolean) {
+        setFlag("watch", on)
+        refreshSettings()
+        log(if (on) "🛡 Mode garde activé" else "🛡 Mode garde arrêté")
+        if (on) watch.record("garde", "Mode garde activé", null, alert = false, everyMs = 0)
+    }
+
+    fun setNtfy(topic: String) {
+        prefs.edit().putString("ntfy_topic", topic.trim()).apply()
+        refreshSettings()
+        if (topic.isNotBlank()) watch.notify("Joey est relié à ce téléphone : tu recevras ici ses alertes.", null)
+    }
+
+    private fun jpegNow(): ByteArray? = camera.zoomJpeg("tout")?.let { android.util.Base64.decode(it, android.util.Base64.NO_WRAP) }
+
+    /** Toutes les 1,5 s en mode garde : qui ou quoi est là ? Inconnu -> alerte ; chien -> Gemini juge s'il fait une bêtise. */
+    private fun guard(bmp: android.graphics.Bitmap) {
+        val now = System.currentTimeMillis()
+        if (now - lastGuardAt < 1500) return
+        lastGuardAt = now
+        val seen = objects.detect(bmp).filter { it.score >= 0.55 }
+        if (seen.any { it.label == "person" }) {
+            val who = seeing()
+            if (who != null) watch.record("vu_$who", "$who est là", jpegNow(), alert = false, everyMs = 30 * 60_000L)
+            else if (follower.sees || seen.any { it.label == "person" && it.box.h > 0.3 })
+                watch.record("inconnu", "Quelqu'un que je ne connais pas est là", jpegNow(), alert = true, everyMs = 10 * 60_000L)
+        }
+        val pet = seen.firstOrNull { it.label == "dog" || it.label == "cat" } ?: return
+        if (now - lastMischiefCheck < 3 * 60_000L) return
+        lastMischiefCheck = now
+        val animal = if (pet.label == "dog") "chien" else "chat"
+        val b64 = camera.zoomJpeg("tout") ?: return
+        thread(isDaemon = true) {
+            val answer = runCatching {
+                vision.ask(b64, "Le $animal fait-il une bêtise (sur le canapé, le lit ou la table, mâche un objet, fouille la " +
+                    "poubelle, fait ses besoins, renverse quelque chose) ? Commence ta réponse par OUI ou NON, puis décris en une phrase.")
+            }.getOrNull() ?: return@thread
+            val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+            val text = answer.removePrefix("OUI").removePrefix("NON").trimStart(' ', ',', '.', ':', '-')
+            if (answer.trim().uppercase().startsWith("OUI")) watch.record("betise", "Le $animal fait une bêtise : $text", bytes, alert = true, everyMs = 10 * 60_000L)
+            else watch.record(animal, "Le $animal est là : $text", bytes, alert = false, everyMs = 15 * 60_000L)
+        }
+    }
+
+    // ---- vie propre : il remarque ce qui bouge, s'ennuie, s'endort, se réveille ----------------------
+    private var prevGray: IntArray? = null
+    @Volatile private var motionX = 0f
+    @Volatile private var motionY = 0f
+    @Volatile private var motionAt = 0L
+    @Volatile private var lastHeadMoveAt = 0L
+    @Volatile private var lastLifeAt = System.currentTimeMillis()
+    @Volatile private var asleep = false
+
+    /** Mouvement dans l'image (tête immobile) : comparaison de deux vignettes 32 x 24 en gris. */
+    private fun detectMotion(bmp: android.graphics.Bitmap) {
+        val now = System.currentTimeMillis()
+        if (head.moving || _state.value.busy) { lastHeadMoveAt = now; prevGray = null; return }
+        if (now - lastHeadMoveAt < 800) { prevGray = null; return }
+        val small = android.graphics.Bitmap.createScaledBitmap(bmp, 32, 24, true)
+        val px = IntArray(32 * 24)
+        small.getPixels(px, 0, 32, 0, 0, 32, 24)
+        val gray = IntArray(px.size) { ((px[it] shr 16 and 0xFF) + (px[it] shr 8 and 0xFF) + (px[it] and 0xFF)) / 3 }
+        val prev = prevGray
+        prevGray = gray
+        if (prev == null) return
+        var n = 0; var sx = 0f; var sy = 0f
+        for (i in gray.indices) if (kotlin.math.abs(gray[i] - prev[i]) > 28) { n++; sx += i % 32; sy += i / 32 }
+        // Entre 2 % et 60 % de l'image change : quelque chose bouge (au-delà : lumière, ou la tête bouge).
+        if (n > gray.size * 0.02 && n < gray.size * 0.6) {
+            motionX = (sx / n) / 16f - 1f
+            motionY = (sy / n) / 12f - 1f
+            motionAt = now
+        }
+    }
+
+    private fun lifeLoop() {
+        var lastGlance = 0L
+        var nextBoredom = System.currentTimeMillis() + 90_000
+        while (true) {
+            Thread.sleep(300)
+            val now = System.currentTimeMillis()
+            val s = _state.value
+            // Conversation lancée par « Joey » : 45 s sans rien dire de part et d'autre -> il retourne à ses rêveries.
+            if (live != null && startedByWake && s.live == LiveState.LISTENING && !s.busy &&
+                now - lastTalkAt > 45_000 && headsetAudioClients == 0) {
+                log("💤 Fin de la conversation (silence) : dis « Joey » pour me rappeler")
+                stopLive()
+                continue
+            }
+            val active = live != null || s.busy || questFollowing || s.tracking != null
+            if (active || follower.sees) lastLifeAt = now
+            if (!flag("idle_life", true) || !gimbal.ready || !flag("camera", true)) continue
+            // Réveil : quelqu'un, du mouvement, ou une conversation.
+            if (asleep && (active || follower.sees || now - motionAt < 500)) {
+                asleep = false
+                lastLifeAt = now
+                log("😮 Je me réveille")
+                setMood(Mood.ETONNE)
+                moveAsync(holdMs = 500) { head.look(null, 0.0) }
+                continue
+            }
+            if (active || asleep) continue
+            // Endormissement : 10 min sans personne ni mouvement.
+            if (!flag("watch", false) && now - lastLifeAt > 10 * 60_000L && now - motionAt > 10 * 60_000L) {
+                asleep = true
+                log("😴 Je m'endors")
+                moodResetAt = 0
+                _state.update { it.copy(mood = Mood.DORT) }
+                moveAsync(holdMs = 0) { head.look(null, -25.0) }
+                continue
+            }
+            if (follower.sees) continue
+            // Curiosité : quelque chose bouge (sans visage) -> un coup d'œil de ce côté.
+            if (now - motionAt < 400 && now - lastGlance > 5000) {
+                lastGlance = now
+                lastLifeAt = now
+                val mx = motionX; val my = motionY
+                moveAsync(holdMs = 3000) {
+                    head.turnStick(mx * 30.0 * follower.panSign, -my * 20.0 * follower.tiltSign)
+                    "coup d'œil vers ce qui bouge"
+                }
+                continue
+            }
+            // Ennui : de temps en temps, il regarde ailleurs, puis revient.
+            val guarding = flag("watch", false)
+            if (now > nextBoredom && (guarding || now - lastLifeAt > 60_000)) {
+                // En garde : une ronde du regard toutes les ~1 min 30 ; sinon un coup d'œil toutes les 2-4 min.
+                nextBoredom = now + if (guarding) 90_000L else 120_000 + (Math.random() * 120_000).toLong()
+                if (guarding) {
+                    moveAsync(holdMs = 2000) { head.sweep(120.0) { }; "ronde du regard" }
+                    continue
+                }
+                val side = if (Math.random() < 0.5) -1 else 1
+                moveAsync(holdMs = 2000) {
+                    val p0 = head.pose()?.first ?: 0.0
+                    head.look(side * (30 + Math.random() * 50), 5.0)
+                    Thread.sleep(1500 + (Math.random() * 2000).toLong())
+                    head.look((head.pose()?.first ?: 0.0).let { p0 - it }, 0.0)
+                    "je m'ennuie un peu"
+                }
+            }
+        }
     }
 
     // ---- reconnaissance des gens de la maison (sur le téléphone) ------------------------------------
@@ -410,6 +577,65 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(busy = false) }
     }
 
+    // ---- danse : la tête suit les temps forts de la musique (micro de la conversation) ------------
+    @Volatile private var beats = 0
+    private val beatDetector = com.joey.app.audio.BeatDetector()
+
+    fun dance(seconds: Int) {
+        setMood(Mood.CONTENT)
+        live?.onMicPcm = { pcm, n -> beatDetector.feed(pcm, n) { beats++ } }
+        moveAsync(holdMs = 1500) {
+            head.setHomeHere()
+            val end = System.currentTimeMillis() + seconds * 1000L
+            var seen = beats
+            var step = 0
+            var lastMove = 0L
+            try {
+                while (System.currentTimeMillis() < end) {
+                    val now = System.currentTimeMillis()
+                    // Un temps entendu, ou à défaut (pas de musique) un rythme de 110 BPM.
+                    val beat = beats != seen || now - lastMove > 545
+                    if (beat && now - lastMove > 250) {
+                        seen = beats
+                        lastMove = now
+                        step++
+                        val pan = if ((step / 2) % 2 == 0) 14.0 else -14.0 // balancement tous les 2 temps
+                        val tilt = if (step % 2 == 0) 8.0 else -6.0          // hochement à chaque temps
+                        head.aim(pan, tilt)
+                    } else {
+                        head.aim(if ((step / 2) % 2 == 0) 14.0 else -14.0, if (step % 2 == 0) 8.0 else -6.0)
+                    }
+                    Thread.sleep(40)
+                }
+                head.aim(0.0, 0.0)
+                Thread.sleep(800)
+            } finally {
+                live?.onMicPcm = null
+            }
+            "danse finie"
+        }
+    }
+
+    fun danceUi() = dance(20)
+
+    /** Photo avec compte à rebours sur l'écran (bloquant). */
+    fun takePhotoBlocking(countdown: Int): String {
+        log("📸 Photo dans $countdown s")
+        for (i in countdown downTo 1) {
+            _state.update { it.copy(countdown = i) }
+            Thread.sleep(1000)
+        }
+        _state.update { it.copy(countdown = null, flashAt = System.currentTimeMillis()) }
+        val done = java.util.concurrent.CountDownLatch(1)
+        var r = "photo ratée"
+        camera.takePhoto { msg -> r = msg; done.countDown() }
+        done.await(8, TimeUnit.SECONDS)
+        log("📸 $r")
+        return r
+    }
+
+    fun photoUi() = thread(isDaemon = true) { takePhotoBlocking(3) }
+
     /** Apprentissage d'un visage : la tête reste en suivi du visage (pas de mouvement demandé). */
     private fun <T> busyLearn(body: () -> T): T {
         _state.update { it.copy(busy = true) }
@@ -477,11 +703,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun sweep() = background("balayage") { head.sweep { } }
 
     // ---- conversation -----------------------------------------------------------------------
+    // ---- mot de réveil « Joey » ------------------------------------------------------------------
+    @Volatile private var startedByWake = false
+    @Volatile private var lastTalkAt = 0L
+    private val wake: com.joey.app.audio.WakeWord = com.joey.app.audio.WakeWord(app,
+        onWake = { heard ->
+            log("👂 « $heard » : je t'écoute")
+            if (live == null && geminiKey.isNotBlank()) {
+                startedByWake = true
+                thread(isDaemon = true) { Thread.sleep(350); startLive() } // le temps de rendre le micro
+            }
+        },
+        log = ::log)
+
+    /** Le mot de réveil écoute quand il n'y a pas de conversation (et que c'est activé). */
+    fun updateWake() {
+        val mic = androidx.core.content.ContextCompat.checkSelfPermission(getApplication(), android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (flag("wake_word", true) && live == null && mic && geminiKey.isNotBlank()) wake.start() else wake.stop()
+    }
+
     fun micPressed() {
         if (live != null) {
             stopLive()
             return
         }
+        startedByWake = false
         if (geminiKey.isBlank()) {
             message("Ajoute d'abord ta clé Gemini dans les réglages (⚙).")
             return
@@ -490,6 +737,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun startLive() {
+        wake.stop()
+        lastTalkAt = System.currentTimeMillis()
         greeted = false
         val robot = flag("robot_voice", true)
         val l = GeminiLive(
@@ -517,6 +766,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         live?.stop()
         live = null
         extractMemories()
+        thread(isDaemon = true) { Thread.sleep(500); updateWake() }
         head.stop()
         _state.update { it.copy(live = LiveState.OFF, mood = Mood.NEUTRE) }
     }
@@ -527,13 +777,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             greeted = true
             val who = seeing()
             who?.let { greetedAt[it] = System.currentTimeMillis() }
-            live?.event("La conversation commence (la personne vient d'appuyer sur ton bouton). " +
+            live?.event((if (startedByWake) "On vient de t'appeler par ton nom (« Joey »). Réponds présent, brièvement. "
+                else "La conversation commence (la personne vient d'appuyer sur ton bouton). ") +
                 (if (who != null) "Tu reconnais $who (reconnaissance du visage). " else "") +
                 "Salue en une phrase courte, à ta façon.", reply = true)
         }
+        if (s == LiveState.SPEAKING) lastTalkAt = System.currentTimeMillis()
         if (s == LiveState.OFF) {
             live = null
             extractMemories()
+            updateWake()
         }
     }
 
@@ -602,6 +855,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun onTranscript(person: Boolean, text: String) {
+        lastTalkAt = System.currentTimeMillis()
         if (person) maybeSearchSpeaker()
         val joey = !person
         _state.update { st ->
@@ -748,6 +1002,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val r = runCatching { vision.ask(jpeg, q) }.getOrElse { "vision indisponible : ${it.message}" }
                 mapOf("reponse" to r)
             }
+            "prendre_photo" -> {
+                if (!flag("camera", true)) return mapOf("result" to "ta caméra est coupée")
+                val n = ((args["decompte"] as? Number)?.toInt() ?: 3).coerceIn(0, 10)
+                mapOf("result" to takePhotoBlocking(n))
+            }
+            "danser" -> {
+                if (!gimbal.ready) return mapOf("result" to noHead)
+                val secs = ((args["secondes"] as? Number)?.toInt() ?: 20).coerceIn(5, 120)
+                dance(secs)
+                mapOf("result" to "tu danses ${secs} s (la tête suit le rythme entendu ; sans musique : rythme à toi)")
+            }
+            "mode_garde" -> {
+                val on = args["actif"] != false
+                setWatch(on)
+                mapOf("result" to if (on) "mode garde activé : tu notes qui passe, tu surveilles les animaux, et tu alertes " +
+                    "Michael sur son téléphone si besoin" else "mode garde arrêté")
+            }
+            "journal_de_garde" -> {
+                val ev = watch.recent(15)
+                val fmt = SimpleDateFormat("EEE d HH:mm", Locale.FRENCH)
+                mapOf("journal" to if (ev.isEmpty()) "rien de noté" else ev.joinToString("\n") { fmt.format(Date(it.time)) + " — " + it.text })
+            }
             "se_souvenir" -> {
                 val q = args["sujet"] as? String ?: ""
                 val hits = memory.search(q)
@@ -823,6 +1099,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         sensors.start()
         head.setPhoneSigns(prefs.getInt("phone_pan_sign", 0), prefs.getInt("phone_tilt_sign", 0))
         thread(name = "visee-casque", isDaemon = true) { aimLoop() }
+        thread(name = "vie", isDaemon = true) { lifeLoop() }
         prefs.getString("speed_table", null)?.let { t ->
             runCatching {
                 head.setTable(t.split(",").map { it.split(":").let { (a, b) -> a.toInt() to b.toDouble() } })
@@ -856,6 +1133,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             tls = headsetTls(),
             onMic = { pcm -> live?.feedMic(pcm) },
             onAudioClients = ::headsetAudio,
+            extra = { path ->
+                when {
+                    path.startsWith("/events") -> "application/json; charset=utf-8" to watch.json().toByteArray()
+                    path.startsWith("/snap") -> path.substringAfter("id=", "").toLongOrNull()?.let { watch.photo(it) }?.let { "image/jpeg" to it }
+                    else -> null
+                }
+            },
         )
         if (!h.start()) {
             message("Impossible de lancer la vue casque (port 8080 occupé ?).")
@@ -896,6 +1180,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun questButton(b: String) {
+        when {
+            b.startsWith("look_") -> {
+                val d = b.removePrefix("look_")
+                questFollowing = false
+                moveAsync(holdMs = 6000) { head.lookDirection(d, if (d == "haut" || d == "bas") 20.0 else 30.0) }
+                return
+            }
+            b == "photo" -> { thread(isDaemon = true) { takePhotoBlocking(3) }; return }
+            b == "dance" -> { if (gimbal.ready) dance(20); return }
+            b == "watch" -> { setWatch(!flag("watch", false)); return }
+        }
         when (b) {
             "talk" -> if (live == null && geminiKey.isNotBlank()) startLive()
             "find_me" -> {
@@ -951,6 +1246,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        wake.stop()
         headset?.stop()
         sensors.stop()
         stopLive()

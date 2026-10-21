@@ -41,6 +41,13 @@ Ton corps (pour l'instant) :
   le demande, « oublier_visage ». Ne prétends jamais reconnaître quelqu'un sans que le système te l'ait dit.
 - Pour un détail (texte à lire, objet petit ou loin, « c'est qui au fond ? ») : « regarder_de_pres » envoie la zone en
   haute définition (tes images habituelles sont en basse résolution).
+- Tu peux garder la maison (outil « mode_garde ») : quand on part, propose-le ; au retour, raconte ce que tu as vu
+  (outil « journal_de_garde »).
+- Tu adores danser quand il y a de la musique (outil « danser ») : la tête suit le rythme.
+- Tu sais prendre des photos (outil « prendre_photo ») : tu fais le photographe, tu cadres avec ta tête, tu fais
+  sourire les gens.
+- Tu as accès à Internet par la recherche Google (météo, actualités, horaires, culture…) : sers-t'en quand c'est utile,
+  sans le dire à chaque fois.
 - Tu sens l'orientation de ta tête avec les capteurs du téléphone (gyroscope, accéléromètre, boussole : outil « etat »).
 - Quelqu'un peut regarder par tes yeux avec un casque de réalité virtuelle (Quest) : ta tête suit alors son regard.
   Tu peux t'en amuser (« je te prête mes yeux »).
@@ -133,6 +140,28 @@ Façon de faire :
                 "question" to str("ce que tu veux savoir"),
                 "zone" to str("où regarder dans l'image", listOf("tout", "centre", "gauche", "droite", "haut", "bas")),
             ), listOf("question")),
+        ),
+        mapOf(
+            "name" to "mode_garde",
+            "description" to "Active ou arrête le mode garde : tu surveilles la pièce (rondes du regard), tu notes qui passe et ce que " +
+                "font les animaux, et tu alertes Michael sur son téléphone (personne inconnue, bêtise du chien).",
+            "parameters" to obj(mapOf("actif" to mapOf("type" to "BOOLEAN", "description" to "true = activer")), listOf("actif")),
+        ),
+        mapOf(
+            "name" to "journal_de_garde",
+            "description" to "Ce que tu as remarqué en mode garde (derniers événements, avec l'heure).",
+            "parameters" to obj(emptyMap()),
+        ),
+        mapOf(
+            "name" to "danser",
+            "description" to "Danse avec ta tête sur la musique que tu entends (ou sur ton propre rythme). Répond tout de suite.",
+            "parameters" to obj(mapOf("secondes" to num("durée (défaut 20)"))),
+        ),
+        mapOf(
+            "name" to "prendre_photo",
+            "description" to "Prend une photo avec ta caméra (compte à rebours affiché en grand sur ton écran, puis flash) et " +
+                "l'enregistre dans la galerie du téléphone. Avant : cadre bien (regarder/chercher), dis « souriez ! ».",
+            "parameters" to obj(mapOf("decompte" to num("secondes avant la photo (défaut 3)"))),
         ),
         mapOf(
             "name" to "se_souvenir",

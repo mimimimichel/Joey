@@ -29,7 +29,7 @@ class FakeGimbal(var pan: Double = -131.0, var tiltRaw: Double = -179.9) : Gimba
 class HeadTest {
     private fun setup(): Pair<FakeGimbal, Head> {
         val g = FakeGimbal()
-        val h = Head(g, sleep = { g.advance(it) }, now = { g.t })
+        val h = Head(g, maxStick = { 700 }, sleep = { g.advance(it) }, now = { g.t })
         return g to h
     }
 
@@ -66,7 +66,7 @@ class HeadTest {
 
     @Test fun tiltUpIsClamped() {
         val (_, h) = setup()
-        h.look(null, 90.0, timeoutMs = 10_000)
+        h.look(null, 130.0, timeoutMs = 10_000)
         assertTrue(abs(h.pose()!!.second - Head.TILT_MAX) < 4)
     }
 
@@ -87,6 +87,39 @@ class HeadTest {
         h.sweep { stops += it }
         assertEquals(listOf("à gauche", "devant", "à droite"), stops)
         assertTrue(abs(h.pose()!!.first) < 5)
+    }
+
+    @Test fun lookBehind() {
+        val (g, h) = setup()
+        val start = g.pan
+        h.lookDirection("derriere", null)
+        assertTrue("pan ${g.pan}", abs(abs(Head.wrap(g.pan - start)) - 179) < 5)
+    }
+
+    @Test fun fallsBackWhenGimbalIgnoresBigValues() {
+        // Nacelle qui ne bouge pas au-delà de 314
+        val f = FakeGimbal()
+        val picky = object : GimbalLink {
+            override val ready = true
+            override val angles get() = f.angles
+            override val anglesAt get() = f.anglesAt
+            override fun stick(pan: Int, tilt: Int) = f.stick(if (abs(pan) > 314) 0 else pan, if (abs(tilt) > 314) 0 else tilt)
+            override fun recenter() {}
+        }
+        val logs = mutableListOf<String>()
+        val h = Head(picky, maxStick = { 1000 }, onLog = { logs += it }, sleep = { f.advance(it) }, now = { f.t })
+        val start = f.pan
+        h.look(60.0, null)
+        assertEquals(314, h.stickCap)
+        assertTrue("pan ${f.pan}", abs(Head.wrap(f.pan - start) - 60) < 4)
+        assertTrue(logs.any { it.contains("314") })
+    }
+
+    @Test fun fastWithHighStick() {
+        val (g, h) = setup()
+        val t0 = g.t
+        h.look(90.0, null)
+        assertTrue("durée ${g.t - t0} ms", g.t - t0 < 2500) // ~110°/s dans la fausse nacelle à 700
     }
 
     @Test fun blindWhenNoAngles() {

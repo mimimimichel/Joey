@@ -20,6 +20,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import org.json.JSONArray
 import java.io.File
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -45,6 +49,7 @@ data class UiState(
     val bargeIn: Boolean = true,
     val subtitles: Boolean = true,
     val followFace: Boolean = true,
+    val headSpeed: Int = 700,
     val seesFace: Boolean = false,
     val memories: Int = 0,
 )
@@ -72,7 +77,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         onLog = ::log,
         onBattery = { b -> _state.update { it.copy(battery = b) } },
     )
-    val head = Head(gimbal, rightSign = { if (flag("invert_pan", false)) -1 else 1 })
+    private val headSpeed get() = prefs.getInt("head_speed", 700)
+    val head = Head(gimbal, rightSign = { if (flag("invert_pan", false)) -1 else 1 }, maxStick = { headSpeed }, onLog = ::log)
     val follower = FaceFollower(
         gimbal,
         initialPanSign = prefs.getInt("follow_pan_sign", 1),
@@ -81,6 +87,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         onSignsChanged = { p, t -> prefs.edit().putInt("follow_pan_sign", p).putInt("follow_tilt_sign", t).apply() },
         onConfirmed = { prefs.edit().putBoolean("follow_confirmed", true).apply() },
         onLog = ::log,
+        maxStick = { minOf(headSpeed, head.stickCap) },
     )
 
     @Volatile private var live: GeminiLive? = null
@@ -98,6 +105,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             bargeIn = flag("barge_in", true),
             subtitles = flag("subtitles", true),
             followFace = flag("follow_face", true),
+            headSpeed = headSpeed,
             memories = memory.size,
         )
     }
@@ -111,7 +119,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun message(text: String?) = _state.update { it.copy(message = text) }
 
     // ---- réglages ---------------------------------------------------------------------------
-    fun saveSettings(key: String, robotVoice: Boolean, camera: Boolean, front: Boolean, invertPan: Boolean, bargeIn: Boolean, subtitles: Boolean, followFace: Boolean) {
+    fun saveSettings(key: String, robotVoice: Boolean, camera: Boolean, front: Boolean, invertPan: Boolean, bargeIn: Boolean, subtitles: Boolean, followFace: Boolean, speed: Int) {
         val cameraChanged = camera != flag("camera", true) || front != flag("front_camera", true)
         geminiKey = key
         setFlag("robot_voice", robotVoice)
@@ -121,6 +129,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         setFlag("barge_in", bargeIn)
         setFlag("subtitles", subtitles)
         setFlag("follow_face", followFace)
+        prefs.edit().putInt("head_speed", speed).apply()
         follower.enabled = followFace
         if (!followFace) gimbal.stick(0, 0)
         refreshSettings()
@@ -159,9 +168,58 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         gimbal.stick((x * 320 * sign).toInt(), (y * 320).toInt())
     }
 
-    private fun background(name: String, body: () -> String) = thread(name = name, isDaemon = true) {
-        val r = runCatching { busy(holdMs = 4000, body = body) }.getOrElse { "échec : ${it.message}" }
-        log("Tête : $r")
+    private fun background(name: String, body: () -> String) = moveAsync(holdMs = 4000) { body() }
+
+    // ---- mouvements de tête : un seul à la fois, le dernier demandé annule le précédent ----------------
+    private val motion = Executors.newSingleThreadExecutor()
+    @Volatile private var motionJob: Future<*>? = null
+    private val motionGen = AtomicInteger()
+
+    private fun startMotion(): Int {
+        motionJob?.cancel(true)
+        follower.pause(120_000)
+        _state.update { it.copy(busy = true) }
+        return motionGen.incrementAndGet()
+    }
+
+    private fun endMotion(gen: Int, holdMs: Long) {
+        if (gen != motionGen.get()) return // un mouvement plus récent a pris la main
+        follower.pausedUntil = System.currentTimeMillis() + holdMs
+        _state.update { it.copy(busy = false) }
+    }
+
+    /** Mouvement en arrière-plan : l'outil répond tout de suite, Joey parle pendant que la tête bouge. */
+    private fun moveAsync(holdMs: Long, body: () -> String) {
+        val gen = startMotion()
+        motionJob = motion.submit {
+            val r = try {
+                body()
+            } catch (e: InterruptedException) {
+                "interrompu"
+            } catch (e: Exception) {
+                "échec : ${e.message}"
+            } finally {
+                gimbal.stick(0, 0)
+                endMotion(gen, holdMs)
+            }
+            log("Tête : $r")
+        }
+    }
+
+    /** Mouvement dont Joey a besoin du résultat (voir ce qu'il y a là-bas) : on attend, mais vite. */
+    private fun moveSync(holdMs: Long, body: () -> String): String {
+        val gen = startMotion()
+        val job = motion.submit<String> {
+            try { body() } catch (e: InterruptedException) { "interrompu" } finally { gimbal.stick(0, 0) }
+        }
+        motionJob = job
+        return try {
+            job.get(15, TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            "interrompu"
+        } finally {
+            endMotion(gen, holdMs)
+        }
     }
 
     fun recenter() = background("centrer") { head.center() }
@@ -247,14 +305,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val deg = (args["degres"] as? Number)?.toDouble()
                 log("👀 regarder $dir${deg?.let { " ${it.toInt()}°" } ?: ""}")
                 // Il garde ce regard quelques secondes avant de revenir te suivre.
-                val r = busy(holdMs = if (dir == "devant") 1000 else 7000) { head.lookDirection(dir, deg) }
+                val r = moveSync(holdMs = if (dir == "devant") 1000 else 7000) { head.lookDirection(dir, deg) }
                 live?.sendFrameNow()
                 mapOf("result" to r)
             }
             "regarder_autour" -> {
                 if (!gimbal.ready) return mapOf("result" to noHead)
                 log("👀 regarder autour")
-                val r = busy(holdMs = 3000) { head.sweep { live?.sendFrameNow() } }
+                val r = moveSync(holdMs = 3000) { head.sweep { live?.sendFrameNow() } }
                 mapOf("result" to r)
             }
             "exprimer" -> {
@@ -270,14 +328,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 setMood(mood)
                 val geste = args["geste"] as? String ?: "aucun"
-                val r = if (geste != "aucun" && gimbal.ready) busy {
-                    when (geste) {
-                        "oui" -> head.nod()
-                        "non" -> head.shake()
-                        "hesiter" -> head.hesitate()
-                        else -> ""
+                // Le geste se fait pendant qu'il parle : réponse immédiate.
+                val r = if (geste != "aucun" && gimbal.ready) {
+                    moveAsync(holdMs = 1500) {
+                        when (geste) {
+                            "oui" -> head.nod()
+                            "non" -> head.shake()
+                            "hesiter" -> head.hesitate()
+                            else -> ""
+                        }
                     }
-                } else if (geste != "aucun") "expression affichée ; geste impossible ($noHead)" else "expression affichée"
+                    "fait"
+                } else if (geste != "aucun") "expression affichée ; geste impossible ($noHead)" else "fait"
                 mapOf("result" to r)
             }
             "retenir" -> {
@@ -303,18 +365,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Mouvement demandé (par Joey ou à la main) : le suivi du visage se met en pause pendant, et [holdMs] après. */
-    private fun <T> busy(holdMs: Long = 2000, body: () -> T): T {
-        follower.pause(120_000)
-        _state.update { it.copy(busy = true) }
-        try {
-            return body()
-        } finally {
-            follower.pausedUntil = System.currentTimeMillis() + holdMs
-            _state.update { it.copy(busy = false) }
-        }
-    }
-
     private fun setMood(m: Mood) {
         _state.update { it.copy(mood = m) }
         val at = System.currentTimeMillis() + 9000
@@ -330,7 +380,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun voiceLevel(): Float = live?.level ?: 0f
 
     fun faceActivity(s: UiState): Activity = when {
-        s.busy -> Activity.REFLECHIT
         s.live == LiveState.SPEAKING -> Activity.PARLE
         s.live == LiveState.LISTENING -> Activity.ECOUTE
         s.live == LiveState.CONNECTING -> Activity.REFLECHIT

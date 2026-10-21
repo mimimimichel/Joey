@@ -260,6 +260,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
     var barge by remember { mutableStateOf(s.bargeIn) }
     var subs by remember { mutableStateOf(s.subtitles) }
     var follow by remember { mutableStateOf(s.followFace) }
+    var speed by remember { mutableStateOf(s.headSpeed) }
     var confirmForget by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = close,
@@ -277,6 +278,13 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Joey voit (caméra)", camera) { camera = it }
                 Toggle("Caméra avant (côté écran)", front) { front = it }
                 Toggle("Suivre mon visage", follow) { follow = it }
+                Text("Vitesse de la tête", fontSize = 14.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf(314 to "Douce", 500 to "Vive", 700 to "Rapide", 1000 to "Max").forEach { (v, label) ->
+                        if (speed == v) Button(onClick = {}) { Text(label, fontSize = 12.sp) }
+                        else TextButton(onClick = { speed = v }) { Text(label, fontSize = 12.sp) }
+                    }
+                }
                 Toggle("Inverser gauche / droite de la tête", invert) { invert = it }
                 Toggle("Pouvoir lui couper la parole", barge) { barge = it }
                 Toggle("Sous-titres", subs) { subs = it }
@@ -286,7 +294,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
         },
         confirmButton = {
             TextButton(onClick = {
-                vm.saveSettings(key, robot, camera, front, invert, barge, subs, follow)
+                vm.saveSettings(key, robot, camera, front, invert, barge, subs, follow, speed)
                 close()
             }) { Text("Enregistrer") }
         },

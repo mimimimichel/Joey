@@ -12,7 +12,7 @@ class JoeyPromptTest {
         val names = (0 until a.length()).map { a.getJSONObject(it).getString("name") }
         assertEquals(listOf("regarder", "regarder_autour", "exprimer", "retenir", "etat"), names)
         val dir = a.getJSONObject(0).getJSONObject("parameters").getJSONObject("properties").getJSONObject("direction")
-        assertEquals(5, dir.getJSONArray("enum").length())
+        assertEquals(6, dir.getJSONArray("enum").length())
     }
 
     @Test fun memoryRoundTrip() {

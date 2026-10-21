@@ -22,6 +22,8 @@ class FaceFollower(
     private val onSignsChanged: (pan: Int, tilt: Int) -> Unit = { _, _ -> },
     private val onConfirmed: () -> Unit = {},
     private val onLog: (String) -> Unit = {},
+    /** Vitesse max du joystick (réglage). */
+    private val maxStick: () -> Int = { 600 },
 ) {
     @Volatile var enabled = true
     @Volatile var panSign = initialPanSign
@@ -56,8 +58,10 @@ class FaceFollower(
      */
     private fun speed(e: Float, sure: Boolean): Int {
         val m = abs(e)
-        if (m < 0.08f) return 0
-        return (sign(e) * min(if (sure) 300f else 210f, 135f + 260f * m)).toInt()
+        if (m < 0.06f) return 0
+        val max = if (sure) maxStick().toFloat() else minOf(maxStick(), 260).toFloat()
+        // Visage au bord de l'image (|e| ≈ 0,6 et plus) : à fond.
+        return (sign(e) * min(max, 130f + (max - 130f) * m / 0.6f)).toInt()
     }
 
     fun onFace(x: Float?, y: Float?) {
@@ -93,15 +97,16 @@ class FaceFollower(
      * sens n'est pas confirmé ; ensuite il faut une preuve plus nette (la personne peut bouger elle aussi).
      */
     private inner class Axis(val name: String, @Volatile var confirmed: Boolean) {
+        private var started = false
         private var startAt = 0L
         private var startErr = 0f
 
-        fun reset() { startAt = 0L }
+        fun reset() { started = false }
 
         /** true s'il faut inverser le sens. */
         fun check(err: Float, pushing: Boolean, t: Long): Boolean {
-            if (!pushing) { startAt = 0L; return false }
-            if (startAt == 0L || sign(err) != sign(startErr)) { startAt = t; startErr = err; return false }
+            if (!pushing) { started = false; return false }
+            if (!started || sign(err) != sign(startErr)) { started = true; startAt = t; startErr = err; return false }
             if (t - startAt < (if (confirmed) 700 else 300)) return false
             val grew = abs(err) - abs(startErr)
             val wrong = grew > (if (confirmed) 0.2f else 0.07f)

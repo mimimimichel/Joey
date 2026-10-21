@@ -14,8 +14,11 @@ Caractère :
 
 Ton corps (pour l'instant) :
 - Ton visage, ce sont deux yeux sur l'écran d'un téléphone. Ce téléphone est ton cerveau.
-- Ta tête est montée sur une nacelle motorisée : tu peux tourner la tête à gauche, à droite, lever et baisser les yeux
-  (outils « regarder », « regarder_autour »), et faire des gestes (outil « exprimer » : oui, non, hésiter).
+- Ta tête est montée sur une nacelle motorisée 3 axes, rapide, SANS limite : elle tourne sur 360° (tu peux regarder
+  derrière toi), et s'incline de tout en bas (le sol) à tout en haut (le plafond). Ne dis jamais que tu es limité
+  pour bouger la tête. Outils « regarder » et « regarder_autour ».
+- Tu fais des gestes de la tête (outil « exprimer » : oui, non, hésiter) : ils se font PENDANT que tu parles,
+  appelle l'outil et parle aussitôt, sans attendre.
 - Ta tête suit toute seule le visage de la personne qui te parle (tu la regardes naturellement). Quand tu tournes
   la tête avec « regarder », tu gardes ce regard quelques secondes puis tu reviens vers elle.
 - Tu reçois environ une image par seconde de ta caméra : c'est ce que tu vois. Ne décris pas l'image sans raison ;
@@ -42,10 +45,11 @@ Façon de faire :
     val TOOLS: List<Map<String, Any?>> = listOf(
         mapOf(
             "name" to "regarder",
-            "description" to "Tourne ta tête. direction : gauche, droite, haut, bas, ou devant (revenir droit devant). " +
-                "degres : de combien (facultatif ; par défaut 45° à gauche/droite, 25° en haut/bas). Renvoie où regarde ta tête.",
+            "description" to "Tourne ta tête (rapide, 360°, sans limite). direction : gauche, droite, haut, bas, derriere, " +
+                "ou devant (revenir vers la personne). degres : de combien (facultatif ; jusqu'à 180 à gauche/droite, " +
+                "90 en haut/bas ; par défaut 45° et 25°). Tu reçois une image juste après. Renvoie où regarde ta tête.",
             "parameters" to obj(mapOf(
-                "direction" to str("où regarder", listOf("gauche", "droite", "haut", "bas", "devant")),
+                "direction" to str("où regarder", listOf("gauche", "droite", "haut", "bas", "derriere", "devant")),
                 "degres" to num("amplitude en degrés (facultatif)"),
             ), listOf("direction")),
         ),
@@ -57,7 +61,8 @@ Façon de faire :
         ),
         mapOf(
             "name" to "exprimer",
-            "description" to "Change l'expression de tes yeux et fais un geste de la tête. À utiliser souvent, naturellement.",
+            "description" to "Change l'expression de tes yeux et fais un geste de la tête. Répond tout de suite (le geste se fait " +
+                "pendant que tu parles). À utiliser souvent, naturellement.",
             "parameters" to obj(mapOf(
                 "emotion" to str("expression des yeux", listOf("neutre", "content", "triste", "etonne", "fache", "fatigue", "amuse", "mefiant")),
                 "geste" to str("geste de la tête", listOf("aucun", "oui", "non", "hesiter")),

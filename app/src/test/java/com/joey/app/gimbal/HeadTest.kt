@@ -7,7 +7,12 @@ import kotlin.math.abs
 import kotlin.math.sign
 
 /** Fausse nacelle : vitesse proportionnelle au joystick au-delà d'une zone morte (comme la vraie, en gros). */
-class FakeGimbal(var pan: Double = -131.0, var tiltRaw: Double = -179.9) : GimbalLink {
+class FakeGimbal(
+    var pan: Double = -131.0,
+    var tiltRaw: Double = -179.9,
+    /** Vitesse réelle (°/s) pour une valeur du joystick (pan) ; par défaut linéaire, ~39°/s à 314. */
+    val panRate: (Int) -> Double = { c -> if (abs(c) < 100) 0.0 else (abs(c) - 100) / 220.0 * 40 },
+) : GimbalLink {
     var t = 0L
     var p = 0
     var tl = 0
@@ -20,7 +25,7 @@ class FakeGimbal(var pan: Double = -131.0, var tiltRaw: Double = -179.9) : Gimba
     private fun rate(cmd: Int, max: Double) = if (abs(cmd) < 100) 0.0 else sign(cmd.toDouble()) * (abs(cmd) - 100) / 220.0 * max
     fun advance(ms: Long) {
         val dt = ms / 1000.0
-        pan = Head.wrap(pan + rate(p, 40.0) * dt)
+        pan = Head.wrap(pan + sign(p.toDouble()) * panRate(p) * dt)
         tiltRaw = Head.wrap(tiltRaw + rate(tl, 22.0) * dt)
         t += ms
     }
@@ -29,7 +34,7 @@ class FakeGimbal(var pan: Double = -131.0, var tiltRaw: Double = -179.9) : Gimba
 class HeadTest {
     private fun setup(): Pair<FakeGimbal, Head> {
         val g = FakeGimbal()
-        val h = Head(g, maxStick = { 700 }, sleep = { g.advance(it) }, now = { g.t })
+        val h = Head(g, sleep = { g.advance(it) }, now = { g.t })
         return g to h
     }
 
@@ -91,7 +96,7 @@ class HeadTest {
 
     @Test fun frontCameraUpIsGimbalDown() {
         val g = FakeGimbal()
-        val h = Head(g, tiltSign = { -1 }, maxStick = { 700 }, sleep = { g.advance(it) }, now = { g.t })
+        val h = Head(g, tiltSign = { -1 }, sleep = { g.advance(it) }, now = { g.t })
         h.lookDirection("haut", 30.0)
         // Pour la nacelle (caméra arrière), c'est vers le bas ; pour Joey (caméra avant), vers le haut.
         assertTrue("nacelle ${h.tiltOf(g.angles)}", abs(h.tiltOf(g.angles) + 30) < 4)
@@ -136,7 +141,8 @@ class HeadTest {
             override fun recenter() {}
         }
         val logs = mutableListOf<String>()
-        val h = Head(picky, maxStick = { 1000 }, onLog = { logs += it }, sleep = { f.advance(it) }, now = { f.t })
+        val h = Head(picky, onLog = { logs += it }, sleep = { f.advance(it) }, now = { f.t })
+        h.setTable(listOf(314 to 40.0, 1000 to 160.0)) // table fausse : on croit que 1000 va plus vite
         val start = f.pan
         h.look(60.0, null)
         assertEquals(314, h.stickCap)
@@ -144,11 +150,50 @@ class HeadTest {
         assertTrue(logs.any { it.contains("314") })
     }
 
-    @Test fun fastWithHighStick() {
+    @Test fun calibrationPicksTheFastest() {
         val (g, h) = setup()
+        val r = h.calibrate()
+        assertEquals(r, 1000, h.bestStick)
+        assertTrue("vitesse ${h.bestSpeed}", abs(h.bestSpeed - 163.6) < 10)
         val t0 = g.t
+        val start = g.pan
         h.look(90.0, null)
-        assertTrue("durée ${g.t - t0} ms", g.t - t0 < 2500) // ~110°/s dans la fausse nacelle à 700
+        assertTrue("pan ${g.pan}", abs(Head.wrap(g.pan - start) - 90) < 4)
+        assertTrue("durée ${g.t - t0} ms", g.t - t0 < 1800)
+    }
+
+    @Test fun calibrationAvoidsValuesThatAreSlower() {
+        // Nacelle qui sature à 600 et ralentit au-delà
+        val g = FakeGimbal(panRate = { c -> val a = abs(c); if (a < 100) 0.0 else if (a <= 600) (a - 100) / 5.0 else 60.0 })
+        val h = Head(g, sleep = { g.advance(it) }, now = { g.t })
+        h.calibrate()
+        assertEquals(600, h.bestStick)
+    }
+
+    @Test fun slowGimbalStillReaches90() {
+        // Nacelle lente (20°/s au mieux) : l'ancien délai fixe coupait le mouvement en route.
+        val g = FakeGimbal(panRate = { c -> if (abs(c) < 100) 0.0 else minOf(20.0, (abs(c) - 100) / 10.0) })
+        val h = Head(g, sleep = { g.advance(it) }, now = { g.t })
+        h.calibrate()
+        val start = g.pan
+        h.lookDirection("droite", 90.0)
+        assertTrue("pan ${g.pan}", abs(Head.wrap(g.pan - start) - 90) < 4)
+    }
+
+    @Test fun spinSearchGoesAllTheWayAround() {
+        val (g, h) = setup()
+        h.calibrate()
+        val target = Head.wrap(g.pan - 160.0) // presque derrière, de l'autre côté du sens de départ
+        val found = h.spinSearch({ abs(Head.wrap(g.pan - target)) < 15 })
+        assertTrue(found)
+    }
+
+    @Test fun spinSearchTriesLowerToo() {
+        val (g, h) = setup()
+        h.calibrate()
+        var low = false
+        val found = h.spinSearch({ if (h.pose()!!.second < -20) low = true; low && abs(Head.wrap(g.pan)) < 20 })
+        assertTrue(found)
     }
 
     @Test fun blindWhenNoAngles() {

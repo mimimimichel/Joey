@@ -19,8 +19,8 @@ class Head(
     private val rightSign: () -> Int = { 1 },
     /** -1 quand Joey regarde avec la caméra avant (côté écran) : haut et bas sont inversés pour la nacelle. */
     private val tiltSign: () -> Int = { 1 },
-    /** Valeur maximale du joystick envoyée (vitesse max de la tête). La capture montre ±314 au manche ; on va au-delà. */
-    private val maxStick: () -> Int = { 600 },
+    /** Part de la vitesse max mesurée à utiliser (réglage « vitesse de la tête », 0..1). */
+    private val speedFraction: () -> Double = { 1.0 },
     private val onLog: (String) -> Unit = {},
     private val sleep: (Long) -> Unit = { Thread.sleep(it) },
     private val now: () -> Long = { System.currentTimeMillis() },
@@ -52,6 +52,52 @@ class Head(
     @Volatile var stickCap = Int.MAX_VALUE
         private set
 
+    /**
+     * Vitesse réelle (°/s) pour chaque valeur du joystick, mesurée par [calibrate]. Par défaut : ce qu'on a vu dans
+     * la capture (314 -> ~40°/s), en attendant la mesure.
+     */
+    @Volatile var table: List<Pair<Int, Double>> = listOf(0 to 0.0, 120 to 2.0, 314 to 40.0)
+        private set
+
+    fun setTable(t: List<Pair<Int, Double>>) {
+        if (t.size >= 2) table = (listOf(0 to 0.0) + t.filter { it.first > 0 }).sortedBy { it.first }
+    }
+
+    /** La valeur du joystick la plus rapide (au-delà, la nacelle n'accélère plus, voire ralentit). */
+    val bestStick: Int get() = table.maxByOrNull { it.second }?.first?.takeIf { it > 0 } ?: 314
+    val bestSpeed: Double get() = table.maxOfOrNull { it.second }?.coerceAtLeast(5.0) ?: 40.0
+
+    /** Valeur du joystick pour tourner à [degPerSec] (interpolée dans la table mesurée). */
+    fun stickFor(degPerSec: Double): Int {
+        val up = table.filter { it.first <= bestStick }.sortedBy { it.first }
+        if (degPerSec >= bestSpeed) return bestStick
+        for (i in 1 until up.size) {
+            val (s0, v0) = up[i - 1]
+            val (s1, v1) = up[i]
+            if (degPerSec <= v1 && v1 > v0) return (s0 + (s1 - s0) * (degPerSec - v0) / (v1 - v0)).toInt().coerceAtLeast(120)
+        }
+        return bestStick
+    }
+
+    /** Vitesse réelle (°/s) pour une valeur du joystick. */
+    fun speedOf(stick: Int): Double {
+        val t = table.sortedBy { it.first }
+        val a = abs(stick)
+        for (i in 1 until t.size) {
+            val (s0, v0) = t[i - 1]
+            val (s1, v1) = t[i]
+            if (a <= s1) return v0 + (v1 - v0) * (a - s0) / (s1 - s0).coerceAtLeast(1)
+        }
+        return t.last().second
+    }
+
+    /** Joystick max à utiliser, selon le réglage de vitesse. */
+    fun maxStickNow(): Int = min(stickCap, stickFor(bestSpeed * speedFraction().coerceIn(0.2, 1.0)))
+
+    /** Temps qu'il faut laisser pour tourner de [deg] degrés (avec de la marge). */
+    private fun timeFor(deg: Double, stick: Int): Long =
+        (1500 + 1000 * 1.8 * abs(deg) / speedOf(stick).coerceAtLeast(5.0)).toLong().coerceAtMost(20_000)
+
     private fun fresh(): SpgProtocol.Angles? = link.angles?.takeIf { now() - link.anglesAt < 1500 }
     /** Inclinaison pour la nacelle (caméra arrière) : elle donne ±180 quand la tête est droite. */
     fun tiltOf(a: SpgProtocol.Angles) = wrap(a.tilt - 180.0)
@@ -82,13 +128,13 @@ class Head(
     }
 
     /**
-     * Vitesse joystick pour un écart donné : à fond tant qu'on est loin, on freine dans les ~25 derniers degrés.
-     * Sous ~110 la SPG ne bouge presque pas.
+     * Vitesse joystick pour un écart donné : à fond tant qu'on est loin, on freine sur la distance parcourue en ~0,3 s
+     * à pleine vitesse (au moins 12°). Sous ~110 la SPG ne bouge presque pas.
      */
     private fun speed(err: Double, max: Int): Int {
         val m = abs(err)
-        val gain = (max - 120.0) / 25.0
-        val s = min(max.toDouble(), 120.0 + gain * m).toInt()
+        val brake = maxOf(12.0, speedOf(max) * 0.3)
+        val s = min(max.toDouble(), 120.0 + (max - 120.0) * m / brake).toInt()
         return (sign(err) * s).toInt()
     }
 
@@ -96,13 +142,15 @@ class Head(
      * Tourne de [panRight] degrés vers la droite (négatif = gauche) et/ou incline à [tilt] degrés (absolu, + = haut).
      * null = axe inchangé. Renvoie un résumé.
      */
-    fun look(panRight: Double?, tilt: Double?, maxSpeed: Int = maxStick(), timeoutMs: Long = 6000): String {
+    fun look(panRight: Double?, tilt: Double?, maxSpeed: Int = maxStickNow(), timeoutMs: Long? = null): String {
         cancelled = false
         if (!link.ready) return "nacelle non connectée"
         val start = fresh()
         if (start == null) return blindLook(panRight, tilt, maxSpeed)
         if (homePan == null) homePan = start.pan
         val speedMax = min(maxSpeed, stickCap)
+        val tiltDelta = tilt?.let { abs(it - viewTilt(start)) } ?: 0.0
+        val limit = timeoutMs ?: timeFor(maxOf(abs(panRight ?: 0.0), tiltDelta), speedMax)
         val panTarget = panRight?.let { start.pan + it * rightSign() }
         val tiltTarget = tilt?.coerceIn(TILT_MIN, TILT_MAX)
         moving = true
@@ -114,7 +162,7 @@ class Head(
         var prev: SpgProtocol.Angles? = null
         var prevAt = 0L
         try {
-            while (!cancelled && now() - t0 < timeoutMs) {
+            while (!cancelled && now() - t0 < limit) {
                 val a = fresh() ?: break
                 // Vitesse réelle mesurée (pour régler la vitesse max) :
                 if (prev != null && link.anglesAt > prevAt) {
@@ -133,7 +181,7 @@ class Head(
                     abs(wrap(a.pan - start.pan)) < 1.0 && abs(a.tilt - start.tilt) < 1.0) {
                     stickCap = 314
                     onLog("La nacelle ne réagit pas au-delà de 314 : vitesse max ramenée à 314.")
-                    return look(panRight, tilt, 314, timeoutMs)
+                    return look(panRight, tilt, 314)
                 }
                 sleep(50)
             }
@@ -178,7 +226,7 @@ class Head(
             "droite" -> look(degrees ?: 45.0, null)
             "haut" -> look(null, (p?.second ?: 0.0) + (degrees ?: 25.0))
             "bas" -> look(null, (p?.second ?: 0.0) - (degrees ?: 25.0))
-            "derriere" -> look(Head.wrap(180.0 - curPan).let { if (abs(it) > 179) 179.0 else it }, null, timeoutMs = 8000)
+            "derriere" -> look(Head.wrap(180.0 - curPan).let { if (abs(it) > 179) 179.0 else it }, null)
             "devant" -> if (homePan == null) center() else look(-curPan, 0.0)
             else -> "direction inconnue : $direction"
         }
@@ -188,11 +236,91 @@ class Head(
      * Cherche quelqu'un du regard : d'abord là où il regarde, puis tout autour (360°), un peu en haut puis à hauteur.
      * [seenSince] : un visage a-t-il été vu depuis cette heure ? Renvoie true dès qu'un visage est trouvé.
      */
-    fun searchTarget(seenSince: (Long) -> Boolean): Boolean =
-        scan(listOf(0.0, -45.0, 45.0, -90.0, 90.0, -135.0, 135.0, 179.0), listOf(25.0, 0.0)) { t ->
-            sleep(350) // le temps que la caméra voie
-            seenSince(t)
+    fun searchTarget(seenSince: (Long) -> Boolean): Boolean {
+        val t0 = now()
+        return spinSearch({ seenSince(t0) })
+    }
+
+    /**
+     * Fait un tour complet (360°) en tournant en continu pendant que la caméra analyse les images, d'abord à hauteur
+     * des yeux, puis plus bas (sol, tables). S'arrête dès que [found] dit oui ; la suite (centrer) est au suivi.
+     */
+    fun spinSearch(found: () -> Boolean, tilts: List<Double> = listOf(5.0, -30.0), degPerSec: Double = 60.0): Boolean {
+        cancelled = false
+        sleep(300) // une image ou deux là où il regarde déjà
+        if (found()) return true
+        if (fresh() == null) return false
+        val stick = stickFor(min(degPerSec, bestSpeed * 0.9))
+        val limit = timeFor(360.0, stick) + 2000
+        var dir = 1
+        for (tilt in tilts) {
+            if (cancelled) return false
+            look(null, tilt)
+            if (found()) return true
+            var last = fresh()?.pan ?: return false
+            var turned = 0.0
+            val t0 = now()
+            moving = true
+            gazeX = dir.toFloat()
+            try {
+                while (!cancelled && turned < 365 && now() - t0 < limit) {
+                    link.stick(stick * dir, 0)
+                    sleep(50)
+                    val p = fresh()?.pan ?: continue
+                    turned += abs(wrap(p - last))
+                    last = p
+                    if (found()) {
+                        link.stick(0, 0)
+                        onLog("Trouvé après %.0f° de tour (incliné à %.0f°).".format(turned, tilt))
+                        return true
+                    }
+                }
+            } finally {
+                link.stick(0, 0)
+                moving = false
+            }
+            onLog("Tour de %.0f° à %.0f° d'inclinaison : rien.".format(turned, tilt))
+            dir = -dir
         }
+        return false
+    }
+
+    /**
+     * Mesure la vitesse réelle de la tête pour plusieurs valeurs du joystick (gauche, droite, en alternance : la tête
+     * revient à peu près au même endroit). Prend ~8 s. Renvoie le résumé ; la table sert ensuite à tout.
+     */
+    fun calibrate(): String {
+        cancelled = false
+        if (fresh() == null) return "pas d'angles de la nacelle : mesure impossible"
+        val res = ArrayList<Pair<Int, Double>>()
+        var dir = 1
+        moving = true
+        try {
+            for (v in listOf(200, 314, 450, 600, 800, 1000)) {
+                if (cancelled) break
+                link.stick(v * dir, 0)
+                sleep(350) // le temps d'accélérer
+                val p1 = fresh() ?: break
+                val t1 = link.anglesAt
+                sleep(700)
+                val p2 = fresh() ?: break
+                val t2 = link.anglesAt
+                link.stick(0, 0)
+                sleep(300)
+                val dt = ((t2 - t1) / 1000.0).coerceAtLeast(0.2)
+                res += v to abs(wrap(p2.pan - p1.pan)) / dt
+                dir = -dir
+            }
+        } finally {
+            link.stick(0, 0)
+            moving = false
+        }
+        if (res.size < 2) return "mesure interrompue"
+        setTable(res)
+        stickCap = Int.MAX_VALUE
+        return "vitesses mesurées : " + res.joinToString(", ") { "%d → %.0f°/s".format(it.first, it.second) } +
+            " ; je garde %d (%.0f°/s)".format(bestStick, bestSpeed)
+    }
 
     /**
      * Fait le tour du regard : d'abord sans bouger, puis chaque direction de [pans] (par rapport à « devant ») pour
@@ -205,7 +333,7 @@ class Head(
             for (target in pans) {
                 if (cancelled) return false
                 val cur = pose()?.first ?: 0.0
-                look(wrap(target - cur), tilt, timeoutMs = 3000)
+                look(wrap(target - cur), tilt)
                 if (probe(now())) {
                     onLog("Trouvé en regardant à %.0f°, incliné à %.0f°.".format(target, tilt))
                     return true
@@ -220,7 +348,7 @@ class Head(
      * l'image, avec les sens appris par le suivi (image -> joystick).
      */
     fun turnStick(panStickDeg: Double, tiltStickDeg: Double): String =
-        look(panStickDeg * rightSign(), (pose()?.second ?: 0.0) + tiltStickDeg * tiltSign(), timeoutMs = 3000)
+        look(panStickDeg * rightSign(), (pose()?.second ?: 0.0) + tiltStickDeg * tiltSign())
 
     /** Hoche la tête (oui). */
     fun nod(): String {
@@ -245,14 +373,14 @@ class Head(
 
     /** Petite hésitation : penche d'un côté puis revient. */
     fun hesitate(): String {
-        look(-15.0, null, maxSpeed = minOf(maxStick(), 300), timeoutMs = 1200)
+        look(-15.0, null, timeoutMs = 1200)
         sleep(300)
-        look(15.0, null, maxSpeed = minOf(maxStick(), 300), timeoutMs = 1200)
+        look(15.0, null, timeoutMs = 1200)
         return "hésitation"
     }
 
     /** Balaye la pièce : gauche, devant, droite, puis devant. [atStop] est appelé à chaque arrêt (pour envoyer une image). */
-    fun sweep(amplitude: Double = 70.0, atStop: (String) -> Unit): String {
+    fun sweep(amplitude: Double = 90.0, atStop: (String) -> Unit): String {
         val stops = listOf("à gauche" to -amplitude, "devant" to 0.0, "à droite" to amplitude)
         for ((name, target) in stops) {
             if (cancelled) break

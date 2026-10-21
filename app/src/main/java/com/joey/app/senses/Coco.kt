@@ -67,6 +67,29 @@ object CocoClasses {
         listOf("lit") to setOf("bed", "couch"),
         listOf("ours") to setOf("bear", "dog"),
         listOf("train") to setOf("train"),
+        listOf("pizza", "part de pizza", "morceau de pizza") to setOf("pizza"),
+        listOf("banane") to setOf("banana"),
+        listOf("pomme") to setOf("apple", "orange"),
+        listOf("orange", "mandarine", "clementine") to setOf("orange", "apple"),
+        listOf("sandwich", "burger", "hamburger") to setOf("sandwich", "hot dog"),
+        listOf("hot dog", "hot-dog") to setOf("hot dog", "sandwich"),
+        listOf("gateau", "tarte", "dessert") to setOf("cake", "donut"),
+        listOf("donut", "beignet") to setOf("donut", "cake"),
+        listOf("brocoli") to setOf("broccoli"),
+        listOf("carotte") to setOf("carrot"),
+        listOf("bol", "saladier") to setOf("bowl", "cup"),
+        listOf("couteau") to setOf("knife", "fork", "spoon"),
+        listOf("fourchette") to setOf("fork", "knife", "spoon"),
+        listOf("cuillere") to setOf("spoon", "fork", "knife"),
+        listOf("clavier") to setOf("keyboard", "laptop"),
+        listOf("souris") to setOf("mouse"),
+        listOf("micro-ondes", "micro onde") to setOf("microwave", "oven"),
+        listOf("four") to setOf("oven", "microwave"),
+        listOf("evier") to setOf("sink"),
+        listOf("toilettes", "wc") to setOf("toilet"),
+        listOf("cravate") to setOf("tie"),
+        listOf("seche-cheveux") to setOf("hair drier"),
+        listOf("brosse a dents") to setOf("toothbrush"),
     )
 
     val ALL: Set<String> = GROUPS.flatMap { it.second }.toSet()
@@ -81,6 +104,13 @@ object CocoClasses {
         "vase" to "vase", "teddy bear" to "peluche", "cell phone" to "téléphone", "remote" to "télécommande", "laptop" to "ordinateur",
         "tv" to "écran", "keyboard" to "clavier", "book" to "livre", "clock" to "horloge", "skateboard" to "skate",
         "surfboard" to "planche de surf", "tennis racket" to "raquette", "scissors" to "ciseaux", "refrigerator" to "frigo", "bed" to "lit",
+        "pizza" to "pizza", "banana" to "banane", "apple" to "pomme", "orange" to "orange", "sandwich" to "sandwich",
+        "hot dog" to "hot-dog", "cake" to "gâteau", "donut" to "beignet", "broccoli" to "brocoli", "carrot" to "carotte",
+        "knife" to "couteau", "fork" to "fourchette", "spoon" to "cuillère", "mouse" to "souris", "microwave" to "micro-ondes",
+        "oven" to "four", "sink" to "évier", "toilet" to "toilettes", "tie" to "cravate", "hair drier" to "sèche-cheveux",
+        "toothbrush" to "brosse à dents", "traffic light" to "feu", "fire hydrant" to "bouche d'incendie", "stop sign" to "panneau stop",
+        "parking meter" to "parcmètre", "elephant" to "éléphant", "zebra" to "zèbre", "giraffe" to "girafe", "skis" to "skis",
+        "snowboard" to "snowboard", "baseball bat" to "batte", "baseball glove" to "gant", "toaster" to "grille-pain",
     )
 
     /** Nom français d'une catégorie du détecteur (pour l'affichage). */

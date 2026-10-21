@@ -209,6 +209,7 @@ private fun HeadPanel(vm: MainViewModel, s: com.joey.app.UiState, pose: String, 
                 FilledTonalButton(onClick = vm::shake) { Text("Non") }
             }
             FilledTonalButton(onClick = vm::sweep, modifier = Modifier.fillMaxWidth()) { Text("Regarder autour") }
+            FilledTonalButton(onClick = vm::calibrateHead, modifier = Modifier.fillMaxWidth()) { Text("Mesurer la vitesse de la tête") }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Journal", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
                 TextButton(onClick = { clipboard.setText(AnnotatedString(s.log.joinToString("\n"))) }) { Text("Copier") }
@@ -281,7 +282,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Suivre mon visage", follow) { follow = it }
                 Text("Vitesse de la tête", fontSize = 14.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    listOf(314 to "Douce", 500 to "Vive", 700 to "Rapide", 1000 to "Max").forEach { (v, label) ->
+                    listOf(35 to "Douce", 60 to "Vive", 85 to "Rapide", 100 to "Max").forEach { (v, label) ->
                         if (speed == v) Button(onClick = {}) { Text(label, fontSize = 12.sp) }
                         else TextButton(onClick = { speed = v }) { Text(label, fontSize = 12.sp) }
                     }

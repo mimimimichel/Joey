@@ -55,7 +55,8 @@ data class UiState(
     val bargeIn: Boolean = true,
     val subtitles: Boolean = true,
     val followFace: Boolean = true,
-    val headSpeed: Int = 700,
+    /** Vitesse de la tête, en % de la vitesse max mesurée. */
+    val headSpeed: Int = 100,
     val seesFace: Boolean = false,
     /** Ce qu'il cherche ou suit du regard en ce moment (null : les visages). */
     val tracking: String? = null,
@@ -85,20 +86,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var trackUntil = 0L
     @Volatile private var trackName = ""
 
-    val gimbal = SpgGimbal(
+    val gimbal: SpgGimbal = SpgGimbal(
         context = app,
         savedAddress = { prefs.getString("gimbal_address", null) },
         saveAddress = { prefs.edit().putString("gimbal_address", it).apply() },
-        onState = { s -> _state.update { it.copy(gimbal = s) } },
+        onState = { s ->
+            _state.update { it.copy(gimbal = s) }
+            // Première connexion : Joey « s'étire » pour mesurer la vitesse réelle de sa tête.
+            if (s == GimbalState.READY && prefs.getString("speed_table", null) == null) {
+                thread(isDaemon = true) { Thread.sleep(1500); calibrateHead() }
+            }
+        },
         onLog = ::log,
         onBattery = { b -> _state.update { it.copy(battery = b) } },
     )
-    private val headSpeed get() = prefs.getInt("head_speed", 700)
+    private val headSpeed get() = prefs.getInt("head_speed_pct", 100)
     /** Joey regarde avec la caméra avant (côté écran) : pour la nacelle, haut et bas sont inversés. */
     private val viewTiltSign get() = if (flag("camera", true) && flag("front_camera", true)) -1 else 1
-    val head = Head(gimbal, rightSign = { if (flag("invert_pan", false)) -1 else 1 }, tiltSign = { viewTiltSign },
-        maxStick = { headSpeed }, onLog = ::log)
-    val follower = FaceFollower(
+    val head: Head = Head(gimbal, rightSign = { if (flag("invert_pan", false)) -1 else 1 }, tiltSign = { viewTiltSign },
+        speedFraction = { headSpeed / 100.0 }, onLog = ::log)
+    val follower: FaceFollower = FaceFollower(
         gimbal,
         initialPanSign = prefs.getInt("follow_pan_sign", 1),
         initialTiltSign = prefs.getInt("follow_tilt_sign", 1),
@@ -106,7 +113,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         onSignsChanged = { p, t -> prefs.edit().putInt("follow_pan_sign", p).putInt("follow_tilt_sign", t).apply() },
         onConfirmed = { prefs.edit().putBoolean("follow_confirmed", true).apply() },
         onLog = ::log,
-        maxStick = { minOf(headSpeed, head.stickCap) },
+        maxStick = { head.maxStickNow() },
     )
 
     @Volatile private var live: GeminiLive? = null
@@ -148,7 +155,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         setFlag("barge_in", bargeIn)
         setFlag("subtitles", subtitles)
         setFlag("follow_face", followFace)
-        prefs.edit().putInt("head_speed", speed).apply()
+        prefs.edit().putInt("head_speed_pct", speed).apply()
         follower.enabled = followFace
         if (!followFace) gimbal.stick(0, 0)
         refreshSettings()
@@ -254,11 +261,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun manualStick(x: Float, y: Float) {
         val sign = if (flag("invert_pan", false)) -1 else 1
         if (x != 0f || y != 0f) follower.pause(4000)
-        val speed = minOf(headSpeed, head.stickCap)
+        val speed = head.maxStickNow()
         gimbal.stick((x * speed * sign).toInt(), (y * speed * viewTiltSign).toInt())
     }
 
-    private fun background(name: String, body: () -> String) = moveAsync(holdMs = 4000) { body() }
+    private fun background(name: String, body: () -> String): Unit = moveAsync(holdMs = 4000) { body() }
 
     // ---- mouvements de tête : un seul à la fois, le dernier demandé annule le précédent ----------------
     private val motion = Executors.newSingleThreadExecutor()
@@ -310,6 +317,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } finally {
             endMotion(gen, holdMs)
         }
+    }
+
+    /** Mesure la vitesse réelle de la tête et la retient. */
+    fun calibrateHead(): Unit = moveAsync(holdMs = 1000) {
+        log("Je mesure la vitesse de ma tête…")
+        val r = head.calibrate()
+        prefs.edit().putString("speed_table", head.table.filter { it.first > 0 }.joinToString(",") { "${it.first}:${it.second}" }).apply()
+        r
     }
 
     fun recenter() = background("centrer") { head.center() }
@@ -545,6 +560,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // Doit rester en dernier (juste avant onCleared) : tout ce qui est au-dessus est prêt (sinon plantage au lancement).
     init {
+        prefs.getString("speed_table", null)?.let { t ->
+            runCatching {
+                head.setTable(t.split(",").map { it.split(":").let { (a, b) -> a.toInt() to b.toDouble() } })
+            }
+        }
         refreshSettings()
         CrashReport.mark("viewmodel prêt")
     }

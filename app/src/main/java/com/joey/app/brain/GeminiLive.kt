@@ -65,6 +65,7 @@ class GeminiLive(
         // Même liste que Vr2 : si un modèle refuse la connexion, on essaie le suivant.
         val MODELS = listOf("gemini-3.8-live", "gemini-3.1-flash-live-preview", "gemini-2.5-flash-native-audio-latest")
         private const val IN_RATE = 16_000
+        private const val FRAME_EVERY_MS = 2000L
         private const val OUT_RATE = 24_000
 
         fun toMap(o: JSONObject): Map<String, Any?> = o.keys().asSequence().associateWith { k -> unwrap(o.opt(k)) }
@@ -265,13 +266,18 @@ class GeminiLive(
     private fun setupMessage(): JSONObject {
         val setup = JSONObject()
             .put("model", "models/${MODELS[modelIndex]}")
-            .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO")))
+            // Images en basse résolution (~4 fois moins de jetons) : la conversation reste rapide plus longtemps.
+            .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
+                .put("mediaResolution", "MEDIA_RESOLUTION_LOW"))
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
             .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", tools)))
             .put("inputAudioTranscription", JSONObject())
             .put("outputAudioTranscription", JSONObject())
             // Sans ça, audio + vidéo = 2 minutes de conversation au maximum.
-            .put("contextWindowCompression", JSONObject().put("slidingWindow", JSONObject()))
+            // Le plus vieux de la conversation est résumé tôt (dès ~25 000 jetons) : sinon chaque réponse devient de
+            // plus en plus lente à mesure que les images et le son s'accumulent (10 s d'attente au bout d'une minute).
+            .put("contextWindowCompression", JSONObject().put("triggerTokens", 25_000)
+                .put("slidingWindow", JSONObject().put("targetTokens", 12_000)))
             .put("sessionResumption", JSONObject().apply { handle?.let { put("handle", it) } })
         return JSONObject().put("setup", setup)
     }
@@ -368,14 +374,14 @@ class GeminiLive(
 
     private fun frameLoop() {
         while (active) {
-            // Au plus une image par seconde, en comptant celles envoyées après un déplacement.
-            val wait = 1000 - (System.currentTimeMillis() - lastFrameAt)
+            // Une image toutes les 2 s (plus, juste après un mouvement de tête : sendFrameNow).
+            val wait = FRAME_EVERY_MS - (System.currentTimeMillis() - lastFrameAt)
             if (wait > 0) {
                 Thread.sleep(wait)
                 continue
             }
             if (setupDone) sendFrameNow() else Thread.sleep(200)
-            if (System.currentTimeMillis() - lastFrameAt >= 1000) Thread.sleep(200) // pas d'image : on réessaie bientôt
+            if (System.currentTimeMillis() - lastFrameAt >= FRAME_EVERY_MS) Thread.sleep(200) // pas d'image : on réessaie bientôt
         }
     }
 

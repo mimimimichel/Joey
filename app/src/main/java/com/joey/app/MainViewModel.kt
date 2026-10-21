@@ -146,7 +146,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             frontCamera = flag("front_camera", true),
             invertPan = flag("invert_pan", false),
             bargeIn = flag("barge_in", true),
-            subtitles = flag("subtitles", true),
+            subtitles = flag("subtitles", false),
             followFace = flag("follow_face", true),
             headSpeed = headSpeed,
             memories = memory.size,
@@ -198,22 +198,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Chaque image (~10/s) : on cherche la cible du moment (visage, ou objet) et la tête la suit. */
+    // Une cible n'est crue qu'après 2 images de suite (une fausse détection d'une image ne fait pas bouger la tête).
+    private var targetStreak = 0
+    private var faceStreak = 0
+
     private fun onFrame(bmp: android.graphics.Bitmap) {
         val labels = trackLabels
         if (labels != null && System.currentTimeMillis() < trackUntil) {
-            val best = objects.detect(bmp).filter { it.label in labels }
+            val best = objects.detect(bmp).filter { it.label in labels && it.score >= (if (it.label == "person") 0.55 else 0.5) }
                 .maxByOrNull { it.score * kotlin.math.sqrt(it.box.w * it.box.h) }
+            targetStreak = if (best != null) targetStreak + 1 else 0
+            val sure = best?.takeIf { targetStreak >= 2 }
             // Une personne : on vise le haut de la silhouette (la tête), pour que le visage apparaisse.
-            val y = best?.let { if (it.label == "person") it.box.cy - it.box.h * 0.3 else it.box.cy }
-            follower.onFace(best?.let { (it.box.cx * 2 - 1).toFloat() }, y?.let { (it * 2 - 1).toFloat() })
+            val y = sure?.let { if (it.label == "person") it.box.cy - it.box.h * 0.3 else it.box.cy }
+            follower.onFace(sure?.let { (it.box.cx * 2 - 1).toFloat() }, y?.let { (it * 2 - 1).toFloat() })
         } else {
             if (labels != null) {
                 trackLabels = null
                 follower.forget()
                 _state.update { it.copy(tracking = null) }
             }
-            val f = faces.find(bmp)
-            follower.onFace(f?.x, f?.y)
+            val f = faces.find(bmp)?.takeIf { it.size >= 0.05f }
+            faceStreak = if (f != null) faceStreak + 1 else 0
+            val sure = f?.takeIf { faceStreak >= 2 }
+            follower.onFace(sure?.x, sure?.y)
         }
         val sees = follower.sees
         if (sees != _state.value.seesFace) _state.update { it.copy(seesFace = sees) }
@@ -424,7 +432,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun maybeSearchSpeaker() {
         val now = System.currentTimeMillis()
         if (!gimbal.ready || !follower.enabled || !flag("camera", true) || follower.sees) return
-        if (_state.value.busy || now - follower.seenAt < 3000 || now - lastAutoSearch < 20_000) return
+        // On ne cherche que si personne n'est vu depuis un moment (sinon la tête bouge « toute seule » sans raison).
+        if (_state.value.busy || now - follower.seenAt < 8000 || now - lastAutoSearch < 30_000) return
         lastAutoSearch = now
         log("👀 on me parle, je cherche qui")
         moveAsync(holdMs = 0) {
@@ -475,9 +484,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         found.set(searchLocal(what, labels, keepMs = if (person) 2500 else 15_000))
                         if (found.get()) "trouvé : $what" else "pas trouvé : $what"
                     }
+                    // Vérification : une fois la tête centrée, on regarde à nouveau (une fausse détection ne compte pas).
+                    var confirmed = false
+                    if (found.get()) {
+                        Thread.sleep(900)
+                        val now = seenNow()
+                        confirmed = now.any { it.label in labels && it.score >= 0.5 } || (person && follower.sees)
+                        if (!confirmed) log("🔎 fausse alerte : plus de « $what » une fois la tête tournée")
+                    }
                     live?.sendFrameNow()
-                    if (found.get()) mapOf("result" to "trouvé ! ta tête est tournée vers « $what » et le suit des yeux" +
+                    if (confirmed) mapOf("result" to "trouvé (vérifié) : ta tête est tournée vers « $what » et le suit des yeux" +
                         (if (person) " (puis suit son visage)" else " pendant 15 s") + ". Regarde l'image pour en dire plus.",
+                        "vu_maintenant" to objects.describe(seenNow()))
+                    else if (found.get()) mapOf("result" to "fausse alerte : j'ai cru voir « $what » en tournant, mais une fois la " +
+                        "tête tournée il n'y est pas. Dis-le honnêtement (« j'ai cru… ») et propose de chercher encore.",
                         "vu_maintenant" to objects.describe(seenNow()))
                     else mapOf("result" to "pas de « $what » en faisant le tour (360°, deux hauteurs). Peut-être caché, trop loin, " +
                         "ou dans le noir.")

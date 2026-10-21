@@ -23,6 +23,7 @@ import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -78,7 +79,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         onBattery = { b -> _state.update { it.copy(battery = b) } },
     )
     private val headSpeed get() = prefs.getInt("head_speed", 700)
-    val head = Head(gimbal, rightSign = { if (flag("invert_pan", false)) -1 else 1 }, maxStick = { headSpeed }, onLog = ::log)
+    /** Joey regarde avec la caméra avant (côté écran) : pour la nacelle, haut et bas sont inversés. */
+    private val viewTiltSign get() = if (flag("camera", true) && flag("front_camera", true)) -1 else 1
+    val head = Head(gimbal, rightSign = { if (flag("invert_pan", false)) -1 else 1 }, tiltSign = { viewTiltSign },
+        maxStick = { headSpeed }, onLog = ::log)
     val follower = FaceFollower(
         gimbal,
         initialPanSign = prefs.getInt("follow_pan_sign", 1),
@@ -165,7 +169,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun manualStick(x: Float, y: Float) {
         val sign = if (flag("invert_pan", false)) -1 else 1
         if (x != 0f || y != 0f) follower.pause(4000)
-        gimbal.stick((x * 320 * sign).toInt(), (y * 320).toInt())
+        val speed = minOf(headSpeed, head.stickCap)
+        gimbal.stick((x * speed * sign).toInt(), (y * speed * viewTiltSign).toInt())
     }
 
     private fun background(name: String, body: () -> String) = moveAsync(holdMs = 4000) { body() }
@@ -280,7 +285,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     @Volatile private var lastSpeaker: Boolean? = null
+    @Volatile private var lastAutoSearch = 0L
+
+    /** On lui parle et il ne voit personne : il cherche du regard, tout seul (au plus toutes les 20 s). */
+    private fun maybeSearchSpeaker() {
+        val now = System.currentTimeMillis()
+        if (!gimbal.ready || !follower.enabled || !flag("camera", true) || follower.sees) return
+        if (_state.value.busy || now - follower.seenAt < 3000 || now - lastAutoSearch < 20_000) return
+        lastAutoSearch = now
+        log("👀 on me parle, je cherche qui")
+        moveAsync(holdMs = 0) {
+            val found = head.searchPerson(follower::seenSince)
+            if (found) follower.pausedUntil = 0
+            if (found) "trouvé" else "personne en vue"
+        }
+    }
+
     private fun onTranscript(person: Boolean, text: String) {
+        if (person) maybeSearchSpeaker()
         val joey = !person
         _state.update { st ->
             val lines = st.lines.toMutableList()
@@ -307,7 +329,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // Il garde ce regard quelques secondes avant de revenir te suivre.
                 val r = moveSync(holdMs = if (dir == "devant") 1000 else 7000) { head.lookDirection(dir, deg) }
                 live?.sendFrameNow()
-                mapOf("result" to r)
+                mapOf("result" to r, "visage_dans_l_image" to follower.sees)
+            }
+            "chercher_personne" -> {
+                if (!gimbal.ready) return mapOf("result" to noHead)
+                log("👀 je te cherche")
+                val found = AtomicBoolean(false)
+                val r = moveSync(holdMs = 0) {
+                    found.set(head.searchPerson(follower::seenSince))
+                    if (found.get()) "trouvé" else "personne trouvé"
+                }
+                // Trouvé : le suivi du visage prend la main tout de suite et le centre.
+                if (found.get()) follower.pausedUntil = 0
+                live?.sendFrameNow()
+                mapOf("result" to if (found.get()) "je vois un visage, ma tête se centre dessus et le suit" else
+                    "aucun visage trouvé en faisant le tour (la personne est peut-être hors de vue, trop loin ou dans le noir)")
             }
             "regarder_autour" -> {
                 if (!gimbal.ready) return mapOf("result" to noHead)
@@ -388,8 +424,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun gaze(): Pair<Float, Float> {
         if (head.moving) {
-            val sign = if (flag("invert_pan", false)) -1f else 1f
-            return Pair(head.gazeX * sign * 0.8f, -head.gazeY * 0.8f)
+            // Joey regarde à sa droite = vers la gauche de l'écran vu de face ; vers le haut = haut de l'écran.
+            return Pair(-head.gazeX * 0.8f, -head.gazeY * 0.8f)
         }
         // Il regarde la personne. Image de la caméra avant non retournée : à droite de l'image = à droite de Joey,
         // donc vers la gauche de l'écran vu de face.

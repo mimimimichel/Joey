@@ -9,13 +9,16 @@ import kotlin.math.sign
  * Boucle fermée sur les angles renvoyés par la nacelle ; sans angles, mouvement à l'aveugle (durée estimée).
  * Les fonctions bloquent le temps du mouvement : à appeler hors du fil principal.
  *
- * Repère : pan en degrés (+ = sens où le joystick « + » fait tourner ; [rightSign] dit si c'est la droite),
- * inclinaison en degrés, 0 = droit devant, + = vers le haut.
+ * Repère de Joey : pan en degrés (+ = sa droite ; [rightSign] dit si c'est le joystick +),
+ * inclinaison en degrés, 0 = droit devant, + = vers le haut POUR LA CAMÉRA QUI REGARDE ([tiltSign] = -1 avec la caméra
+ * avant : la nacelle raisonne pour la caméra arrière, et quand celle-ci monte, la caméra avant descend).
  */
 class Head(
     private val link: GimbalLink,
     /** +1 si joystick + = droite, -1 sinon (réglage « inverser gauche/droite »). */
     private val rightSign: () -> Int = { 1 },
+    /** -1 quand Joey regarde avec la caméra avant (côté écran) : haut et bas sont inversés pour la nacelle. */
+    private val tiltSign: () -> Int = { 1 },
     /** Valeur maximale du joystick envoyée (vitesse max de la tête). La capture montre ±314 au manche ; on va au-delà. */
     private val maxStick: () -> Int = { 600 },
     private val onLog: (String) -> Unit = {},
@@ -50,14 +53,16 @@ class Head(
         private set
 
     private fun fresh(): SpgProtocol.Angles? = link.angles?.takeIf { now() - link.anglesAt < 1500 }
-    /** Inclinaison réelle : la nacelle donne ±180 quand la tête est droite. */
+    /** Inclinaison pour la nacelle (caméra arrière) : elle donne ±180 quand la tête est droite. */
     fun tiltOf(a: SpgProtocol.Angles) = wrap(a.tilt - 180.0)
+    /** Inclinaison pour la caméra qui regarde (+ = Joey regarde vers le haut). */
+    fun viewTilt(a: SpgProtocol.Angles) = tiltOf(a) * tiltSign()
 
     /** Où regarde la tête, relativement à « devant » : (droite+, haut+), ou null si inconnu. */
     fun pose(): Pair<Double, Double>? {
         val a = fresh() ?: return null
         val home = homePan ?: a.pan
-        return Pair(wrap(a.pan - home) * rightSign(), tiltOf(a))
+        return Pair(wrap(a.pan - home) * rightSign(), viewTilt(a))
     }
 
     fun stop() {
@@ -102,7 +107,8 @@ class Head(
         val tiltTarget = tilt?.coerceIn(TILT_MIN, TILT_MAX)
         moving = true
         gazeX = (panRight?.let { sign(it) } ?: 0.0).toFloat()
-        gazeY = (tiltTarget?.let { sign(it - tiltOf(start)) } ?: 0.0).toFloat()
+        gazeY = (tiltTarget?.let { sign(it - viewTilt(start)) } ?: 0.0).toFloat()
+        val ts = tiltSign()
         val t0 = now()
         var fastest = 0.0
         var prev: SpgProtocol.Angles? = null
@@ -117,11 +123,11 @@ class Head(
                 }
                 if (link.anglesAt != prevAt) { prev = a; prevAt = link.anglesAt }
                 val ePan = panTarget?.let { wrap(it - a.pan) } ?: 0.0
-                val eTilt = tiltTarget?.let { it - tiltOf(a) } ?: 0.0
+                val eTilt = tiltTarget?.let { it - viewTilt(a) } ?: 0.0
                 val panDone = abs(ePan) < 2.5
                 val tiltDone = abs(eTilt) < 2.5
                 if (panDone && tiltDone) break
-                link.stick(if (panDone) 0 else speed(ePan, speedMax), if (tiltDone) 0 else speed(eTilt, speedMax))
+                link.stick(if (panDone) 0 else speed(ePan, speedMax), if (tiltDone) 0 else speed(eTilt, speedMax) * ts)
                 // Sécurité : poussé fort 0,6 s sans que rien ne bouge -> la nacelle refuse ces valeurs, on redescend à 314.
                 if (speedMax > 314 && now() - t0 > 600 && now() - t0 < 700 &&
                     abs(wrap(a.pan - start.pan)) < 1.0 && abs(a.tilt - start.tilt) < 1.0) {
@@ -152,7 +158,7 @@ class Head(
                 link.stick(0, 0)
             }
             tilt?.let {
-                link.stick(0, (sign(it) * maxSpeed).toInt())
+                link.stick(0, (sign(it) * tiltSign() * maxSpeed).toInt())
                 sleep((abs(it) / 18.0 * 1000).toLong())
                 link.stick(0, 0)
             }
@@ -176,6 +182,32 @@ class Head(
             "devant" -> if (homePan == null) center() else look(-curPan, 0.0)
             else -> "direction inconnue : $direction"
         }
+    }
+
+    /**
+     * Cherche quelqu'un du regard : d'abord là où il regarde, puis tout autour (360°), un peu en haut puis à hauteur.
+     * [seenSince] : un visage a-t-il été vu depuis cette heure ? Renvoie true dès qu'un visage est trouvé.
+     */
+    fun searchPerson(seenSince: (Long) -> Boolean): Boolean {
+        cancelled = false
+        val t0 = now()
+        sleep(350)
+        if (seenSince(t0)) return true
+        val pans = listOf(0.0, -45.0, 45.0, -90.0, 90.0, -135.0, 135.0, 179.0)
+        for (tilt in listOf(25.0, 0.0)) {
+            for (target in pans) {
+                if (cancelled) return false
+                val cur = pose()?.first ?: 0.0
+                look(wrap(target - cur), tilt, timeoutMs = 3000)
+                val t = now()
+                sleep(350) // le temps que la caméra voie
+                if (seenSince(t)) {
+                    onLog("Visage trouvé (%.0f°, incl. %.0f°).".format(target, tilt))
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /** Hoche la tête (oui). */

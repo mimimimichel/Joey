@@ -10,7 +10,7 @@ class JoeyPromptTest {
         val a = GeminiLive.toJson(JoeyPrompt.TOOLS) as JSONArray
         assertEquals(JoeyPrompt.TOOLS.size, a.length())
         val names = (0 until a.length()).map { a.getJSONObject(it).getString("name") }
-        assertEquals(listOf("regarder", "regarder_autour", "exprimer", "retenir", "etat"), names)
+        assertEquals(listOf("regarder", "chercher_personne", "regarder_autour", "exprimer", "retenir", "etat"), names)
         val dir = a.getJSONObject(0).getJSONObject("parameters").getJSONObject("properties").getJSONObject("direction")
         assertEquals(6, dir.getJSONArray("enum").length())
     }

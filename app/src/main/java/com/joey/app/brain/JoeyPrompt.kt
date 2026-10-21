@@ -16,7 +16,11 @@ Ton corps (pour l'instant) :
 - Ton visage, ce sont deux yeux sur l'écran d'un téléphone. Ce téléphone est ton cerveau.
 - Ta tête est montée sur une nacelle motorisée 3 axes, rapide, SANS limite : elle tourne sur 360° (tu peux regarder
   derrière toi), et s'incline de tout en bas (le sol) à tout en haut (le plafond). Ne dis jamais que tu es limité
-  pour bouger la tête. Outils « regarder » et « regarder_autour ».
+  pour bouger la tête. Outils « regarder », « regarder_autour » et « chercher_personne ».
+- Gauche et droite, ce sont les tiennes (comme une personne). Haut = vers le plafond, bas = vers le sol.
+- Si on te demande de regarder quelqu'un (« regarde-moi », « tourne-toi vers moi », « où je suis ? ») ou si tu ne vois
+  plus la personne qui te parle : utilise « chercher_personne » (tu la cherches du regard tout autour). Ne réponds
+  jamais « je ne te vois pas » sans l'avoir cherchée.
 - Tu fais des gestes de la tête (outil « exprimer » : oui, non, hésiter) : ils se font PENDANT que tu parles,
   appelle l'outil et parle aussitôt, sans attendre.
 - Ta tête suit toute seule le visage de la personne qui te parle (tu la regardes naturellement). Quand tu tournes
@@ -46,12 +50,18 @@ Façon de faire :
         mapOf(
             "name" to "regarder",
             "description" to "Tourne ta tête (rapide, 360°, sans limite). direction : gauche, droite, haut, bas, derriere, " +
-                "ou devant (revenir vers la personne). degres : de combien (facultatif ; jusqu'à 180 à gauche/droite, " +
+                "ou devant (droit devant ta base, PAS forcément vers la personne : pour ça, chercher_personne). degres : de combien (facultatif ; jusqu'à 180 à gauche/droite, " +
                 "90 en haut/bas ; par défaut 45° et 25°). Tu reçois une image juste après. Renvoie où regarde ta tête.",
             "parameters" to obj(mapOf(
                 "direction" to str("où regarder", listOf("gauche", "droite", "haut", "bas", "derriere", "devant")),
                 "degres" to num("amplitude en degrés (facultatif)"),
             ), listOf("direction")),
+        ),
+        mapOf(
+            "name" to "chercher_personne",
+            "description" to "Cherche du regard la personne qui te parle (ou n'importe qui) : là où tu regardes, puis tout autour " +
+                "sur 360°. Dès qu'un visage est trouvé, ta tête se centre dessus et le suit.",
+            "parameters" to obj(emptyMap()),
         ),
         mapOf(
             "name" to "regarder_autour",

@@ -89,6 +89,35 @@ class HeadTest {
         assertTrue(abs(h.pose()!!.first) < 5)
     }
 
+    @Test fun frontCameraUpIsGimbalDown() {
+        val g = FakeGimbal()
+        val h = Head(g, tiltSign = { -1 }, maxStick = { 700 }, sleep = { g.advance(it) }, now = { g.t })
+        h.lookDirection("haut", 30.0)
+        // Pour la nacelle (caméra arrière), c'est vers le bas ; pour Joey (caméra avant), vers le haut.
+        assertTrue("nacelle ${h.tiltOf(g.angles)}", abs(h.tiltOf(g.angles) + 30) < 4)
+        assertTrue("joey ${h.pose()!!.second}", abs(h.pose()!!.second - 30) < 4)
+        h.nod()
+        assertTrue(abs(h.pose()!!.second - 30) < 4)
+    }
+
+    @Test fun searchFindsAPersonBehind() {
+        val (g, h) = setup()
+        val personPan = Head.wrap(g.pan + 140.0) // derrière, un peu à droite
+        var seenAt = -1L
+        val seen = { t: Long ->
+            // Le visage est vu si la tête pointe à moins de 30° de la personne et qu'elle n'est pas trop basse.
+            if (abs(Head.wrap(g.pan - personPan)) < 30 && h.pose()!!.second > -10) seenAt = g.t
+            seenAt > t
+        }
+        assertTrue(h.searchPerson(seen))
+        assertTrue("pan ${g.pan}", abs(Head.wrap(g.pan - personPan)) < 30)
+    }
+
+    @Test fun searchGivesUp() {
+        val (_, h) = setup()
+        assertEquals(false, h.searchPerson { false })
+    }
+
     @Test fun lookBehind() {
         val (g, h) = setup()
         val start = g.pan

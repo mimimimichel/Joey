@@ -45,6 +45,7 @@ class FaceFollower(
     private val tilt = Axis("haut/bas", initialConfirmed)
 
     val sees: Boolean get() = now() - seenAt < 800
+    fun seenSince(t: Long) = seenAt > t
 
     fun pause(ms: Long) {
         pausedUntil = maxOf(pausedUntil, now() + ms)

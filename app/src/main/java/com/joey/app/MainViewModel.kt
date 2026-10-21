@@ -67,6 +67,9 @@ data class UiState(
     val headsetFollow: Boolean = false,
     val usesPhoneSensors: Boolean = false,
     val memories: Int = 0,
+    /** Gens de la maison que Joey reconnaît, et qui il voit en ce moment. */
+    val people: List<String> = emptyList(),
+    val seeing: String? = null,
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -87,6 +90,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<UiState> = _state
 
     val memory = Memory(File(app.filesDir, "memoire.json"))
+    private val people = com.joey.app.brain.People(File(app.filesDir, "personnes.json"))
+    private val faceId = com.joey.app.senses.FaceId(app)
     val camera = Camera()
     private val faces = FaceSense()
     private val objects = ObjectSense(app, ::log)
@@ -150,6 +155,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             followFace = flag("follow_face", true),
             headSpeed = headSpeed,
             memories = memory.size,
+            people = people.names(),
             usesPhoneSensors = head.usesPhone,
         )
     }
@@ -221,13 +227,103 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 follower.forget()
                 _state.update { it.copy(tracking = null) }
             }
-            val f = faces.find(bmp)?.takeIf { it.size >= 0.05f }
+            val f = faces.find(bmp)?.takeIf { it.size >= 0.025f }
             faceStreak = if (f != null) faceStreak + 1 else 0
             val sure = f?.takeIf { faceStreak >= 2 }
             follower.onFace(sure?.x, sure?.y)
+            if (sure != null) recognize(bmp, sure)
         }
         val sees = follower.sees
         if (sees != _state.value.seesFace) _state.update { it.copy(seesFace = sees) }
+    }
+
+    // ---- reconnaissance des gens de la maison (sur le téléphone) ------------------------------------
+    @Volatile private var lastRecognizeAt = 0L
+    @Volatile private var lastCandidate: String? = null
+    @Volatile var seeingName: String? = null
+        private set
+    @Volatile private var seeingAt = 0L
+    private val greetedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    /** Empreintes en cours d'apprentissage (null : pas d'apprentissage). */
+    @Volatile private var enrolling: MutableList<FloatArray>? = null
+
+    /** Qui il voit en ce moment (reconnu il y a moins de 3 s), ou null. */
+    fun seeing(): String? = seeingName?.takeIf { System.currentTimeMillis() - seeingAt < 3000 }
+
+    private fun recognize(bmp: android.graphics.Bitmap, face: com.joey.app.senses.SeenFace) {
+        val now = System.currentTimeMillis()
+        val box = face.box ?: return
+        val learning = enrolling
+        if (learning != null) {
+            if (face.size >= 0.05f && now - lastRecognizeAt >= 250) {
+                lastRecognizeAt = now
+                faceId.embed(bmp, box)?.let { synchronized(learning) { learning.add(it) } }
+            }
+            return
+        }
+        if (people.names().isEmpty() || face.size < 0.04f || now - lastRecognizeAt < 700) return
+        lastRecognizeAt = now
+        val print = faceId.embed(bmp, box) ?: return
+        val (name, _) = people.identify(print)
+        // Deux reconnaissances de suite du même nom avant d'y croire.
+        val prev = lastCandidate
+        lastCandidate = name
+        if (name == null || name != prev) return
+        seeingName = name
+        seeingAt = now
+        if (_state.value.seeing != name) _state.update { it.copy(seeing = name) }
+        // Quelqu'un qu'il n'a pas vu depuis 20 min : il le salue par son prénom (si on est en conversation).
+        val l = live
+        if (l != null && now - (greetedAt[name] ?: 0L) > 20 * 60_000L && greeted) {
+            greetedAt[name] = now
+            log("👤 Je reconnais $name")
+            l.event("Tu reconnais $name devant toi (reconnaissance du visage). Salue-le ou salue-la par son prénom, " +
+                "en une phrase courte, à ta façon.", reply = true)
+        } else if (l == null) {
+            greetedAt.putIfAbsent(name, 0L)
+        }
+    }
+
+    /**
+     * Apprend le visage de [name] : la personne doit être en face (le plus grand visage), ~5 s.
+     * Bloquant. Renvoie un message.
+     */
+    fun learnFace(name: String): String {
+        val n = name.trim()
+        if (n.isEmpty()) return "il me faut un prénom"
+        if (!flag("camera", true)) return "ma caméra est coupée"
+        val list = ArrayList<FloatArray>()
+        enrolling = list
+        try {
+            Thread.sleep(5000)
+        } finally {
+            enrolling = null
+        }
+        val prints = synchronized(list) { list.toList() }
+        if (prints.size < 6) return "je n'ai pas assez bien vu ton visage (${prints.size} images) : mets-toi bien en face, assez près, et recommence"
+        // Toutes les empreintes doivent se ressembler (sinon il y avait plusieurs personnes).
+        val ref = prints[prints.size / 2]
+        val coherent = prints.filter { p -> p.indices.sumOf { (p[it] * ref[it]).toDouble() } > 0.5 }
+        if (coherent.size < prints.size * 0.7) return "j'ai vu plusieurs visages différents : qu'une personne à la fois, bien en face, et recommence"
+        val other = people.identify(ref).first
+        people.learn(n, coherent)
+        refreshSettings()
+        log("👤 Visage appris : $n (${coherent.size} empreintes)")
+        greetedAt[n.replaceFirstChar { it.uppercase() }] = System.currentTimeMillis()
+        return "visage de $n appris (${coherent.size} images)" +
+            (if (other != null && !other.equals(n, true)) ". Attention : il ressemblait à celui de $other." else "")
+    }
+
+    fun learnFaceUi(name: String) = thread(isDaemon = true) {
+        message("Regarde Joey bien en face, en tournant un peu la tête, pendant 5 secondes…")
+        val r = learnFace(name)
+        message(r.replaceFirstChar { it.uppercase() } + ".")
+    }
+
+    fun forgetFace(name: String) {
+        people.forget(name)
+        refreshSettings()
+        log("👤 Visage oublié : $name")
     }
 
     /**
@@ -312,6 +408,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (gen != motionGen.get()) return // un mouvement plus récent a pris la main
         follower.pausedUntil = System.currentTimeMillis() + holdMs
         _state.update { it.copy(busy = false) }
+    }
+
+    /** Apprentissage d'un visage : la tête reste en suivi du visage (pas de mouvement demandé). */
+    private fun <T> busyLearn(body: () -> T): T {
+        _state.update { it.copy(busy = true) }
+        try { return body() } finally { _state.update { it.copy(busy = false) } }
     }
 
     /** Mouvement en arrière-plan : l'outil répond tout de suite, Joey parle pendant que la tête bouge. */
@@ -423,8 +525,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(live = s) }
         if (s == LiveState.LISTENING && !greeted) {
             greeted = true
+            val who = seeing()
+            who?.let { greetedAt[it] = System.currentTimeMillis() }
             live?.event("La conversation commence (la personne vient d'appuyer sur ton bouton). " +
-                "Salue-la en une phrase courte, à ta façon.", reply = true)
+                (if (who != null) "Tu reconnais $who (reconnaissance du visage). " else "") +
+                "Salue en une phrase courte, à ta façon.", reply = true)
         }
         if (s == LiveState.OFF) {
             live = null
@@ -624,6 +729,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 log("🧠 Retenu : $note")
                 mapOf("result" to if (isNew) "retenu (sur le téléphone, pour toujours)" else "je le savais déjà")
             }
+            "apprendre_visage" -> {
+                val who = (args["prenom"] as? String)?.trim().orEmpty()
+                log("👤 J'apprends le visage de $who…")
+                val r = busyLearn { learnFace(who) }
+                mapOf("result" to r)
+            }
+            "oublier_visage" -> {
+                val who = (args["prenom"] as? String)?.trim().orEmpty()
+                forgetFace(who)
+                mapOf("result" to "visage de $who oublié")
+            }
+            "regarder_de_pres" -> {
+                val q = args["question"] as? String ?: "que vois-tu ?"
+                val zone = args["zone"] as? String ?: "tout"
+                val jpeg = camera.zoomJpeg(zone) ?: return mapOf("result" to "pas d'image (caméra coupée ?)")
+                log("🔍 de près ($zone) : $q")
+                val r = runCatching { vision.ask(jpeg, q) }.getOrElse { "vision indisponible : ${it.message}" }
+                mapOf("reponse" to r)
+            }
             "se_souvenir" -> {
                 val q = args["sujet"] as? String ?: ""
                 val hits = memory.search(q)
@@ -646,6 +770,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "roues" to "pas encore branchées (Roomba)",
                     "souvenirs" to memory.size,
                     "visage_vu" to follower.sees,
+                    "personne_reconnue" to (seeing() ?: "personne de connu en vue"),
+                    "gens_de_la_maison_connus" to people.names().ifEmpty { listOf("aucun") }.joinToString(),
                     "boussole" to (sensors.compassText() ?: "indisponible"),
                     "orientation_par" to if (head.usesPhone) "capteurs du téléphone" else "angles de la nacelle",
                     "suivi_du_visage" to follower.enabled,

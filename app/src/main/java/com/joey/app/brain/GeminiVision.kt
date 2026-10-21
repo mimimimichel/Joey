@@ -50,6 +50,66 @@ class GeminiVision(private val apiKey: () -> String) {
         throw IOException("aucun modèle de vision Gemini disponible (${last?.message})")
     }
 
+    /** Question sur une image (en bonne résolution) : réponse courte en français. */
+    fun ask(jpegBase64: String, question: String): String {
+        val schema = JSONObject("{\"type\":\"object\",\"properties\":{\"reponse\":{\"type\":\"string\"}},\"required\":[\"reponse\"]}")
+        val prompt = "Image (recadrée, en bonne résolution) de la caméra d'un petit robot de maison. Question : « $question ». " +
+            "Réponds en français, en 1 à 3 phrases, d'après ce que l'image montre vraiment (lis les textes si besoin). " +
+            "Si on ne peut pas savoir, dis-le."
+        val key = apiKey()
+        if (key.isBlank()) throw IllegalStateException("clé Gemini manquante")
+        var last: Exception? = null
+        for (attempt in MODELS.indices) {
+            val model = MODELS[(modelIndex + attempt) % MODELS.size]
+            try {
+                return generateWithImage(model, key, jpegBase64, prompt, schema).optString("reponse")
+            } catch (e: ModelUnavailable) {
+                last = e
+            }
+        }
+        throw IOException("vision Gemini indisponible (${last?.message})")
+    }
+
+    private fun generateWithImage(model: String, key: String, jpeg: String, prompt: String, schema: JSONObject): JSONObject {
+        val gen = JSONObject().put("responseMimeType", "application/json").put("responseJsonSchema", schema).put("temperature", 0.2)
+        if (model.startsWith("gemini-3")) gen.put("thinkingConfig", JSONObject().put("thinkingLevel", "LOW"))
+        val body = JSONObject()
+            .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray()
+                .put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", jpeg)))
+                .put(JSONObject().put("text", prompt)))))
+            .put("generationConfig", gen)
+        val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key")
+            .openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 25_000
+            conn.doOutput = true
+            conn.setRequestProperty("content-type", "application/json")
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            val code = conn.responseCode
+            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            if (code !in 200..299) {
+                val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull() ?: text.take(200)
+                if (code == 404 || code == 429 || code >= 500 || code == 400 && msg.contains("model", ignoreCase = true)) throw ModelUnavailable("$code $msg")
+                throw IOException("Gemini, erreur $code : $msg")
+            }
+            val parts = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+            val answer = buildString {
+                if (parts != null) for (i in 0 until parts.length()) {
+                    val p = parts.optJSONObject(i) ?: continue
+                    if (!p.optBoolean("thought")) append(p.optString("text"))
+                }
+            }
+            val a = answer.indexOf('{'); val b = answer.lastIndexOf('}')
+            if (a < 0 || b <= a) throw IOException("réponse illisible")
+            return JSONObject(answer.substring(a, b + 1))
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     /** Texte seul -> JSON selon [schema] (sert à extraire les souvenirs d'une conversation). */
     fun json(prompt: String, schema: JSONObject): JSONObject {
         val key = apiKey()

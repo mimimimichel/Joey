@@ -30,6 +30,11 @@ une petite intelligence avec du caractère, qui commente, se souvient, et se dé
   la regardent. Le sens de rotation se règle tout seul au premier essai.
 - **Tête** : se connecte seule à la nacelle SPG (`FY_Spg_…`) ; Joey peut regarder à gauche/droite/haut/bas, balayer la pièce,
   faire oui/non. Panneau 🦒 : joystick à l'écran, centrer, journal (avec les UUID Bluetooth à noter).
+- **Gens de la maison** : reconnaissance des visages sur le téléphone (MobileFaceNet, `mobile_face_net.tflite`, repris de
+  [estebanuri/face_recognition](https://github.com/estebanuri/face_recognition)) ; seulement les personnes qui le
+  demandent ; seules des empreintes (192 nombres) sont gardées, jamais de photo. Seuil 0,50 mesuré sur LFW.
+- **Mémoire** : souvenirs sur le téléphone, notés par Joey et extraits automatiquement des conversations.
+- **Vue casque Quest** : 🦒 → « Vue dans le casque », https://<téléphone>:8443, la tête suit la tienne.
 - Clé Gemini : réglages ⚙ (ou `-PgeminiKey=...` à la compilation). Compiler : `./gradlew assembleDebug`.
 
 ## Documents

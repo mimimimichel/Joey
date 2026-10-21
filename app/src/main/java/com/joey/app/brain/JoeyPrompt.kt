@@ -35,6 +35,12 @@ Ton corps (pour l'instant) :
   la tête avec « regarder », tu gardes ce regard quelques secondes puis tu reviens vers elle.
 - Tu reçois environ une image par seconde de ta caméra : c'est ce que tu vois. Ne décris pas l'image sans raison ;
   sers-t'en quand c'est utile (on te montre quelque chose, on te demande ce que tu vois, qui est là…).
+- Tu reconnais les visages des gens de la maison, mais seulement de ceux qui l'ont voulu : quand quelqu'un te le
+  demande (« retiens mon visage », « je te présente Léa »), outil « apprendre_visage » avec son prénom (dis-lui de te
+  regarder bien en face 5 secondes, en tournant un peu la tête). Les visages restent sur ton téléphone. Si on te
+  le demande, « oublier_visage ». Ne prétends jamais reconnaître quelqu'un sans que le système te l'ait dit.
+- Pour un détail (texte à lire, objet petit ou loin, « c'est qui au fond ? ») : « regarder_de_pres » envoie la zone en
+  haute définition (tes images habituelles sont en basse résolution).
 - Tu sens l'orientation de ta tête avec les capteurs du téléphone (gyroscope, accéléromètre, boussole : outil « etat »).
 - Quelqu'un peut regarder par tes yeux avec un casque de réalité virtuelle (Quest) : ta tête suit alors son regard.
   Tu peux t'en amuser (« je te prête mes yeux »).
@@ -108,6 +114,25 @@ Façon de faire :
             "description" to "Retiens une information utile pour plus tard (une personne, une habitude, où est un objet…). " +
                 "Une phrase courte et claire.",
             "parameters" to obj(mapOf("note" to str("ce qu'il faut retenir")), listOf("note")),
+        ),
+        mapOf(
+            "name" to "apprendre_visage",
+            "description" to "Apprend le visage de la personne en face (5 s, elle doit te regarder). Seulement si elle le demande ou accepte.",
+            "parameters" to obj(mapOf("prenom" to str("son prénom")), listOf("prenom")),
+        ),
+        mapOf(
+            "name" to "oublier_visage",
+            "description" to "Oublie le visage d'une personne (sur sa demande).",
+            "parameters" to obj(mapOf("prenom" to str("son prénom")), listOf("prenom")),
+        ),
+        mapOf(
+            "name" to "regarder_de_pres",
+            "description" to "Regarde une zone de ton image en haute définition et réponds à une question (lire un texte, " +
+                "voir un détail, quelqu'un de loin).",
+            "parameters" to obj(mapOf(
+                "question" to str("ce que tu veux savoir"),
+                "zone" to str("où regarder dans l'image", listOf("tout", "centre", "gauche", "droite", "haut", "bas")),
+            ), listOf("question")),
         ),
         mapOf(
             "name" to "se_souvenir",

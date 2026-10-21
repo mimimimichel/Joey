@@ -18,8 +18,8 @@ android {
         applicationId = "com.joey.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.10"
+        versionCode = 11
+        versionName = "0.11"
         buildConfigField("String", "GEMINI_KEY", "\"" + geminiKey + "\"")
         // Seulement les processeurs ARM 64 bits (S10, S8+ et presque tous depuis 2017) : APK bien plus léger.
         // -PallAbis=true pour tout inclure.
@@ -92,4 +92,6 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     // Détecteur d'objets sur le téléphone (MediaPipe, EfficientDet-Lite2, 80 catégories COCO) : « cherche le chien »
     implementation("com.google.mediapipe:tasks-vision:0.10.20")
+    // Reconnaissance des visages de la maison (MobileFaceNet, sur le téléphone : empreinte de 192 nombres par visage)
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
 }

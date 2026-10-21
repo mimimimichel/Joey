@@ -10,7 +10,7 @@ class JoeyPromptTest {
         val a = GeminiLive.toJson(JoeyPrompt.TOOLS) as JSONArray
         assertEquals(JoeyPrompt.TOOLS.size, a.length())
         val names = (0 until a.length()).map { a.getJSONObject(it).getString("name") }
-        assertEquals(listOf("regarder", "chercher", "regarder_autour", "exprimer", "retenir", "se_souvenir", "oublier", "etat"), names)
+        assertEquals(listOf("regarder", "chercher", "regarder_autour", "exprimer", "retenir", "apprendre_visage", "oublier_visage", "regarder_de_pres", "se_souvenir", "oublier", "etat"), names)
         val dir = a.getJSONObject(0).getJSONObject("parameters").getJSONObject("properties").getJSONObject("direction")
         assertEquals(6, dir.getJSONArray("enum").length())
     }
@@ -34,6 +34,23 @@ class JoeyPromptTest {
         assertEquals(2, m2.size)
         assertTrue(m2.all().any { it.auto })
         assertTrue(m2.promptText().contains("Rocky"))
+    }
+
+    @Test fun peopleIdentify() {
+        val f = java.io.File.createTempFile("people", ".json")
+        f.delete()
+        fun unit(vararg v: Float): FloatArray { val n = kotlin.math.sqrt(v.sumOf { (it * it).toDouble() }).toFloat(); return FloatArray(v.size) { v[it] / n } }
+        val p = People(f)
+        assertEquals(null to 0f, p.identify(unit(1f, 0f, 0f)))
+        p.learn("michael", listOf(unit(1f, 0.1f, 0f), unit(1f, 0f, 0.1f)))
+        p.learn("Léa", listOf(unit(0f, 1f, 0f)))
+        assertEquals("Michael", p.identify(unit(1f, 0.05f, 0.05f)).first)
+        assertEquals("Léa", p.identify(unit(0.1f, 1f, 0f)).first)
+        assertEquals(null, p.identify(unit(0f, 0f, 1f)).first) // inconnu
+        val p2 = People(f)
+        assertEquals(listOf("Michael", "Léa"), p2.names())
+        p2.forget("léa")
+        assertEquals(listOf("Michael"), People(f).names())
     }
 
     @Test fun memoryRoundTrip() {

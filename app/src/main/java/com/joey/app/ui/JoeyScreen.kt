@@ -125,7 +125,11 @@ fun JoeyScreen(vm: MainViewModel) {
                 }) { headPanel = true }
                 if (s.headsetFollow) Chip("🥽 Suit le casque")
                 else if (s.tracking != null) Chip("🔎 ${s.tracking}")
-                else if (s.followFace && s.gimbal == GimbalState.READY) Chip(if (s.seesFace) "👤 Je te vois" else "👤 Personne")
+                else if (s.followFace && s.gimbal == GimbalState.READY) Chip(when {
+                    s.seeing != null && s.seesFace -> "👤 ${s.seeing}"
+                    s.seesFace -> "👤 Je te vois"
+                    else -> "👤 Personne"
+                })
                 Chip(when (s.live) {
                     LiveState.OFF -> "💤 En veille"
                     LiveState.CONNECTING -> "… Réveil"
@@ -272,6 +276,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
     var speed by remember { mutableStateOf(s.headSpeed) }
     var confirmForget by remember { mutableStateOf(false) }
     var showMemories by remember { mutableStateOf(false) }
+    var newPerson by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = close,
         title = { Text("Réglages") },
@@ -300,6 +305,18 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Sous-titres", subs) { subs = it }
                 Text("Souvenirs : ${s.memories} (gardés sur le téléphone)", fontSize = 13.sp)
                 TextButton(onClick = { showMemories = true }) { Text("Voir ses souvenirs") }
+                Text("Gens de la maison (visages reconnus, gardés sur le téléphone)", fontSize = 13.sp)
+                s.people.forEach { who ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("👤 $who", fontSize = 14.sp, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { vm.forgetFace(who) }) { Text("Oublier") }
+                    }
+                }
+                OutlinedTextField(value = newPerson, onValueChange = { newPerson = it }, label = { Text("Prénom") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth())
+                TextButton(enabled = newPerson.isNotBlank(), onClick = { vm.learnFaceUi(newPerson); newPerson = "" }) {
+                    Text("Apprendre ce visage (se mettre en face de Joey)")
+                }
                 TextButton(onClick = { confirmForget = true }) { Text("Effacer toute sa mémoire") }
             }
         },

@@ -50,6 +50,52 @@ class GeminiVision(private val apiKey: () -> String) {
         throw IOException("aucun modèle de vision Gemini disponible (${last?.message})")
     }
 
+    /** Texte seul -> JSON selon [schema] (sert à extraire les souvenirs d'une conversation). */
+    fun json(prompt: String, schema: JSONObject): JSONObject {
+        val key = apiKey()
+        if (key.isBlank()) throw IllegalStateException("clé Gemini manquante")
+        var last: Exception? = null
+        for (model in MODELS.drop(1)) { // modèles Flash (Robotics-ER est pour les images)
+            try {
+                val gen = JSONObject().put("responseMimeType", "application/json").put("responseJsonSchema", schema).put("temperature", 0.2)
+                if (model.startsWith("gemini-3")) gen.put("thinkingConfig", JSONObject().put("thinkingLevel", "LOW"))
+                val body = JSONObject()
+                    .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray()
+                        .put(JSONObject().put("text", prompt)))))
+                    .put("generationConfig", gen)
+                val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key")
+                    .openConnection() as HttpURLConnection
+                try {
+                    conn.requestMethod = "POST"
+                    conn.connectTimeout = 10_000
+                    conn.readTimeout = 40_000
+                    conn.doOutput = true
+                    conn.setRequestProperty("content-type", "application/json")
+                    conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                    val code = conn.responseCode
+                    val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                        ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                    if (code !in 200..299) throw IOException("$model : erreur $code")
+                    val parts = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+                    val answer = buildString {
+                        if (parts != null) for (i in 0 until parts.length()) {
+                            val p = parts.optJSONObject(i) ?: continue
+                            if (!p.optBoolean("thought")) append(p.optString("text"))
+                        }
+                    }
+                    val a = answer.indexOf('{'); val b = answer.lastIndexOf('}')
+                    if (a < 0 || b <= a) throw IOException("réponse illisible")
+                    return JSONObject(answer.substring(a, b + 1))
+                } finally {
+                    conn.disconnect()
+                }
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw IOException("Gemini indisponible (${last?.message})")
+    }
+
     private fun call(model: String, key: String, jpeg: String, target: String): Found {
         val prompt = "Image de la caméra d'un petit robot de maison. Objet cherché : « $target ».\n" +
             "Regarde attentivement toute l'image, y compris les bords et les petits objets. " +

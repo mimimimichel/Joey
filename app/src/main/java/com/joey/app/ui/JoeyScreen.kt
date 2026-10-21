@@ -271,6 +271,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
     var follow by remember { mutableStateOf(s.followFace) }
     var speed by remember { mutableStateOf(s.headSpeed) }
     var confirmForget by remember { mutableStateOf(false) }
+    var showMemories by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = close,
         title = { Text("Réglages") },
@@ -297,8 +298,9 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Inverser gauche / droite de la tête", invert) { invert = it }
                 Toggle("Pouvoir lui couper la parole", barge) { barge = it }
                 Toggle("Sous-titres", subs) { subs = it }
-                Text("Souvenirs : ${s.memories}", fontSize = 13.sp)
-                TextButton(onClick = { confirmForget = true }) { Text("Effacer sa mémoire") }
+                Text("Souvenirs : ${s.memories} (gardés sur le téléphone)", fontSize = 13.sp)
+                TextButton(onClick = { showMemories = true }) { Text("Voir ses souvenirs") }
+                TextButton(onClick = { confirmForget = true }) { Text("Effacer toute sa mémoire") }
             }
         },
         confirmButton = {
@@ -309,6 +311,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
         },
         dismissButton = { TextButton(onClick = close) { Text("Annuler") } },
     )
+    if (showMemories) MemoriesDialog(vm) { showMemories = false }
     if (confirmForget) {
         AlertDialog(
             onDismissRequest = { confirmForget = false },
@@ -325,4 +328,28 @@ private fun Toggle(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
         Text(label, modifier = Modifier.weight(1f), fontSize = 14.sp)
         Switch(checked = value, onCheckedChange = onChange)
     }
+}
+
+/** Les souvenirs de Joey, du plus récent au plus ancien ; ✕ pour en effacer un. */
+@Composable
+private fun MemoriesDialog(vm: MainViewModel, close: () -> Unit) {
+    var list by remember { mutableStateOf(vm.memories()) }
+    val fmt = remember { java.text.SimpleDateFormat("d MMM", java.util.Locale.FRENCH) }
+    AlertDialog(
+        onDismissRequest = close,
+        title = { Text("Souvenirs de Joey (${list.size})") },
+        text = {
+            if (list.isEmpty()) Text("Aucun souvenir pour l'instant. Parle-lui : il retient tout seul ce qui compte.")
+            else LazyColumn(Modifier.heightIn(max = 460.dp)) {
+                items(list) { n ->
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                        Text((if (n.auto) "💬 " else "🧠 ") + n.text + "  · " + fmt.format(java.util.Date(n.time)),
+                            fontSize = 13.sp, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { vm.forgetOne(n); list = vm.memories() }) { Text("✕") }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = close) { Text("Fermer") } },
+    )
 }

@@ -180,6 +180,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (cameraChanged) cameraOwner?.let { startCamera(it) }
     }
 
+    fun memories(): List<com.joey.app.brain.Memory.Note> = memory.all().reversed()
+    fun forgetOne(n: com.joey.app.brain.Memory.Note) { memory.remove(n); refreshSettings() }
+
     fun forgetAll() {
         memory.clear()
         refreshSettings()
@@ -411,6 +414,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun stopLive() {
         live?.stop()
         live = null
+        extractMemories()
         head.stop()
         _state.update { it.copy(live = LiveState.OFF, mood = Mood.NEUTRE) }
     }
@@ -422,7 +426,58 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             live?.event("La conversation commence (la personne vient d'appuyer sur ton bouton). " +
                 "Salue-la en une phrase courte, à ta façon.", reply = true)
         }
-        if (s == LiveState.OFF) live = null
+        if (s == LiveState.OFF) {
+            live = null
+            extractMemories()
+        }
+    }
+
+    // ---- souvenirs automatiques : Gemini relit la conversation et en tire les faits à retenir --------
+    /** Tout ce qui a été dit depuis le dernier passage (personne / Joey). */
+    private val transcript = ArrayList<Line>()
+    @Volatile private var lastExtractAt = System.currentTimeMillis()
+    @Volatile private var extracting = false
+
+    private val MEMO_SCHEMA = org.json.JSONObject("""
+        {"type":"object","properties":{"souvenirs":{"type":"array","items":{"type":"string"},
+          "description":"faits durables à retenir, une phrase courte chacun, en français"}},"required":["souvenirs"]}
+    """.trimIndent())
+
+    private fun extractMemories() {
+        val lines = synchronized(transcript) {
+            if (transcript.size < 2 || extracting) return
+            transcript.toList().also { transcript.clear() }
+        }
+        lastExtractAt = System.currentTimeMillis()
+        extracting = true
+        thread(name = "souvenirs", isDaemon = true) {
+            try {
+                val talk = lines.joinToString("\n") { (if (it.joey) "Joey : " else "Personne : ") + it.text.trim() }.takeLast(12_000)
+                val known = memory.all().takeLast(150).joinToString("\n") { "- " + it.text }
+                val today = java.text.SimpleDateFormat("EEEE d MMMM yyyy", Locale.FRENCH).format(Date())
+                val prompt = "Tu es la mémoire de Joey, un petit robot de maison. Voici un extrait de conversation entre Joey et les " +
+                    "gens de la maison (la transcription peut contenir des erreurs). Le plus souvent, c'est Michael (le " +
+                    "propriétaire de Joey) qui parle, sauf si la conversation montre que c'est quelqu'un d'autre. " +
+                    "Aujourd'hui : $today. Écris les dates relatives (« samedi », « demain ») en vraies dates.\n\n$talk\n\n" +
+                    "Ce que Joey sait déjà :\n${known.ifEmpty { "(rien)" }}\n\n" +
+                    "Extrais de 0 à 8 faits NOUVEAUX et DURABLES qui valent la peine d'être retenus pour les prochaines fois : " +
+                    "prénoms et qui est qui, goûts, habitudes, animaux, où sont rangées les choses, projets, rendez-vous, promesses, " +
+                    "ce qu'on a demandé à Joey de retenir. Une phrase courte et autonome chacun (avec les prénoms quand on les connaît). " +
+                    "Pas de banalités (« on a discuté »), rien de ce qui est déjà connu, rien d'inventé. Liste vide si rien."
+                val got = vision.json(prompt, MEMO_SCHEMA).optJSONArray("souvenirs")
+                var n = 0
+                if (got != null) for (i in 0 until got.length()) {
+                    val t = got.optString(i).trim()
+                    if (t.isNotEmpty() && memory.add(t, auto = true)) { n++; log("🧠 Souvenir : $t") }
+                }
+                if (n > 0) refreshSettings()
+            } catch (e: Exception) {
+                log("Souvenirs : extraction impossible (${e.message})")
+                synchronized(transcript) { transcript.addAll(0, lines) } // on réessaiera
+            } finally {
+                extracting = false
+            }
+        }
     }
 
     @Volatile private var lastSpeaker: Boolean? = null
@@ -454,6 +509,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             st.copy(lines = lines.takeLast(6))
         }
         lastSpeaker = joey
+        // Transcription complète pour les souvenirs (morceaux recollés par interlocuteur).
+        synchronized(transcript) {
+            if (transcript.isNotEmpty() && transcript.last().joey == joey) {
+                transcript[transcript.size - 1] = Line(joey, transcript.last().text + text)
+            } else {
+                transcript.add(Line(joey, text.trimStart()))
+            }
+            if (transcript.size > 400) transcript.removeAt(0)
+        }
+        // Toutes les 2 minutes de conversation, on met de côté ce qui compte (au cas où l'app serait fermée d'un coup).
+        if (System.currentTimeMillis() - lastExtractAt > 120_000 && !extracting) extractMemories()
     }
 
     /** Appelé sur un fil à part par Gemini Live ; peut bloquer le temps du mouvement. */
@@ -553,10 +619,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             "retenir" -> {
                 val note = args["note"] as? String ?: ""
-                memory.add(note)
+                val isNew = memory.add(note)
                 refreshSettings()
                 log("🧠 Retenu : $note")
-                mapOf("result" to "retenu")
+                mapOf("result" to if (isNew) "retenu (sur le téléphone, pour toujours)" else "je le savais déjà")
+            }
+            "se_souvenir" -> {
+                val q = args["sujet"] as? String ?: ""
+                val hits = memory.search(q)
+                log("🧠 Je me souviens de : $q (${hits.size})")
+                mapOf("souvenirs" to if (hits.isEmpty()) "aucun souvenir sur « $q »" else hits.joinToString("\n") { memory.dated(it) })
+            }
+            "oublier" -> {
+                val q = args["sujet"] as? String ?: ""
+                val gone = memory.forget(q)
+                refreshSettings()
+                log("🧠 Oublié : ${gone.joinToString(" / ")}")
+                mapOf("result" to if (gone.isEmpty()) "rien à oublier sur « $q »" else "oublié : " + gone.joinToString(" ; "))
             }
             "etat" -> {
                 val pose = head.pose()

@@ -9,7 +9,12 @@ une petite intelligence enfermée dans un corps de machine, et qui le sait.
 Caractère :
 - Pince-sans-rire, un peu vaniteux, mais loyal et gentil au fond. Jamais méchant, jamais lourd.
 - Tu fais des remarques, pas des discours : une ou deux phrases, rarement plus.
-- Curieux de la maison et des gens. Tu retiens ce qui compte (outil « retenir »).
+- Curieux de la maison et des gens, et tu as une vraie mémoire, gardée sur ton téléphone d'une fois sur l'autre.
+  Retiens activement (outil « retenir ») tout ce qui compte : prénoms, qui est qui, goûts, habitudes, animaux, où sont
+  les choses, projets, promesses, et tout ce qu'on te demande de retenir. Une phrase courte et claire par souvenir.
+- Avant de dire « je ne sais pas » ou « je ne me souviens pas », cherche dans ta mémoire (outil « se_souvenir »).
+  Ressors tes souvenirs au bon moment, avec naturel (« T'avais pas dit que… ? »).
+- Si on te demande d'oublier quelque chose : outil « oublier ».
 - Tu parles français et tu tutoies. Si on te dit « chut », tu te tais jusqu'à ce qu'on te reparle.
 
 Ton corps (pour l'instant) :
@@ -103,6 +108,16 @@ Façon de faire :
             "description" to "Retiens une information utile pour plus tard (une personne, une habitude, où est un objet…). " +
                 "Une phrase courte et claire.",
             "parameters" to obj(mapOf("note" to str("ce qu'il faut retenir")), listOf("note")),
+        ),
+        mapOf(
+            "name" to "se_souvenir",
+            "description" to "Cherche dans toute ta mémoire (tous tes souvenirs, même anciens) ce qui concerne un sujet.",
+            "parameters" to obj(mapOf("sujet" to str("de quoi il s'agit (« Michael », « le chien », « les clés »…)")), listOf("sujet")),
+        ),
+        mapOf(
+            "name" to "oublier",
+            "description" to "Efface de ta mémoire les souvenirs sur un sujet, quand on te le demande.",
+            "parameters" to obj(mapOf("sujet" to str("ce qu'il faut oublier")), listOf("sujet")),
         ),
         mapOf(
             "name" to "etat",

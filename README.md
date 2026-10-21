@@ -12,6 +12,7 @@ une petite intelligence avec du caractère, qui commente, se souvient, et se dé
 
 - **Un visage** : l'écran du téléphone, tourné vers l'avant, affiche des yeux animés (écoute, réfléchit, parle, étonné, boude…).
   La **caméra avant** (côté écran) sert à voir : il regarde les gens qui lui parlent.
+- **Un cou** : le téléphone est sur une nacelle Feiyu SPG, Joey tourne et lève la tête sans bouger les roues.
 - **Une voix et une personnalité** : conversation en direct avec Gemini, un caractère à lui (pince-sans-rire),
   une mémoire de la maison et des gens.
 - **Il vit dans la maison** : vient quand on l'appelle, suit, salue quand quelqu'un rentre, fait des rondes,
@@ -25,11 +26,12 @@ une petite intelligence avec du caractère, qui commente, se souvient, et se dé
 |---|---|
 | [`docs/BRIEF.md`](docs/BRIEF.md) | **À lire en premier** (et à donner à Claude au début d'une conversation) : décisions, contraintes, architecture, étapes |
 | [`docs/MATERIEL.md`](docs/MATERIEL.md) | Ce qu'il faut acheter, câblage de la prise du Roomba, alimentation, sécurité |
+| [`docs/NACELLE.md`](docs/NACELLE.md) | La tête : nacelle Feiyu SPG, enregistrer et décoder son Bluetooth, montage |
 | [`docs/PERSONNALITE.md`](docs/PERSONNALITE.md) | Premier jet du caractère de Joey, de sa voix et de ses comportements |
 | [`reuse/aidrone/`](reuse/aidrone/) | Code repris du projet drone (pilote Roomba testé, Gemini en direct, vision sur le téléphone…) |
 | [`hardware/roomba-mount/`](hardware/roomba-mount/) | Support imprimable en 3D (téléphone + carte USB) — à retourner pour l'écran vers l'avant |
 
 ## Matériel (résumé)
 
-Roomba 616 · Samsung Galaxy S8+ · carte USB-série FT232 (5 V) · fils Dupont mâle-femelle · câble USB-C <-> USB-C (données).
+Roomba 616 · Samsung Galaxy S8+ · nacelle Feiyu SPG · carte USB-série FT232 (5 V) · fils Dupont mâle-femelle · câble USB-C <-> USB-C (données).
 Détails et liens : [`docs/MATERIEL.md`](docs/MATERIEL.md).

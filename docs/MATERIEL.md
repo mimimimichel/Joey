@@ -9,6 +9,7 @@
 | Carte USB-série **FT232RL**, USB-C, réglable 3,3 V / 5 V | Fait parler le téléphone au Roomba | Choisie : SEENGREAT FT232RL USB-C (interrupteur 5V/3V3, broche RTS sortie). **Interrupteur sur 5V** |
 | Fils **Dupont mâle-femelle** | Bout femelle sur la carte, bout mâle enfoncé dans la prise ronde du Roomba | Pas de soudure. Un point de colle chaude ou du scotch pour qu'ils tiennent |
 | Câble **USB-C <-> USB-C qui transmet les données** | Carte <-> téléphone | Un câble « charge seule » ne marche pas |
+| Nacelle **Feiyu SPG** (déjà là) | Le cou : tourner et lever la tête, image stable | Batterie à elle (~8 h). Voir `NACELLE.md` |
 | (plus tard) convertisseur 8-35 V -> USB 5 V 3 A + fusible 2 A | Alimenter le téléphone par la batterie du Roomba | La tension monte vers ~21 V sur la base : prendre une entrée qui monte au moins à 30 V |
 
 Liens trouvés (à vérifier, les annonces changent) :
@@ -49,8 +50,7 @@ le bouton CLEAN. **Il a été dessiné pour l'écran vers l'arrière** (caméra 
 Pour Joey (écran = visage vers l'avant, caméra avant), il faut retourner le berceau : voir les paramètres du `.scad`.
 À mesurer avant d'imprimer : la carte FT232 (supposée 52 × 26 mm), la coque du téléphone, la zone plate sur le Roomba.
 
-## Idée pour plus tard : nacelle Feiyu SPG
+## Nacelle Feiyu SPG
 
-Une nacelle 3 axes (Feiyu SPG) permettrait de tourner/lever la tête indépendamment des roues. Son protocole Bluetooth
-n'est pas public : piste = journal HCI Bluetooth d'Android pendant qu'on la pilote avec l'app Feiyu, puis décodage.
-Plan B : un petit servomoteur pour l'inclinaison.
+Le téléphone est posé sur la nacelle, qui sert de cou à Joey. Pilotage Bluetooth, montage, câble et plan B :
+voir [`NACELLE.md`](NACELLE.md).

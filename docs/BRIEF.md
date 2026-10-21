@@ -18,7 +18,8 @@
   téléphone (MediaPipe : détection d'objets EfficientDet-Lite2, gestes, pose) ; Gemini (REST) pour comprendre une image
   au besoin (modèles robotique d'abord : `gemini-robotics-er-2-preview`, puis flash).
 - **À distance** : Tailscale sur le S8+ et le téléphone de Michael (pas de port ouvert sur Internet).
-- **Pas de nacelle pour l'instant** (Feiyu SPG = piste plus tard, protocole Bluetooth à retrouver).
+- **Nacelle Feiyu SPG (premier modèle) = le cou de Joey** : le téléphone est dessus, elle tourne/incline la tête.
+  Elle se pilote en Bluetooth avec l'app Feiyu ON (testé) ; protocole à enregistrer et décoder. Voir `NACELLE.md`.
 
 ## Ce qui existe déjà (copié dans `reuse/aidrone/`, testé dans le projet drone)
 
@@ -58,7 +59,7 @@ Les modèles MediaPipe (`efficientdet_lite2.tflite`, `gesture_recognizer.task`, 
 
 ```
 app/
-  robot/      Robot (interface), RoombaRobot (pilote), FakeRobot (tests, simulation sans Roomba)
+  robot/      Robot (interface), RoombaRobot (pilote), FakeRobot (tests, simulation sans Roomba), Gimbal (nacelle BLE)
   brain/      Conversation (Gemini Live + outils), Personnalité (prompt système), Mémoire, Comportements
   senses/     Caméra avant, détection de personnes/objets, gestes, suivi, obstacles
   face/       Visage : yeux animés en Compose (états : repos, écoute, réfléchit, parle, émotions)
@@ -66,7 +67,7 @@ app/
 ```
 
 Outils donnés à Gemini (premiers) : `avancer(m)`, `tourner(deg)`, `venir_vers_personne`, `suivre(qui)`, `arreter`,
-`rentrer_a_la_base`, `exprimer(emotion)` (visage + son), `retenir(note)`, `regarder_autour`.
+`rentrer_a_la_base`, `exprimer(emotion)` (visage + son), `retenir(note)`, `regarder(direction)` et `regarder_autour` (nacelle).
 
 ## Étapes
 
@@ -75,4 +76,5 @@ Outils donnés à Gemini (premiers) : `avancer(m)`, `tourner(deg)`, `venir_vers_
 3. **Il voit** : caméra avant, détection des personnes, les yeux suivent, « viens ici », « suis-moi ».
 4. **Il se souvient et vit seul** : mémoire, rondes, accueil, recharge autonome, mot de réveil.
 5. **À distance** : page de contrôle via Tailscale.
-6. Plus tard : nacelle, support imprimé dédié, alimentation par la batterie du Roomba.
+6. **La tête** : nacelle SPG pilotée en Bluetooth (en parallèle dès qu'on a l'enregistrement), support imprimé pour son manche.
+7. Plus tard : alimentation par la batterie du Roomba.

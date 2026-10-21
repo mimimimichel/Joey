@@ -30,12 +30,13 @@ object SpgProtocol {
     }
 
     /**
-     * Joystick virtuel. pan : + = droite, tilt : + = haut. Plage vue dans la capture : environ -320..+320 (on accepte plus)
+     * Joystick virtuel. pan : + = droite, tilt : + = haut. Le manche envoie ±320 environ, mais la nacelle
+     * accepte bien plus : la vitesse monte avec la valeur (mesurée : 1000 -> ~29°/s ; voir Head.calibrate)
      * (vers ±300 : ~35°/s en pan, ~20°/s en tilt). L'app Feiyu l'envoie ~20 fois/s tant que le doigt est posé,
      * puis plusieurs fois (0, 0) pour arrêter.
      */
     fun joystick(pan: Int, tilt: Int): ByteArray {
-        val p = pan.coerceIn(-1000, 1000); val t = tilt.coerceIn(-1000, 1000)
+        val p = pan.coerceIn(-8000, 8000); val t = tilt.coerceIn(-8000, 8000)
         return frame(0x00, 0x10, byteArrayOf(0xFF.toByte(),
             (p and 0xFF).toByte(), (p shr 8).toByte(), (t and 0xFF).toByte(), (t shr 8).toByte()))
     }

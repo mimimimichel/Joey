@@ -10,8 +10,8 @@ import kotlin.math.sign
 class FakeGimbal(
     var pan: Double = -131.0,
     var tiltRaw: Double = -179.9,
-    /** Vitesse réelle (°/s) pour une valeur du joystick (pan) ; par défaut linéaire, ~39°/s à 314. */
-    val panRate: (Int) -> Double = { c -> if (abs(c) < 100) 0.0 else (abs(c) - 100) / 220.0 * 40 },
+    /** Vitesse réelle (°/s) pour une valeur du joystick (pan) ; par défaut linéaire, ~39°/s à 314, plafonnée à 150°/s. */
+    val panRate: (Int) -> Double = { c -> if (abs(c) < 100) 0.0 else minOf(150.0, (abs(c) - 100) / 220.0 * 40) },
 ) : GimbalLink {
     var t = 0L
     var p = 0
@@ -153,8 +153,8 @@ class HeadTest {
     @Test fun calibrationPicksTheFastest() {
         val (g, h) = setup()
         val r = h.calibrate()
-        assertEquals(r, 1000, h.bestStick)
-        assertTrue("vitesse ${h.bestSpeed}", abs(h.bestSpeed - 163.6) < 10)
+        assertEquals(r, 1200, h.bestStick)
+        assertTrue("vitesse ${h.bestSpeed}", abs(h.bestSpeed - 150) < 10)
         val t0 = g.t
         val start = g.pan
         h.look(90.0, null)
@@ -164,10 +164,10 @@ class HeadTest {
 
     @Test fun calibrationAvoidsValuesThatAreSlower() {
         // Nacelle qui sature à 600 et ralentit au-delà
-        val g = FakeGimbal(panRate = { c -> val a = abs(c); if (a < 100) 0.0 else if (a <= 600) (a - 100) / 5.0 else 60.0 })
+        val g = FakeGimbal(panRate = { c -> val a = abs(c); if (a < 100) 0.0 else if (a <= 2000) (a - 100) / 15.0 else 60.0 })
         val h = Head(g, sleep = { g.advance(it) }, now = { g.t })
         h.calibrate()
-        assertEquals(600, h.bestStick)
+        assertEquals(2000, h.bestStick)
     }
 
     @Test fun slowGimbalStillReaches90() {

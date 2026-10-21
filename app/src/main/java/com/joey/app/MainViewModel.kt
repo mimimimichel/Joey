@@ -70,6 +70,11 @@ data class UiState(
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
+    companion object {
+        /** À augmenter quand la mesure de la tête change : elle est refaite à la connexion suivante. */
+        const val CALIB_VERSION = 2
+    }
+
     private val prefs = app.getSharedPreferences("joey", Context.MODE_PRIVATE)
 
     var geminiKey: String
@@ -99,8 +104,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         onState = { s ->
             _state.update { it.copy(gimbal = s) }
             // Première connexion : Joey « s'étire » pour mesurer la vitesse réelle de sa tête.
-            if (s == GimbalState.READY && (prefs.getString("speed_table", null) == null ||
+            if (s == GimbalState.READY && !calibrating && (prefs.getInt("calib_version", 0) < CALIB_VERSION ||
                     sensors.available && prefs.getInt("phone_pan_sign", 0) == 0)) {
+                calibrating = true
                 thread(isDaemon = true) { Thread.sleep(1500); calibrateHead() }
             }
         },
@@ -124,6 +130,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         onConfirmed = { prefs.edit().putBoolean("follow_confirmed", true).apply() },
         onLog = ::log,
         maxStick = { head.maxStickNow() },
+        stickFor = { head.stickFor(it) },
     )
 
     @Volatile private var live: GeminiLive? = null
@@ -143,6 +150,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             followFace = flag("follow_face", true),
             headSpeed = headSpeed,
             memories = memory.size,
+            usesPhoneSensors = head.usesPhone,
         )
     }
 
@@ -330,11 +338,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Mesure la vitesse réelle de la tête et la retient. */
+    @Volatile private var calibrating = false
+
     fun calibrateHead(): Unit = moveAsync(holdMs = 1000) {
-        log("Je mesure la vitesse de ma tête…")
-        val r = head.calibrate()
-        prefs.edit().putString("speed_table", head.table.filter { it.first > 0 }.joinToString(",") { "${it.first}:${it.second}" }).apply()
-        r
+        calibrating = true
+        try {
+            log("Je mesure ma tête (vitesse et sens)…")
+            val r = head.calibrate()
+            if (r.startsWith("vitesses")) {
+                prefs.edit()
+                    .putString("speed_table", head.table.filter { it.first > 0 }.joinToString(",") { "${it.first}:${it.second}" })
+                    .putInt("calib_version", CALIB_VERSION)
+                    .apply()
+                refreshSettings()
+            }
+            r
+        } finally {
+            calibrating = false
+        }
     }
 
     fun recenter() = background("centrer") { head.center() }

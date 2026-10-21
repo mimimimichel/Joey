@@ -24,6 +24,8 @@ class FaceFollower(
     private val onLog: (String) -> Unit = {},
     /** Vitesse max du joystick (réglage). */
     private val maxStick: () -> Int = { 600 },
+    /** Valeur du joystick pour une vitesse donnée (°/s), d'après la mesure de la tête. null : approximation. */
+    private val stickFor: ((Double) -> Int)? = null,
 ) {
     @Volatile var enabled = true
     @Volatile var panSign = initialPanSign
@@ -41,6 +43,9 @@ class FaceFollower(
         private set
 
     private var driving = false
+    private var chasing = false
+    private var chasePan = 0
+    private var chaseTilt = 0
     private val pan = Axis("gauche/droite", initialConfirmed)
     private val tilt = Axis("haut/bas", initialConfirmed)
 
@@ -62,6 +67,13 @@ class FaceFollower(
     private fun speed(e: Float, sure: Boolean): Int {
         val m = abs(e)
         if (m < 0.06f) return 0
+        val sf = stickFor
+        if (sf != null) {
+            // Écart en degrés (~34° du centre au bord de l'image), rattrapé en ~0,35 s ; plus doux tant que le sens est incertain.
+            val deg = m * 34.0
+            val want = if (sure) deg / 0.35 else minOf(deg / 0.6, 25.0)
+            return (sign(e) * minOf(maxStick(), sf(maxOf(want, 4.0)))).toInt()
+        }
         val max = if (sure) maxStick().toFloat() else minOf(maxStick(), 260).toFloat()
         // Visage au bord de l'image (|e| ≈ 0,6 et plus) : à fond.
         return (sign(e) * min(max, 130f + (max - 130f) * m / 0.6f)).toInt()
@@ -74,9 +86,24 @@ class FaceFollower(
         }
         if (!enabled || !link.ready || t < pausedUntil) return
         if (x == null || y == null) {
-            if (driving && t - seenAt > 600) { link.stick(0, 0); driving = false; pan.reset(); tilt.reset() }
+            if (driving && !chasing && t - seenAt < 400) {
+                // Le visage sort de l'image pendant qu'on tourne et que l'écart grandissait : on tournait à l'envers.
+                if (pan.lostWhileGrowing()) { panSign = -panSign; onSignsChanged(panSign, tiltSign) }
+                if (tilt.lostWhileGrowing()) { tiltSign = -tiltSign; onSignsChanged(panSign, tiltSign) }
+                // On continue vers là où il a disparu (dans le bon sens), le temps de le retrouver.
+                chasePan = if (abs(faceX) > 0.3f) speed(faceX, true) * panSign else 0
+                chaseTilt = if (abs(faceY) > 0.3f) speed(-faceY, true) * tiltSign else 0
+                chasing = true
+            }
+            if (chasing && t - seenAt < 1300 && (chasePan != 0 || chaseTilt != 0)) {
+                link.stick(chasePan, chaseTilt)
+                return
+            }
+            if (driving) { link.stick(0, 0); driving = false; pan.reset(); tilt.reset() }
+            chasing = false
             return
         }
+        chasing = false
         // Visage plus haut que le centre (y < 0) : lever la tête (+).
         val ex = x
         val ey = -y
@@ -103,16 +130,31 @@ class FaceFollower(
         private var started = false
         private var startAt = 0L
         private var startErr = 0f
+        private var lastErr = 0f
 
         fun reset() { started = false }
 
+        /** Visage perdu : il partait vers le bord (écart nettement plus grand qu'au début de la poussée, près du bord). */
+        fun lostWhileGrowing(): Boolean {
+            if (!started) return false
+            val wrong = abs(lastErr) > 0.7f && abs(lastErr) > abs(startErr) + 0.15f
+            started = false
+            if (wrong) {
+                confirmed = false
+                onLog("Suivi du visage : sens $name inversé (visage sorti de l'image).")
+            }
+            return wrong
+        }
+
         /** true s'il faut inverser le sens. */
         fun check(err: Float, pushing: Boolean, t: Long): Boolean {
+            lastErr = err
             if (!pushing) { started = false; return false }
             if (!started || sign(err) != sign(startErr)) { started = true; startAt = t; startErr = err; return false }
-            if (t - startAt < (if (confirmed) 700 else 300)) return false
+            if (t - startAt < (if (confirmed) 800 else 450)) return false
             val grew = abs(err) - abs(startErr)
-            val wrong = grew > (if (confirmed) 0.2f else 0.07f)
+            // Il faut une preuve nette : la détection du visage tremble un peu, et la personne bouge aussi.
+            val wrong = grew > (if (confirmed) 0.3f else 0.15f)
             if (!confirmed && grew < -0.1f) {
                 confirmed = true
                 onLog("Suivi du visage : sens $name confirmé.")

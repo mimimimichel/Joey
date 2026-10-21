@@ -8,10 +8,10 @@ Les échanges avec la nacelle sont dans [`captures/session1_2026-10-21.txt`](cap
 
 - Bluetooth basse consommation (BLE). Nom annoncé : **`FY_Spg_82`** (adresse aléatoire statique `F3:18:93:00:30:82`).
 - Pas d'appairage, pas de code : l'app se connecte, active les notifications, et envoie.
-- Écriture **sans réponse** sur la caractéristique de handle `0x002F` ; notifications sur `0x002C`
-  (son descripteur `0x002D` reçoit `01 00`). Les UUID ne sont pas dans la capture (le téléphone les avait en cache) :
-  dans Joey, prendre le service non standard qui a une caractéristique « écriture sans réponse » et une « notification ».
-  Le code les affichera au premier essai pour qu'on les fige.
+- Service **Nordic UART** `6e400001-b5a3-f393-e0a9-e50e24dcca9e` (confirmé le 2026-10-21 par l'app Joey) :
+  - écriture **sans réponse** : `6e400002-…` (handle `0x002F`) ;
+  - notifications : `6e400003-…` (handle `0x002C`, descripteur `0x002D` ← `01 00`).
+- La nacelle expose aussi un service HID `0x1812` (le déclencheur photo Bluetooth) : on ne s'en sert pas.
 
 ## Trame
 
@@ -41,6 +41,11 @@ A5 5A | dest | cmd | n | n octets de données | CRC bas | CRC haut
 | `03 10 07` `01` tilt roulis pan (int16, en 1/100 de degré) | ~10×/s | **Angles de la tête.** Tête droite : tilt ≈ ±180 (repère retourné), roulis ≈ 0. Pan dérive lentement (~0,3°/s) : pas de boussole |
 | `00 10 05` `FF` pan tilt | ~4×/s | **Joystick physique du manche** (même format). Vu jusqu'à ±314 |
 
+**Vitesses mesurées par Joey (2026-10-21, joystick virtuel, capteurs du téléphone)** : 200 → 5°/s, 314 → 8°/s,
+450 → 13°/s, 600 → 17°/s, 800 → 24°/s, 1000 → 29°/s : la vitesse monte en ligne droite et ne plafonne pas à 1000.
+La nacelle accepte donc des valeurs bien plus grandes que celles du manche ; Joey mesure jusqu'à 6500 et garde la plus
+rapide (fiche technique : jusqu'à 150°/s en rotation).
+
 Vitesses mesurées avec le joystick physique : pan −314 → ~−40°/s, pan +256 → ~+30°/s, tilt +254 → ~+17°/s,
 tilt −314 → ~−20°/s. Petites valeurs (~100) : presque rien (courbe progressive).
 
@@ -50,4 +55,5 @@ tilt −314 → ~−20°/s. Petites valeurs (~100) : presque rien (courbe progre
    (sinon s'arrête-t-elle seule) ?
 2. `RECENTER` recentre bien ?
 3. Lire `0x71` en vidant la batterie : c'est le pourcentage ?
-4. Noter les UUID du service et des deux caractéristiques.
+4. ~~Noter les UUID~~ : fait (Nordic UART, ci-dessus).
+5. Jusqu'où monte la vitesse (mesure 0.8 : 300 à 6500).

@@ -410,7 +410,8 @@ class Head(
         moving = true
         val notes = StringBuilder()
         try {
-            for (v in listOf(200, 314, 450, 600, 800, 1000)) {
+            // Jusqu'à 6500 : la vitesse monte encore à 1000 (mesuré). On garde la plus rapide qui marche vraiment.
+            for (v in listOf(300, 700, 1200, 2000, 3000, 4500, 6500)) {
                 if (cancelled) break
                 link.stick(v * dir, 0)
                 sleep(350) // le temps d'accélérer
@@ -427,13 +428,14 @@ class Head(
                 dir = -dir
             }
             if (usePh && !cancelled) {
-                // Sens de l'inclinaison : un petit coup de joystick vers +, mesuré, puis retour.
+                // Sens de l'inclinaison : un coup de joystick franc vers +, mesuré, puis retour.
+                val tv = min(2000, res.maxByOrNull { it.second }?.first ?: 1200).coerceAtLeast(1000)
                 val e1 = ph!!.read()?.second
-                link.stick(0, 350)
-                sleep(450)
+                link.stick(0, tv)
+                sleep(600)
                 val e2 = ph.read()?.second
-                link.stick(0, -350)
-                sleep(450)
+                link.stick(0, -tv)
+                sleep(600)
                 link.stick(0, 0)
                 if (e1 != null && e2 != null && abs(e2 - e1) > 2 && signVotes != 0) {
                     val pan = if (signVotes > 0) 1 else -1
@@ -446,7 +448,7 @@ class Head(
                     notes.append(" ; capteurs du téléphone : joystick + = ${if (pan > 0) "droite" else "gauche"}, " +
                         if (tilt > 0) "haut" else "bas")
                 } else {
-                    notes.append(" ; sens non mesurés (mouvement trop faible)")
+                    notes.append(" ; sens non mesurés (mouvement trop faible : %.1f°)".format(if (e1 != null && e2 != null) abs(e2 - e1) else 0.0))
                 }
             }
         } finally {

@@ -13,12 +13,16 @@ import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
 /**
- * Caméra du téléphone sans aperçu à l'écran (l'écran sert de visage) : une image toutes les 0,5 s,
- * redressée et réduite, gardée en JPEG pour Gemini.
+ * Caméra du téléphone sans aperçu à l'écran (l'écran sert de visage) : ~10 images/s analysées pour trouver
+ * un visage ([onFace]), et une image toutes les 0,5 s gardée en JPEG pour Gemini.
  */
 class Camera : Eyes {
     @Volatile private var latest: String? = null
     @Volatile private var lastAt = 0L
+    @Volatile private var lastFaceAt = 0L
+    private val faces = FaceSense()
+    /** Appelé ~10 fois par seconde avec le visage vu (ou null). Sur le fil de la caméra. */
+    @Volatile var onFace: ((SeenFace?) -> Unit)? = null
     private val worker = Executors.newSingleThreadExecutor()
     private var provider: ProcessCameraProvider? = null
 
@@ -38,16 +42,24 @@ class Camera : Eyes {
                 analysis.setAnalyzer(worker) { img ->
                     try {
                         val now = System.currentTimeMillis()
-                        if (now - lastAt >= 500) {
+                        val wantFace = onFace != null && now - lastFaceAt >= 90
+                        val wantJpeg = now - lastAt >= 500
+                        if (wantFace || wantJpeg) {
                             val bmp = img.toBitmap()
                             val rot = img.imageInfo.rotationDegrees
                             val scale = 640f / maxOf(bmp.width, bmp.height)
                             val m = Matrix().apply { postScale(scale, scale); postRotate(rot.toFloat()) }
-                            val out = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-                            val bos = ByteArrayOutputStream()
-                            out.compress(Bitmap.CompressFormat.JPEG, 70, bos)
-                            latest = Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
-                            lastAt = now
+                            val upright = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                            if (wantFace) {
+                                lastFaceAt = now
+                                onFace?.invoke(faces.find(upright))
+                            }
+                            if (wantJpeg) {
+                                val bos = ByteArrayOutputStream()
+                                upright.compress(Bitmap.CompressFormat.JPEG, 70, bos)
+                                latest = Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+                                lastAt = now
+                            }
                         }
                     } catch (e: Exception) {
                         Log.w("Camera", "image", e)

@@ -21,11 +21,13 @@ une petite intelligence avec du caractère, qui commente, se souvient, et se dé
 - **Il s'exprime aussi avec le Roomba** : petites mélodies, voyants, petits mouvements (joie, hésitation).
 - **À distance** : on peut lui parler et voir par ses yeux depuis son téléphone, hors de la maison (Tailscale).
 
-## L'app (version 0.1)
+## L'app (version 0.2)
 
 - **Visage** plein écran (yeux animés : clignements, expressions, regard qui suit les mouvements de tête, bouche qui bouge avec la voix).
 - **Conversation** : bouton 🎤 → Gemini Live (même client et même voix de robot que Bebop IA), personnalité de Joey,
   une image de la caméra par seconde, mémoire entre les conversations.
+- **Suivi du visage** : la caméra avant cherche les visages (ML Kit, sur le téléphone) ; la tête suit la personne et les yeux
+  la regardent. Le sens de rotation se règle tout seul au premier essai.
 - **Tête** : se connecte seule à la nacelle SPG (`FY_Spg_…`) ; Joey peut regarder à gauche/droite/haut/bas, balayer la pièce,
   faire oui/non. Panneau 🦒 : joystick à l'écran, centrer, journal (avec les UUID Bluetooth à noter).
 - Clé Gemini : réglages ⚙ (ou `-PgeminiKey=...` à la compilation). Compiler : `./gradlew assembleDebug`.

@@ -123,6 +123,7 @@ fun JoeyScreen(vm: MainViewModel) {
                     GimbalState.CONNECTING -> "🦒 Connexion…"
                     GimbalState.OFF -> "🦒 Nacelle déconnectée"
                 }) { headPanel = true }
+                if (s.followFace && s.gimbal == GimbalState.READY) Chip(if (s.seesFace) "👤 Je te vois" else "👤 Personne")
                 Chip(when (s.live) {
                     LiveState.OFF -> "💤 En veille"
                     LiveState.CONNECTING -> "… Réveil"
@@ -258,6 +259,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
     var invert by remember { mutableStateOf(s.invertPan) }
     var barge by remember { mutableStateOf(s.bargeIn) }
     var subs by remember { mutableStateOf(s.subtitles) }
+    var follow by remember { mutableStateOf(s.followFace) }
     var confirmForget by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = close,
@@ -274,6 +276,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Voix de robot", robot) { robot = it }
                 Toggle("Joey voit (caméra)", camera) { camera = it }
                 Toggle("Caméra avant (côté écran)", front) { front = it }
+                Toggle("Suivre mon visage", follow) { follow = it }
                 Toggle("Inverser gauche / droite de la tête", invert) { invert = it }
                 Toggle("Pouvoir lui couper la parole", barge) { barge = it }
                 Toggle("Sous-titres", subs) { subs = it }
@@ -283,7 +286,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
         },
         confirmButton = {
             TextButton(onClick = {
-                vm.saveSettings(key, robot, camera, front, invert, barge, subs)
+                vm.saveSettings(key, robot, camera, front, invert, barge, subs, follow)
                 close()
             }) { Text("Enregistrer") }
         },

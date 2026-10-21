@@ -10,6 +10,7 @@ import com.joey.app.brain.LiveState
 import com.joey.app.brain.Memory
 import com.joey.app.face.Activity
 import com.joey.app.face.Mood
+import com.joey.app.gimbal.FaceFollower
 import com.joey.app.gimbal.GimbalState
 import com.joey.app.gimbal.Head
 import com.joey.app.gimbal.SpgGimbal
@@ -43,6 +44,8 @@ data class UiState(
     val invertPan: Boolean = false,
     val bargeIn: Boolean = true,
     val subtitles: Boolean = true,
+    val followFace: Boolean = true,
+    val seesFace: Boolean = false,
     val memories: Int = 0,
 )
 
@@ -70,6 +73,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         onBattery = { b -> _state.update { it.copy(battery = b) } },
     )
     val head = Head(gimbal, rightSign = { if (flag("invert_pan", false)) -1 else 1 })
+    val follower = FaceFollower(
+        gimbal,
+        initialPanSign = prefs.getInt("follow_pan_sign", 1),
+        initialTiltSign = prefs.getInt("follow_tilt_sign", 1),
+        initialConfirmed = prefs.getBoolean("follow_confirmed", false),
+        onSignsChanged = { p, t -> prefs.edit().putInt("follow_pan_sign", p).putInt("follow_tilt_sign", t).apply() },
+        onConfirmed = { prefs.edit().putBoolean("follow_confirmed", true).apply() },
+        onLog = ::log,
+    )
 
     @Volatile private var live: GeminiLive? = null
     @Volatile private var greeted = false
@@ -85,6 +97,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             invertPan = flag("invert_pan", false),
             bargeIn = flag("barge_in", true),
             subtitles = flag("subtitles", true),
+            followFace = flag("follow_face", true),
             memories = memory.size,
         )
     }
@@ -98,7 +111,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun message(text: String?) = _state.update { it.copy(message = text) }
 
     // ---- réglages ---------------------------------------------------------------------------
-    fun saveSettings(key: String, robotVoice: Boolean, camera: Boolean, front: Boolean, invertPan: Boolean, bargeIn: Boolean, subtitles: Boolean) {
+    fun saveSettings(key: String, robotVoice: Boolean, camera: Boolean, front: Boolean, invertPan: Boolean, bargeIn: Boolean, subtitles: Boolean, followFace: Boolean) {
         val cameraChanged = camera != flag("camera", true) || front != flag("front_camera", true)
         geminiKey = key
         setFlag("robot_voice", robotVoice)
@@ -107,6 +120,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         setFlag("invert_pan", invertPan)
         setFlag("barge_in", bargeIn)
         setFlag("subtitles", subtitles)
+        setFlag("follow_face", followFace)
+        follower.enabled = followFace
+        if (!followFace) gimbal.stick(0, 0)
         refreshSettings()
         if (cameraChanged) cameraOwner?.let { startCamera(it) }
     }
@@ -120,6 +136,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- sens ---------------------------------------------------------------------------------
     fun startCamera(owner: LifecycleOwner) {
         cameraOwner = owner
+        follower.enabled = flag("follow_face", true)
+        camera.onFace = { f ->
+            follower.onFace(f?.x, f?.y)
+            val sees = follower.sees
+            if (sees != _state.value.seesFace) _state.update { it.copy(seesFace = sees) }
+        }
         camera.stop()
         if (flag("camera", true)) {
             camera.start(owner, getApplication(), flag("front_camera", true)) { log(it) }
@@ -133,14 +155,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Joystick de l'écran : x = droite, y = haut, de -1 à 1. */
     fun manualStick(x: Float, y: Float) {
         val sign = if (flag("invert_pan", false)) -1 else 1
+        if (x != 0f || y != 0f) follower.pause(4000)
         gimbal.stick((x * 320 * sign).toInt(), (y * 320).toInt())
     }
 
     private fun background(name: String, body: () -> String) = thread(name = name, isDaemon = true) {
-        _state.update { it.copy(busy = true) }
-        val r = runCatching(body).getOrElse { "échec : ${it.message}" }
+        val r = runCatching { busy(holdMs = 4000, body = body) }.getOrElse { "échec : ${it.message}" }
         log("Tête : $r")
-        _state.update { it.copy(busy = false) }
     }
 
     fun recenter() = background("centrer") { head.center() }
@@ -225,14 +246,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val dir = args["direction"] as? String ?: "devant"
                 val deg = (args["degres"] as? Number)?.toDouble()
                 log("👀 regarder $dir${deg?.let { " ${it.toInt()}°" } ?: ""}")
-                val r = busy { head.lookDirection(dir, deg) }
+                // Il garde ce regard quelques secondes avant de revenir te suivre.
+                val r = busy(holdMs = if (dir == "devant") 1000 else 7000) { head.lookDirection(dir, deg) }
                 live?.sendFrameNow()
                 mapOf("result" to r)
             }
             "regarder_autour" -> {
                 if (!gimbal.ready) return mapOf("result" to noHead)
                 log("👀 regarder autour")
-                val r = busy { head.sweep { live?.sendFrameNow() } }
+                val r = busy(holdMs = 3000) { head.sweep { live?.sendFrameNow() } }
                 mapOf("result" to r)
             }
             "exprimer" -> {
@@ -273,17 +295,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "batterie_nacelle_pourcent" to gimbal.battery.takeIf { it >= 0 },
                     "roues" to "pas encore branchées (Roomba)",
                     "souvenirs" to memory.size,
+                    "visage_vu" to follower.sees,
+                    "suivi_du_visage" to follower.enabled,
                 )
             }
             else -> mapOf("result" to "outil inconnu")
         }
     }
 
-    private fun <T> busy(body: () -> T): T {
+    /** Mouvement demandé (par Joey ou à la main) : le suivi du visage se met en pause pendant, et [holdMs] après. */
+    private fun <T> busy(holdMs: Long = 2000, body: () -> T): T {
+        follower.pause(120_000)
         _state.update { it.copy(busy = true) }
         try {
             return body()
         } finally {
+            follower.pausedUntil = System.currentTimeMillis() + holdMs
             _state.update { it.copy(busy = false) }
         }
     }
@@ -315,6 +342,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val sign = if (flag("invert_pan", false)) -1f else 1f
             return Pair(head.gazeX * sign * 0.8f, -head.gazeY * 0.8f)
         }
+        // Il regarde la personne. Image de la caméra avant non retournée : à droite de l'image = à droite de Joey,
+        // donc vers la gauche de l'écran vu de face.
+        if (follower.sees) return Pair(-follower.faceX * 0.9f, follower.faceY * 0.9f)
         return Pair(0f, 0f)
     }
 

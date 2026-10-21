@@ -18,9 +18,12 @@ android {
         applicationId = "com.joey.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
         buildConfigField("String", "GEMINI_KEY", "\"" + geminiKey + "\"")
+        // Seulement les processeurs ARM 64 bits (S10, S8+ et presque tous depuis 2017) : APK bien plus léger.
+        // -PallAbis=true pour tout inclure.
+        if (project.findProperty("allAbis") != "true") ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     buildTypes {
@@ -81,4 +84,7 @@ dependencies {
     val camerax = "1.4.1"
     implementation("androidx.camera:camera-camera2:$camerax")
     implementation("androidx.camera:camera-lifecycle:$camerax")
+
+    // Détection des visages sur le téléphone (sans Internet, modèle inclus) : la tête suit la personne
+    implementation("com.google.mlkit:face-detection:16.1.7")
 }

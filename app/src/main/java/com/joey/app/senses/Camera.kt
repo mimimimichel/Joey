@@ -14,15 +14,21 @@ import java.util.concurrent.Executors
 
 /**
  * Caméra du téléphone sans aperçu à l'écran (l'écran sert de visage) : ~10 images/s analysées pour trouver
- * un visage ([onFace]), et une image toutes les 0,5 s gardée en JPEG pour Gemini.
+ * un visage ou un objet ([onFrame]), et une image toutes les 0,5 s gardée en JPEG pour Gemini.
  */
 class Camera : Eyes {
     @Volatile private var latest: String? = null
     @Volatile private var lastAt = 0L
     @Volatile private var lastFaceAt = 0L
-    private val faces = FaceSense()
-    /** Appelé ~10 fois par seconde avec le visage vu (ou null). Sur le fil de la caméra. */
-    @Volatile var onFace: ((SeenFace?) -> Unit)? = null
+    /** Appelé ~10 fois par seconde avec l'image redressée (640 px). Sur le fil de la caméra. */
+    @Volatile var onFrame: ((Bitmap) -> Unit)? = null
+    @Volatile private var latestBitmap: Bitmap? = null
+    @Volatile private var latestBitmapAt = 0L
+
+    /** Dernière image redressée (null si trop vieille). */
+    fun frame(maxAgeMs: Long = 1000): Bitmap? = latestBitmap?.takeIf { System.currentTimeMillis() - latestBitmapAt < maxAgeMs }
+    /** Heure de la dernière image. */
+    val frameAt: Long get() = latestBitmapAt
     private val worker = Executors.newSingleThreadExecutor()
     private var provider: ProcessCameraProvider? = null
 
@@ -42,7 +48,7 @@ class Camera : Eyes {
                 analysis.setAnalyzer(worker) { img ->
                     try {
                         val now = System.currentTimeMillis()
-                        val wantFace = onFace != null && now - lastFaceAt >= 90
+                        val wantFace = now - lastFaceAt >= 90
                         val wantJpeg = now - lastAt >= 500
                         if (wantFace || wantJpeg) {
                             val bmp = img.toBitmap()
@@ -52,7 +58,9 @@ class Camera : Eyes {
                             val upright = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
                             if (wantFace) {
                                 lastFaceAt = now
-                                onFace?.invoke(faces.find(upright))
+                                latestBitmap = upright
+                                latestBitmapAt = now
+                                onFrame?.invoke(upright)
                             }
                             if (wantJpeg) {
                                 val bos = ByteArrayOutputStream()

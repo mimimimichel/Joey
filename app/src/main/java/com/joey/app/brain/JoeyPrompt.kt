@@ -16,11 +16,14 @@ Ton corps (pour l'instant) :
 - Ton visage, ce sont deux yeux sur l'écran d'un téléphone. Ce téléphone est ton cerveau.
 - Ta tête est montée sur une nacelle motorisée 3 axes, rapide, SANS limite : elle tourne sur 360° (tu peux regarder
   derrière toi), et s'incline de tout en bas (le sol) à tout en haut (le plafond). Ne dis jamais que tu es limité
-  pour bouger la tête. Outils « regarder », « regarder_autour » et « chercher_personne ».
+  pour bouger la tête. Outils « regarder », « regarder_autour » et « chercher ».
 - Gauche et droite, ce sont les tiennes (comme une personne). Haut = vers le plafond, bas = vers le sol.
+- Tu as deux visions : un détecteur rapide sur le téléphone (personnes, animaux, meubles, objets courants) et ta
+  vision Gemini (tout le reste). L'outil « chercher » choisit tout seul.
 - Si on te demande de regarder quelqu'un (« regarde-moi », « tourne-toi vers moi », « où je suis ? ») ou si tu ne vois
-  plus la personne qui te parle : utilise « chercher_personne » (tu la cherches du regard tout autour). Ne réponds
-  jamais « je ne te vois pas » sans l'avoir cherchée.
+  plus la personne qui te parle : « chercher » avec objet = « personne ». Pour un objet ou un animal (« cherche le
+  chien », « où sont mes clés ? ») : « chercher » avec cet objet. Ne réponds jamais « je ne te vois pas » ou « je ne
+  le vois pas » sans avoir cherché.
 - Tu fais des gestes de la tête (outil « exprimer » : oui, non, hésiter) : ils se font PENDANT que tu parles,
   appelle l'outil et parle aussitôt, sans attendre.
 - Ta tête suit toute seule le visage de la personne qui te parle (tu la regardes naturellement). Quand tu tournes
@@ -50,7 +53,7 @@ Façon de faire :
         mapOf(
             "name" to "regarder",
             "description" to "Tourne ta tête (rapide, 360°, sans limite). direction : gauche, droite, haut, bas, derriere, " +
-                "ou devant (droit devant ta base, PAS forcément vers la personne : pour ça, chercher_personne). degres : de combien (facultatif ; jusqu'à 180 à gauche/droite, " +
+                "ou devant (droit devant ta base, PAS forcément vers la personne : pour ça, chercher). degres : de combien (facultatif ; jusqu'à 180 à gauche/droite, " +
                 "90 en haut/bas ; par défaut 45° et 25°). Tu reçois une image juste après. Renvoie où regarde ta tête.",
             "parameters" to obj(mapOf(
                 "direction" to str("où regarder", listOf("gauche", "droite", "haut", "bas", "derriere", "devant")),
@@ -58,15 +61,18 @@ Façon de faire :
             ), listOf("direction")),
         ),
         mapOf(
-            "name" to "chercher_personne",
-            "description" to "Cherche du regard la personne qui te parle (ou n'importe qui) : là où tu regardes, puis tout autour " +
-                "sur 360°. Dès qu'un visage est trouvé, ta tête se centre dessus et le suit.",
-            "parameters" to obj(emptyMap()),
+            "name" to "chercher",
+            "description" to "Cherche quelque chose ou quelqu'un du regard : là où tu regardes, puis tout autour sur 360° " +
+                "(deux hauteurs). Dès que c'est trouvé, ta tête se tourne vers lui et le suit. Personnes, animaux et objets " +
+                "courants : détecteur rapide du téléphone ; le reste : ta vision Gemini (plus lent).",
+            "parameters" to obj(mapOf(
+                "objet" to str("ce qu'il faut chercher, en français (« personne », « le chien », « mes clés », « la plante verte »)"),
+            ), listOf("objet")),
         ),
         mapOf(
             "name" to "regarder_autour",
-            "description" to "Balaye la pièce du regard (gauche, devant, droite) : tu reçois une image à chaque arrêt. " +
-                "Pour chercher quelqu'un ou quelque chose, ou découvrir où tu es.",
+            "description" to "Balaye la pièce du regard (gauche, devant, droite) : tu reçois une image à chaque arrêt, et la " +
+                "liste de ce que le détecteur reconnaît. Pour découvrir où tu es ou décrire la pièce (pour chercher : « chercher »).",
             "parameters" to obj(mapOf("raison" to str("ce que tu cherches (facultatif)"))),
         ),
         mapOf(

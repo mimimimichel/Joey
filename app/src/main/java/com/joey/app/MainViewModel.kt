@@ -15,6 +15,11 @@ import com.joey.app.gimbal.GimbalState
 import com.joey.app.gimbal.Head
 import com.joey.app.gimbal.SpgGimbal
 import com.joey.app.senses.Camera
+import com.joey.app.senses.CocoClasses
+import com.joey.app.senses.FaceSense
+import com.joey.app.senses.ObjectSense
+import com.joey.app.senses.Seen
+import com.joey.app.brain.GeminiVision
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -52,6 +57,8 @@ data class UiState(
     val followFace: Boolean = true,
     val headSpeed: Int = 700,
     val seesFace: Boolean = false,
+    /** Ce qu'il cherche ou suit du regard en ce moment (null : les visages). */
+    val tracking: String? = null,
     val memories: Int = 0,
 )
 
@@ -69,6 +76,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     val memory = Memory(File(app.filesDir, "memoire.json"))
     val camera = Camera()
+    private val faces = FaceSense()
+    private val objects = ObjectSense(app, ::log)
+    private val vision = GeminiVision { geminiKey }
+
+    // Ce que la tête suit : les visages par défaut, ou des objets du détecteur (« le chien ») pendant un moment.
+    @Volatile private var trackLabels: Set<String>? = null
+    @Volatile private var trackUntil = 0L
+    @Volatile private var trackName = ""
 
     val gimbal = SpgGimbal(
         context = app,
@@ -150,16 +165,86 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun startCamera(owner: LifecycleOwner) {
         cameraOwner = owner
         follower.enabled = flag("follow_face", true)
-        camera.onFace = { f ->
-            follower.onFace(f?.x, f?.y)
-            val sees = follower.sees
-            if (sees != _state.value.seesFace) _state.update { it.copy(seesFace = sees) }
-        }
+        camera.onFrame = { bmp -> onFrame(bmp) }
         camera.stop()
         if (flag("camera", true)) {
             camera.start(owner, getApplication(), flag("front_camera", true)) { log(it) }
         }
     }
+
+    /** Chaque image (~10/s) : on cherche la cible du moment (visage, ou objet) et la tête la suit. */
+    private fun onFrame(bmp: android.graphics.Bitmap) {
+        val labels = trackLabels
+        if (labels != null && System.currentTimeMillis() < trackUntil) {
+            val best = objects.detect(bmp).filter { it.label in labels }
+                .maxByOrNull { it.score * kotlin.math.sqrt(it.box.w * it.box.h) }
+            // Une personne : on vise le haut de la silhouette (la tête), pour que le visage apparaisse.
+            val y = best?.let { if (it.label == "person") it.box.cy - it.box.h * 0.3 else it.box.cy }
+            follower.onFace(best?.let { (it.box.cx * 2 - 1).toFloat() }, y?.let { (it * 2 - 1).toFloat() })
+        } else {
+            if (labels != null) {
+                trackLabels = null
+                follower.forget()
+                _state.update { it.copy(tracking = null) }
+            }
+            val f = faces.find(bmp)
+            follower.onFace(f?.x, f?.y)
+        }
+        val sees = follower.sees
+        if (sees != _state.value.seesFace) _state.update { it.copy(seesFace = sees) }
+    }
+
+    /**
+     * Cherche du regard une catégorie du détecteur du téléphone (personne, chien, chaise…) en faisant le tour.
+     * Trouvé : la tête la suit pendant [keepMs], puis revient aux visages. À appeler sur le fil des mouvements.
+     */
+    private fun searchLocal(what: String, labels: Set<String>, keepMs: Long): Boolean {
+        trackName = what
+        trackLabels = labels
+        trackUntil = System.currentTimeMillis() + 120_000
+        follower.forget()
+        _state.update { it.copy(tracking = what) }
+        val found = head.searchTarget(follower::seenSince)
+        if (found) {
+            trackUntil = System.currentTimeMillis() + keepMs
+        } else {
+            trackUntil = 0
+        }
+        return found
+    }
+
+    /** Champ de vision approximatif de la caméra (degrés), selon le sens de l'image. */
+    private fun fov(): Pair<Double, Double> {
+        val b = camera.frame(5000)
+        val landscape = b == null || b.width >= b.height
+        return if (landscape) 68.0 to 50.0 else 50.0 to 68.0
+    }
+
+    /** Objet inconnu du détecteur : Gemini regarde chaque direction. Trouvé : la tête se centre dessus. */
+    private fun searchGemini(what: String): com.joey.app.brain.Found? {
+        var hit: com.joey.app.brain.Found? = null
+        _state.update { it.copy(tracking = what) }
+        try {
+            head.scan(listOf(0.0, -60.0, 60.0, -120.0, 120.0, 179.0), listOf(0.0, -30.0)) { _ ->
+                Thread.sleep(650) // image fraîche après le mouvement
+                val jpeg = camera.captureJpegBase64() ?: return@scan false
+                val f = runCatching { vision.find(jpeg, what) }.onFailure { log("Vision Gemini : ${it.message}") }.getOrNull()
+                if (f != null && f.found && f.confidence >= 0.5) { hit = f; true } else false
+            }
+            hit?.box?.let { b ->
+                val (h, v) = fov()
+                val ex = b.cx * 2 - 1
+                val ey = -(b.cy * 2 - 1)
+                head.turnStick(ex * h / 2 * follower.panSign, ey * v / 2 * follower.tiltSign)
+            }
+        } finally {
+            _state.update { it.copy(tracking = null) }
+        }
+        return hit
+    }
+
+    /** Ce que voit le détecteur du téléphone en ce moment. */
+    private fun seenNow(): List<Seen> = camera.frame()?.let { objects.detect(it) } ?: emptyList()
 
     fun connectGimbal() = gimbal.connect()
     fun disconnectGimbal() = gimbal.disconnect()
@@ -212,14 +297,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Mouvement dont Joey a besoin du résultat (voir ce qu'il y a là-bas) : on attend, mais vite. */
-    private fun moveSync(holdMs: Long, body: () -> String): String {
+    private fun moveSync(holdMs: Long, timeoutMs: Long = 15_000, body: () -> String): String {
         val gen = startMotion()
         val job = motion.submit<String> {
             try { body() } catch (e: InterruptedException) { "interrompu" } finally { gimbal.stick(0, 0) }
         }
         motionJob = job
         return try {
-            job.get(15, TimeUnit.SECONDS)
+            job.get(timeoutMs, TimeUnit.MILLISECONDS)
         } catch (e: Exception) {
             "interrompu"
         } finally {
@@ -295,9 +380,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         lastAutoSearch = now
         log("👀 on me parle, je cherche qui")
         moveAsync(holdMs = 0) {
-            val found = head.searchPerson(follower::seenSince)
-            if (found) follower.pausedUntil = 0
-            if (found) "trouvé" else "personne en vue"
+            if (searchLocal("personne", setOf("person"), keepMs = 2500)) "trouvé quelqu'un" else "personne en vue"
         }
     }
 
@@ -331,25 +414,47 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 live?.sendFrameNow()
                 mapOf("result" to r, "visage_dans_l_image" to follower.sees)
             }
-            "chercher_personne" -> {
+            "chercher" -> {
                 if (!gimbal.ready) return mapOf("result" to noHead)
-                log("👀 je te cherche")
-                val found = AtomicBoolean(false)
-                val r = moveSync(holdMs = 0) {
-                    found.set(head.searchPerson(follower::seenSince))
-                    if (found.get()) "trouvé" else "personne trouvé"
+                if (!flag("camera", true)) return mapOf("result" to "ta caméra est coupée (réglages) : tu ne vois rien")
+                val what = (args["objet"] as? String)?.trim().orEmpty().ifEmpty { "personne" }
+                val labels = CocoClasses.forTarget(what)
+                log("🔎 je cherche : $what" + (labels?.let { " (détecteur : ${it.joinToString()})" } ?: " (vision Gemini)"))
+                if (labels != null) {
+                    val person = "person" in labels
+                    val found = AtomicBoolean(false)
+                    moveSync(holdMs = 0, timeoutMs = 40_000) {
+                        found.set(searchLocal(what, labels, keepMs = if (person) 2500 else 15_000))
+                        if (found.get()) "trouvé : $what" else "pas trouvé : $what"
+                    }
+                    live?.sendFrameNow()
+                    if (found.get()) mapOf("result" to "trouvé ! ta tête est tournée vers « $what » et le suit des yeux" +
+                        (if (person) " (puis suit son visage)" else " pendant 15 s") + ". Regarde l'image pour en dire plus.",
+                        "vu_maintenant" to objects.describe(seenNow()))
+                    else mapOf("result" to "pas de « $what » en faisant le tour (360°, deux hauteurs). Peut-être caché, trop loin, " +
+                        "ou dans le noir.")
+                } else {
+                    var hit: com.joey.app.brain.Found? = null
+                    moveSync(holdMs = 8000, timeoutMs = 90_000) {
+                        hit = searchGemini(what)
+                        if (hit != null) "trouvé : $what" else "pas trouvé : $what"
+                    }
+                    live?.sendFrameNow()
+                    hit?.let { mapOf("result" to "trouvé, ta tête est tournée vers « $what »", "description" to it.description) }
+                        ?: mapOf("result" to "pas de « $what » en faisant le tour (360°, deux hauteurs)")
                 }
-                // Trouvé : le suivi du visage prend la main tout de suite et le centre.
-                if (found.get()) follower.pausedUntil = 0
-                live?.sendFrameNow()
-                mapOf("result" to if (found.get()) "je vois un visage, ma tête se centre dessus et le suit" else
-                    "aucun visage trouvé en faisant le tour (la personne est peut-être hors de vue, trop loin ou dans le noir)")
             }
             "regarder_autour" -> {
                 if (!gimbal.ready) return mapOf("result" to noHead)
                 log("👀 regarder autour")
-                val r = moveSync(holdMs = 3000) { head.sweep { live?.sendFrameNow() } }
-                mapOf("result" to r)
+                val seen = StringBuilder()
+                moveSync(holdMs = 3000) {
+                    head.sweep { where ->
+                        live?.sendFrameNow()
+                        seen.append("$where : ${objects.describe(seenNow())}. ")
+                    }
+                }
+                mapOf("result" to "fait (tu as reçu une image à chaque arrêt)", "detecteur" to seen.toString().trim())
             }
             "exprimer" -> {
                 val mood = when (args["emotion"] as? String) {

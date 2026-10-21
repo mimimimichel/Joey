@@ -109,13 +109,13 @@ class HeadTest {
             if (abs(Head.wrap(g.pan - personPan)) < 30 && h.pose()!!.second > -10) seenAt = g.t
             seenAt > t
         }
-        assertTrue(h.searchPerson(seen))
+        assertTrue(h.searchTarget(seen))
         assertTrue("pan ${g.pan}", abs(Head.wrap(g.pan - personPan)) < 30)
     }
 
     @Test fun searchGivesUp() {
         val (_, h) = setup()
-        assertEquals(false, h.searchPerson { false })
+        assertEquals(false, h.searchTarget { false })
     }
 
     @Test fun lookBehind() {

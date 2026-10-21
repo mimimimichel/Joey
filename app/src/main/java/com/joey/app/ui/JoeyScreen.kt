@@ -123,7 +123,8 @@ fun JoeyScreen(vm: MainViewModel) {
                     GimbalState.CONNECTING -> "🦒 Connexion…"
                     GimbalState.OFF -> "🦒 Nacelle déconnectée"
                 }) { headPanel = true }
-                if (s.followFace && s.gimbal == GimbalState.READY) Chip(if (s.seesFace) "👤 Je te vois" else "👤 Personne")
+                if (s.tracking != null) Chip("🔎 ${s.tracking}")
+                else if (s.followFace && s.gimbal == GimbalState.READY) Chip(if (s.seesFace) "👤 Je te vois" else "👤 Personne")
                 Chip(when (s.live) {
                     LiveState.OFF -> "💤 En veille"
                     LiveState.CONNECTING -> "… Réveil"

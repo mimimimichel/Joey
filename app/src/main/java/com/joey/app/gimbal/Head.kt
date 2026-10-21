@@ -188,27 +188,39 @@ class Head(
      * Cherche quelqu'un du regard : d'abord là où il regarde, puis tout autour (360°), un peu en haut puis à hauteur.
      * [seenSince] : un visage a-t-il été vu depuis cette heure ? Renvoie true dès qu'un visage est trouvé.
      */
-    fun searchPerson(seenSince: (Long) -> Boolean): Boolean {
+    fun searchTarget(seenSince: (Long) -> Boolean): Boolean =
+        scan(listOf(0.0, -45.0, 45.0, -90.0, 90.0, -135.0, 135.0, 179.0), listOf(25.0, 0.0)) { t ->
+            sleep(350) // le temps que la caméra voie
+            seenSince(t)
+        }
+
+    /**
+     * Fait le tour du regard : d'abord sans bouger, puis chaque direction de [pans] (par rapport à « devant ») pour
+     * chaque inclinaison de [tilts]. À chaque arrêt, [probe] (reçoit l'heure de l'arrêt) dit si c'est trouvé.
+     */
+    fun scan(pans: List<Double>, tilts: List<Double>, probe: (Long) -> Boolean): Boolean {
         cancelled = false
-        val t0 = now()
-        sleep(350)
-        if (seenSince(t0)) return true
-        val pans = listOf(0.0, -45.0, 45.0, -90.0, 90.0, -135.0, 135.0, 179.0)
-        for (tilt in listOf(25.0, 0.0)) {
+        if (probe(now())) return true
+        for (tilt in tilts) {
             for (target in pans) {
                 if (cancelled) return false
                 val cur = pose()?.first ?: 0.0
                 look(wrap(target - cur), tilt, timeoutMs = 3000)
-                val t = now()
-                sleep(350) // le temps que la caméra voie
-                if (seenSince(t)) {
-                    onLog("Visage trouvé (%.0f°, incl. %.0f°).".format(target, tilt))
+                if (probe(now())) {
+                    onLog("Trouvé en regardant à %.0f°, incliné à %.0f°.".format(target, tilt))
                     return true
                 }
             }
         }
         return false
     }
+
+    /**
+     * Tourne d'un angle donné dans le sens du joystick (pas forcément « droite ») : sert à centrer quelque chose vu dans
+     * l'image, avec les sens appris par le suivi (image -> joystick).
+     */
+    fun turnStick(panStickDeg: Double, tiltStickDeg: Double): String =
+        look(panStickDeg * rightSign(), (pose()?.second ?: 0.0) + tiltStickDeg * tiltSign(), timeoutMs = 3000)
 
     /** Hoche la tête (oui). */
     fun nod(): String {

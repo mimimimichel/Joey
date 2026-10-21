@@ -46,6 +46,8 @@ class FaceFollower(
 
     val sees: Boolean get() = now() - seenAt < 800
     fun seenSince(t: Long) = seenAt > t
+    /** Oublie la cible vue (on change de cible : visage -> objet). */
+    fun forget() { seenAt = 0L }
 
     fun pause(ms: Long) {
         pausedUntil = maxOf(pausedUntil, now() + ms)

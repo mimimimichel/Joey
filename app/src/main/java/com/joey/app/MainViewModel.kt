@@ -15,6 +15,8 @@ import com.joey.app.gimbal.GimbalState
 import com.joey.app.gimbal.Head
 import com.joey.app.gimbal.SpgGimbal
 import com.joey.app.senses.Camera
+import com.joey.app.senses.PhoneSensors
+import com.joey.app.remote.HeadsetServer
 import com.joey.app.senses.CocoClasses
 import com.joey.app.senses.FaceSense
 import com.joey.app.senses.ObjectSense
@@ -60,6 +62,10 @@ data class UiState(
     val seesFace: Boolean = false,
     /** Ce qu'il cherche ou suit du regard en ce moment (null : les visages). */
     val tracking: String? = null,
+    /** Casque (Quest) : adresse à ouvrir, ou null si la vue casque est arrêtée. */
+    val headsetUrl: String? = null,
+    val headsetFollow: Boolean = false,
+    val usesPhoneSensors: Boolean = false,
     val memories: Int = 0,
 )
 
@@ -93,7 +99,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         onState = { s ->
             _state.update { it.copy(gimbal = s) }
             // Première connexion : Joey « s'étire » pour mesurer la vitesse réelle de sa tête.
-            if (s == GimbalState.READY && prefs.getString("speed_table", null) == null) {
+            if (s == GimbalState.READY && (prefs.getString("speed_table", null) == null ||
+                    sensors.available && prefs.getInt("phone_pan_sign", 0) == 0)) {
                 thread(isDaemon = true) { Thread.sleep(1500); calibrateHead() }
             }
         },
@@ -103,8 +110,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val headSpeed get() = prefs.getInt("head_speed_pct", 100)
     /** Joey regarde avec la caméra avant (côté écran) : pour la nacelle, haut et bas sont inversés. */
     private val viewTiltSign get() = if (flag("camera", true) && flag("front_camera", true)) -1 else 1
+    /** Capteurs du téléphone (posé sur la nacelle) : où regarde vraiment la caméra. */
+    val sensors: PhoneSensors = PhoneSensors(app) { flag("camera", true) && flag("front_camera", true) }
     val head: Head = Head(gimbal, rightSign = { if (flag("invert_pan", false)) -1 else 1 }, tiltSign = { viewTiltSign },
-        speedFraction = { headSpeed / 100.0 }, onLog = ::log)
+        speedFraction = { headSpeed / 100.0 }, onLog = ::log, phone = sensors,
+        onPhoneSigns = { p, t -> prefs.edit().putInt("phone_pan_sign", p).putInt("phone_tilt_sign", t).apply() })
     val follower: FaceFollower = FaceFollower(
         gimbal,
         initialPanSign = prefs.getInt("follow_pan_sign", 1),
@@ -362,9 +372,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             onError = { e -> log(e); message(e) },
             bargeIn = flag("barge_in", true),
             robot = { flag("robot_voice", true) },
+            micOptional = headsetAudioClients > 0,
         )
         live = l
         l.start()
+        routeLiveAudio()
     }
 
     fun stopLive() {
@@ -514,6 +526,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "roues" to "pas encore branchées (Roomba)",
                     "souvenirs" to memory.size,
                     "visage_vu" to follower.sees,
+                    "boussole" to (sensors.compassText() ?: "indisponible"),
+                    "orientation_par" to if (head.usesPhone) "capteurs du téléphone" else "angles de la nacelle",
                     "suivi_du_visage" to follower.enabled,
                 )
             }
@@ -560,6 +574,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // Doit rester en dernier (juste avant onCleared) : tout ce qui est au-dessus est prêt (sinon plantage au lancement).
     init {
+        sensors.start()
+        head.setPhoneSigns(prefs.getInt("phone_pan_sign", 0), prefs.getInt("phone_tilt_sign", 0))
+        thread(name = "visee-casque", isDaemon = true) { aimLoop() }
         prefs.getString("speed_table", null)?.let { t ->
             runCatching {
                 head.setTable(t.split(",").map { it.split(":").let { (a, b) -> a.toInt() to b.toDouble() } })
@@ -569,7 +586,127 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         CrashReport.mark("viewmodel prêt")
     }
 
+    // ---- casque (Meta Quest) : voir par les yeux de Joey, diriger la tête avec la sienne -------------
+    @Volatile private var headset: HeadsetServer? = null
+    @Volatile private var headsetAudioClients = 0
+    @Volatile private var questYaw0 = 0.0
+    @Volatile private var questFollowing = false
+
+    fun setHeadset(on: Boolean) {
+        if (!on) {
+            headset?.stop()
+            headset = null
+            _state.update { it.copy(headsetUrl = null, headsetFollow = false) }
+            log("Vue casque arrêtée.")
+            return
+        }
+        if (headset != null) return
+        val h = HeadsetServer(
+            grab = { camera.frame(1500) },
+            state = ::headsetState,
+            onHead = ::questHead,
+            onSticks = { _, _, rx, ry -> if (!questFollowing && (kotlin.math.abs(rx) > 0.15 || kotlin.math.abs(ry) > 0.15)) manualStick(rx.toFloat(), (-ry).toFloat()) else if (!questFollowing) manualStick(0f, 0f) },
+            onButton = ::questButton,
+            tls = headsetTls(),
+            onMic = { pcm -> live?.feedMic(pcm) },
+            onAudioClients = ::headsetAudio,
+        )
+        if (!h.start()) {
+            message("Impossible de lancer la vue casque (port 8080 occupé ?).")
+            return
+        }
+        headset = h
+        val url = h.urls().firstOrNull()
+        _state.update { it.copy(headsetUrl = url ?: "") }
+        message(if (url == null) "Vue casque prête, mais le téléphone n'est sur aucun Wi-Fi : connecte-le au même Wi-Fi que le casque."
+            else "Dans le navigateur du Quest (même Wi-Fi), ouvre :\n$url\n\nAccepte l'avertissement (Avancé → Continuer), puis « 🥽 Entrer en VR » : " +
+                "la tête de Joey suit la tienne. Gâchette = « devant » ici ; grip = suivi marche/arrêt ; A = parler à Joey ; B = « cherche-moi ».")
+    }
+
+    /** Orientation du casque : la tête de Joey suit (cap relatif au moment du recentrage, inclinaison absolue). */
+    private fun questHead(pitch: Double, yaw: Double, follow: Boolean, recenter: Boolean) {
+        if (!follow) {
+            if (questFollowing) { questFollowing = false; _state.update { it.copy(headsetFollow = false) } }
+            return
+        }
+        if (!questFollowing || recenter) {
+            // Début du suivi : on arrête tout autre mouvement ; « devant » = là où Joey regarde, le casque aussi.
+            motionJob?.cancel(true)
+            questYaw0 = yaw
+            head.setHomeHere()
+            if (!questFollowing) log("🥽 La tête suit le casque.")
+            questFollowing = true
+            _state.update { it.copy(headsetFollow = true) }
+        }
+        follower.pause(1500)
+        head.aim(Head.wrap(yaw - questYaw0), pitch)
+    }
+
+    private fun aimLoop() {
+        while (true) {
+            Thread.sleep(40)
+            runCatching { head.aimStep() }
+        }
+    }
+
+    private fun questButton(b: String) {
+        when (b) {
+            "talk" -> if (live == null && geminiKey.isNotBlank()) startLive()
+            "find_me" -> {
+                questFollowing = false
+                _state.update { it.copy(headsetFollow = false) }
+                moveAsync(holdMs = 0) { if (searchLocal("personne", setOf("person"), keepMs = 2500)) "trouvé quelqu'un" else "personne en vue" }
+            }
+        }
+    }
+
+    /** Casque relié (ou non) en audio : la conversation passe par lui. */
+    private fun headsetAudio(n: Int) {
+        headsetAudioClients = n
+        if (n > 0 && live == null && geminiKey.isNotBlank()) startLive()
+        routeLiveAudio()
+        log(if (n > 0) "🎧 Audio dans le casque : parle avec le micro du Quest." else "🎧 Audio du casque coupé.")
+    }
+
+    private fun routeLiveAudio() {
+        val l = live ?: return
+        val h = headset
+        if (headsetAudioClients > 0 && h != null) {
+            l.audioOut = { pcm -> h.sendAudio(pcm) }
+            l.onFlush = { h.sendText("flush") }
+            l.useLocalSpeaker = false
+        } else {
+            l.audioOut = null
+            l.onFlush = null
+            l.useLocalSpeaker = true
+        }
+    }
+
+    /** Certificat de l'adresse https du casque (fourni dans l'application, auto-signé). */
+    private fun headsetTls(): javax.net.ssl.SSLServerSocketFactory? = runCatching {
+        val ks = java.security.KeyStore.getInstance("PKCS12")
+        getApplication<Application>().assets.open("headset.p12").use { ks.load(it, "bebopia".toCharArray()) }
+        val kmf = javax.net.ssl.KeyManagerFactory.getInstance(javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm())
+        kmf.init(ks, "bebopia".toCharArray())
+        val ctx = javax.net.ssl.SSLContext.getInstance("TLS")
+        ctx.init(kmf.keyManagers, null, null)
+        ctx.serverSocketFactory
+    }.getOrNull()
+
+    private fun headsetState(): String {
+        val s = _state.value
+        return org.json.JSONObject()
+            .put("joey", s.lines.lastOrNull { it.joey }?.text?.trim() ?: "")
+            .put("live", when (s.live) { LiveState.OFF -> "en veille"; LiveState.CONNECTING -> "réveil…"; LiveState.LISTENING -> "écoute"; LiveState.SPEAKING -> "parle" })
+            .put("gimbal", if (s.gimbal == GimbalState.READY) "nacelle prête" else "nacelle : ${s.gimbal.name.lowercase()}")
+            .put("pose", poseText())
+            .put("tracking", s.tracking ?: "")
+            .toString()
+    }
+
     override fun onCleared() {
+        headset?.stop()
+        sensors.stop()
         stopLive()
         gimbal.disconnect()
         camera.stop()

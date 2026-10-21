@@ -5,25 +5,40 @@ import kotlin.math.min
 import kotlin.math.sign
 
 /**
- * La tête de Joey : mouvements de haut niveau (regarder à gauche, oui, non, balayage) sur la nacelle.
- * Boucle fermée sur les angles renvoyés par la nacelle ; sans angles, mouvement à l'aveugle (durée estimée).
- * Les fonctions bloquent le temps du mouvement : à appeler hors du fil principal.
+ * Où regarde la caméra de Joey, mesuré par les capteurs du téléphone (gyroscope + accéléromètre), qui est posé sur
+ * la nacelle : cap (degrés, + = vers la droite) et élévation (degrés, + = vers le haut, 0 = horizon).
+ */
+interface Orientation {
+    /** (cap, élévation), ou null si pas de mesure récente. */
+    fun read(): Pair<Double, Double>?
+}
+
+/**
+ * La tête de Joey : mouvements de haut niveau (regarder à gauche, oui, non, chercher, suivre un casque) sur la nacelle.
+ * Boucle fermée sur l'orientation : celle du téléphone si possible (rapide, vraie verticale), sinon les angles de la
+ * nacelle ; sans rien, mouvement à l'aveugle (durée estimée). Les fonctions bloquent le temps du mouvement : à appeler
+ * hors du fil principal.
  *
- * Repère de Joey : pan en degrés (+ = sa droite ; [rightSign] dit si c'est le joystick +),
- * inclinaison en degrés, 0 = droit devant, + = vers le haut POUR LA CAMÉRA QUI REGARDE ([tiltSign] = -1 avec la caméra
- * avant : la nacelle raisonne pour la caméra arrière, et quand celle-ci monte, la caméra avant descend).
+ * Repère de Joey : pan en degrés (+ = sa droite), inclinaison en degrés (0 = horizon, + = vers le haut).
+ * Avec les angles de la nacelle seuls, [rightSign] et [tiltSign] disent dans quel sens va le joystick (la nacelle
+ * raisonne pour la caméra arrière ; avec la caméra avant, haut et bas sont inversés). Avec le téléphone, les sens
+ * sont mesurés par [calibrate].
  */
 class Head(
     private val link: GimbalLink,
-    /** +1 si joystick + = droite, -1 sinon (réglage « inverser gauche/droite »). */
+    /** Angles de la nacelle seuls : +1 si joystick + = droite, -1 sinon (réglage « inverser gauche/droite »). */
     private val rightSign: () -> Int = { 1 },
-    /** -1 quand Joey regarde avec la caméra avant (côté écran) : haut et bas sont inversés pour la nacelle. */
+    /** Angles de la nacelle seuls : -1 quand Joey regarde avec la caméra avant. */
     private val tiltSign: () -> Int = { 1 },
     /** Part de la vitesse max mesurée à utiliser (réglage « vitesse de la tête », 0..1). */
     private val speedFraction: () -> Double = { 1.0 },
     private val onLog: (String) -> Unit = {},
     private val sleep: (Long) -> Unit = { Thread.sleep(it) },
     private val now: () -> Long = { System.currentTimeMillis() },
+    /** Capteurs du téléphone (null : pas de capteur). */
+    private val phone: Orientation? = null,
+    /** Sens du joystick mesurés avec le téléphone, à retenir (pan, tilt). */
+    private val onPhoneSigns: (Int, Int) -> Unit = { _, _ -> },
 ) {
     companion object {
         // La SPG incline sur 320° : on va de tout en bas à tout en haut.
@@ -38,8 +53,20 @@ class Head(
         }
     }
 
-    /** Pan de référence « devant » (pris au recentrage, ou au premier mouvement). */
+    /** Sens du joystick pour faire tourner à droite / lever, mesurés avec le téléphone (0 = pas encore mesuré). */
+    @Volatile var phonePanSign = 0
+        private set
+    @Volatile var phoneTiltSign = 0
+        private set
+
+    fun setPhoneSigns(pan: Int, tilt: Int) {
+        phonePanSign = pan
+        phoneTiltSign = tilt
+    }
+
+    /** Cap de référence « devant » (pris au recentrage, ou au premier mouvement), dans la source utilisée. */
     @Volatile private var homePan: Double? = null
+    @Volatile private var homeFromPhone = false
     @Volatile var moving = false
         private set
     /** Direction du dernier mouvement (-1..1), pour que les yeux suivent. */
@@ -52,6 +79,60 @@ class Head(
     @Volatile var stickCap = Int.MAX_VALUE
         private set
 
+    // ---- orientation ----------------------------------------------------------------------------
+    private fun freshGimbal(): SpgProtocol.Angles? = link.angles?.takeIf { now() - link.anglesAt < 1500 }
+
+    /** Inclinaison pour la nacelle (caméra arrière) : elle donne ±180 quand la tête est droite. */
+    fun tiltOf(a: SpgProtocol.Angles) = wrap(a.tilt - 180.0)
+    /** Inclinaison pour la caméra qui regarde, d'après la nacelle (+ = Joey regarde vers le haut). */
+    fun viewTilt(a: SpgProtocol.Angles) = tiltOf(a) * tiltSign()
+
+    /** Le téléphone est utilisé dès qu'il mesure (et que ses sens ont été appris). */
+    val usesPhone: Boolean get() = phonePanSign != 0 && phoneTiltSign != 0 && phone?.read() != null
+
+    /** Où regarde la tête (pan absolu dans la source, + = droite ; inclinaison, + = haut), ou null. */
+    private fun cur(): Pair<Double, Double>? {
+        if (usesPhone) {
+            val p = phone!!.read() ?: return null
+            if (!homeFromPhone) { homeFromPhone = true; homePan = p.first }
+            return p
+        }
+        val a = freshGimbal() ?: return null
+        if (homeFromPhone) { homeFromPhone = false; homePan = null }
+        return Pair(a.pan * rightSign(), viewTilt(a))
+    }
+
+    /** Sens du joystick qui fait tourner à droite (+1/-1) et lever (+1/-1). */
+    private fun panStick() = if (usesPhone) phonePanSign else rightSign()
+    private fun tiltStick() = if (usesPhone) phoneTiltSign else tiltSign()
+
+    /** Où regarde la tête, relativement à « devant » : (droite+, haut+), ou null si inconnu. */
+    fun pose(): Pair<Double, Double>? {
+        val c = cur() ?: return null
+        val home = homePan ?: c.first.also { homePan = it }
+        return Pair(wrap(c.first - home), c.second)
+    }
+
+    fun stop() {
+        cancelled = true
+        link.stick(0, 0)
+    }
+
+    /** Recentre la tête (commande de la nacelle) et note la nouvelle direction « devant ». */
+    fun center(): String {
+        cancelled = false
+        link.stick(0, 0)
+        link.recenter()
+        gazeX = 0f; gazeY = 0f
+        sleep(1200)
+        cur()?.let { homePan = it.first }
+        return "tête droite devant"
+    }
+
+    /** « Devant » = là où la tête regarde maintenant. */
+    fun setHomeHere() { cur()?.let { homePan = it.first } }
+
+    // ---- vitesses ---------------------------------------------------------------------------------
     /**
      * Vitesse réelle (°/s) pour chaque valeur du joystick, mesurée par [calibrate]. Par défaut : ce qu'on a vu dans
      * la capture (314 -> ~40°/s), en attendant la mesure.
@@ -98,38 +179,9 @@ class Head(
     private fun timeFor(deg: Double, stick: Int): Long =
         (1500 + 1000 * 1.8 * abs(deg) / speedOf(stick).coerceAtLeast(5.0)).toLong().coerceAtMost(20_000)
 
-    private fun fresh(): SpgProtocol.Angles? = link.angles?.takeIf { now() - link.anglesAt < 1500 }
-    /** Inclinaison pour la nacelle (caméra arrière) : elle donne ±180 quand la tête est droite. */
-    fun tiltOf(a: SpgProtocol.Angles) = wrap(a.tilt - 180.0)
-    /** Inclinaison pour la caméra qui regarde (+ = Joey regarde vers le haut). */
-    fun viewTilt(a: SpgProtocol.Angles) = tiltOf(a) * tiltSign()
-
-    /** Où regarde la tête, relativement à « devant » : (droite+, haut+), ou null si inconnu. */
-    fun pose(): Pair<Double, Double>? {
-        val a = fresh() ?: return null
-        val home = homePan ?: a.pan
-        return Pair(wrap(a.pan - home) * rightSign(), viewTilt(a))
-    }
-
-    fun stop() {
-        cancelled = true
-        link.stick(0, 0)
-    }
-
-    /** Recentre la tête (commande de la nacelle) et note la nouvelle direction « devant ». */
-    fun center(): String {
-        cancelled = false
-        link.stick(0, 0)
-        link.recenter()
-        gazeX = 0f; gazeY = 0f
-        sleep(1200)
-        fresh()?.let { homePan = it.pan }
-        return "tête droite devant"
-    }
-
     /**
-     * Vitesse joystick pour un écart donné : à fond tant qu'on est loin, on freine sur la distance parcourue en ~0,3 s
-     * à pleine vitesse (au moins 12°). Sous ~110 la SPG ne bouge presque pas.
+     * Vitesse joystick (sans le sens du joystick) pour un écart donné : à fond tant qu'on est loin, on freine sur la
+     * distance parcourue en ~0,3 s à pleine vitesse (au moins 12°). Sous ~110 la SPG ne bouge presque pas.
      */
     private fun speed(err: Double, max: Int): Int {
         val m = abs(err)
@@ -138,6 +190,7 @@ class Head(
         return (sign(err) * s).toInt()
     }
 
+    // ---- mouvements -------------------------------------------------------------------------------
     /**
      * Tourne de [panRight] degrés vers la droite (négatif = gauche) et/ou incline à [tilt] degrés (absolu, + = haut).
      * null = axe inchangé. Renvoie un résumé.
@@ -145,64 +198,53 @@ class Head(
     fun look(panRight: Double?, tilt: Double?, maxSpeed: Int = maxStickNow(), timeoutMs: Long? = null): String {
         cancelled = false
         if (!link.ready) return "nacelle non connectée"
-        val start = fresh()
-        if (start == null) return blindLook(panRight, tilt, maxSpeed)
-        if (homePan == null) homePan = start.pan
+        val start = cur() ?: return blindLook(panRight, tilt, maxSpeed)
+        if (homePan == null) homePan = start.first
         val speedMax = min(maxSpeed, stickCap)
-        val tiltDelta = tilt?.let { abs(it - viewTilt(start)) } ?: 0.0
-        val limit = timeoutMs ?: timeFor(maxOf(abs(panRight ?: 0.0), tiltDelta), speedMax)
-        val panTarget = panRight?.let { start.pan + it * rightSign() }
+        val panTarget = panRight?.let { start.first + it }
         val tiltTarget = tilt?.coerceIn(TILT_MIN, TILT_MAX)
+        val limit = timeoutMs ?: timeFor(maxOf(abs(panRight ?: 0.0), tiltTarget?.let { abs(it - start.second) } ?: 0.0), speedMax)
         moving = true
         gazeX = (panRight?.let { sign(it) } ?: 0.0).toFloat()
-        gazeY = (tiltTarget?.let { sign(it - viewTilt(start)) } ?: 0.0).toFloat()
-        val ts = tiltSign()
+        gazeY = (tiltTarget?.let { sign(it - start.second) } ?: 0.0).toFloat()
+        val ps = panStick()
+        val ts = tiltStick()
         val t0 = now()
-        var fastest = 0.0
-        var prev: SpgProtocol.Angles? = null
-        var prevAt = 0L
         try {
             while (!cancelled && now() - t0 < limit) {
-                val a = fresh() ?: break
-                // Vitesse réelle mesurée (pour régler la vitesse max) :
-                if (prev != null && link.anglesAt > prevAt) {
-                    val dt = (link.anglesAt - prevAt) / 1000.0
-                    if (dt > 0.05) fastest = maxOf(fastest, abs(wrap(a.pan - prev.pan)) / dt)
-                }
-                if (link.anglesAt != prevAt) { prev = a; prevAt = link.anglesAt }
-                val ePan = panTarget?.let { wrap(it - a.pan) } ?: 0.0
-                val eTilt = tiltTarget?.let { it - viewTilt(a) } ?: 0.0
+                val c = cur() ?: break
+                val ePan = panTarget?.let { wrap(it - c.first) } ?: 0.0
+                val eTilt = tiltTarget?.let { it - c.second } ?: 0.0
                 val panDone = abs(ePan) < 2.5
                 val tiltDone = abs(eTilt) < 2.5
                 if (panDone && tiltDone) break
-                link.stick(if (panDone) 0 else speed(ePan, speedMax), if (tiltDone) 0 else speed(eTilt, speedMax) * ts)
+                link.stick(if (panDone) 0 else speed(ePan, speedMax) * ps, if (tiltDone) 0 else speed(eTilt, speedMax) * ts)
                 // Sécurité : poussé fort 0,6 s sans que rien ne bouge -> la nacelle refuse ces valeurs, on redescend à 314.
                 if (speedMax > 314 && now() - t0 > 600 && now() - t0 < 700 &&
-                    abs(wrap(a.pan - start.pan)) < 1.0 && abs(a.tilt - start.tilt) < 1.0) {
+                    abs(wrap(c.first - start.first)) < 1.0 && abs(c.second - start.second) < 1.0) {
                     stickCap = 314
                     onLog("La nacelle ne réagit pas au-delà de 314 : vitesse max ramenée à 314.")
                     return look(panRight, tilt, 314)
                 }
-                sleep(50)
+                sleep(40)
             }
         } finally {
             link.stick(0, 0)
             moving = false
         }
-        if (fastest > 5 && panRight != null && abs(panRight) >= 60) onLog("Vitesse mesurée : %.0f°/s (joystick %d)".format(fastest, speedMax))
-        sleep(150)
+        sleep(120)
         val p = pose() ?: return "fait"
         return "tête à %.0f° %s, inclinée à %.0f°".format(abs(p.first), if (p.first >= 0) "à droite" else "à gauche", p.second)
     }
 
-    /** Sans angles : on pousse le joystick le temps estimé (≈30°/s en pan, ≈18°/s en inclinaison ; prudent). */
+    /** Sans angles : on pousse le joystick le temps estimé (prudent). */
     private fun blindLook(panRight: Double?, tilt: Double?, maxSpeedAsked: Int): String {
         val maxSpeed = min(maxSpeedAsked, 314)
         moving = true
         try {
             panRight?.let {
                 link.stick((sign(it) * rightSign() * maxSpeed).toInt(), 0)
-                sleep((abs(it) / 30.0 * 1000).toLong())
+                sleep((abs(it) / speedOf(maxSpeed).coerceAtLeast(5.0) * 1000).toLong())
                 link.stick(0, 0)
             }
             tilt?.let {
@@ -226,15 +268,51 @@ class Head(
             "droite" -> look(degrees ?: 45.0, null)
             "haut" -> look(null, (p?.second ?: 0.0) + (degrees ?: 25.0))
             "bas" -> look(null, (p?.second ?: 0.0) - (degrees ?: 25.0))
-            "derriere" -> look(Head.wrap(180.0 - curPan).let { if (abs(it) > 179) 179.0 else it }, null)
+            "derriere" -> look(wrap(180.0 - curPan).let { if (abs(it) > 179) 179.0 else it }, null)
             "devant" -> if (homePan == null) center() else look(-curPan, 0.0)
             else -> "direction inconnue : $direction"
         }
     }
 
+    // ---- suivi continu (casque) -------------------------------------------------------------------
+    @Volatile private var aimPan = 0.0
+    @Volatile private var aimTilt = 0.0
+    @Volatile private var aimAt = 0L
+    @Volatile private var aiming = false
+
+    /** Cible continue (relative à « devant ») : la tête la rejoint et la suit tant qu'on la met à jour. */
+    fun aim(panRight: Double, tilt: Double) {
+        aimPan = panRight
+        aimTilt = tilt.coerceIn(TILT_MIN, TILT_MAX)
+        aimAt = now()
+    }
+
+    /** Un pas de suivi (appelé ~25 fois par seconde). true tant que la cible est récente. */
+    fun aimStep(): Boolean {
+        val active = now() - aimAt < 600 && link.ready
+        if (!active) {
+            if (aiming) { link.stick(0, 0); aiming = false; moving = false }
+            return false
+        }
+        val p = pose()
+        if (p == null) { link.stick(0, 0); return true }
+        val max = maxStickNow()
+        val ePan = wrap(aimPan - p.first)
+        val eTilt = aimTilt - p.second
+        val sp = if (abs(ePan) < 1.5) 0 else speed(ePan, max) * panStick()
+        val st = if (abs(eTilt) < 1.5) 0 else speed(eTilt, max) * tiltStick()
+        link.stick(sp, st)
+        aiming = true
+        moving = sp != 0 || st != 0
+        gazeX = (sign(ePan) * min(1.0, abs(ePan) / 30)).toFloat()
+        gazeY = (sign(eTilt) * min(1.0, abs(eTilt) / 30)).toFloat()
+        return true
+    }
+
+    // ---- recherche --------------------------------------------------------------------------------
     /**
-     * Cherche quelqu'un du regard : d'abord là où il regarde, puis tout autour (360°), un peu en haut puis à hauteur.
-     * [seenSince] : un visage a-t-il été vu depuis cette heure ? Renvoie true dès qu'un visage est trouvé.
+     * Cherche du regard (un visage, une personne, un objet : selon ce que suit la caméra) : d'abord là où il regarde,
+     * puis un tour complet. [seenSince] : la cible a-t-elle été vue depuis cette heure ?
      */
     fun searchTarget(seenSince: (Long) -> Boolean): Boolean {
         val t0 = now()
@@ -249,7 +327,7 @@ class Head(
         cancelled = false
         sleep(300) // une image ou deux là où il regarde déjà
         if (found()) return true
-        if (fresh() == null) return false
+        if (cur() == null) return false
         val stick = stickFor(min(degPerSec, bestSpeed * 0.9))
         val limit = timeFor(360.0, stick) + 2000
         var dir = 1
@@ -257,16 +335,16 @@ class Head(
             if (cancelled) return false
             look(null, tilt)
             if (found()) return true
-            var last = fresh()?.pan ?: return false
+            var last = cur()?.first ?: return false
             var turned = 0.0
             val t0 = now()
             moving = true
             gazeX = dir.toFloat()
             try {
                 while (!cancelled && turned < 365 && now() - t0 < limit) {
-                    link.stick(stick * dir, 0)
+                    link.stick(stick * dir * panStick(), 0)
                     sleep(50)
-                    val p = fresh()?.pan ?: continue
+                    val p = cur()?.first ?: continue
                     turned += abs(wrap(p - last))
                     last = p
                     if (found()) {
@@ -286,45 +364,8 @@ class Head(
     }
 
     /**
-     * Mesure la vitesse réelle de la tête pour plusieurs valeurs du joystick (gauche, droite, en alternance : la tête
-     * revient à peu près au même endroit). Prend ~8 s. Renvoie le résumé ; la table sert ensuite à tout.
-     */
-    fun calibrate(): String {
-        cancelled = false
-        if (fresh() == null) return "pas d'angles de la nacelle : mesure impossible"
-        val res = ArrayList<Pair<Int, Double>>()
-        var dir = 1
-        moving = true
-        try {
-            for (v in listOf(200, 314, 450, 600, 800, 1000)) {
-                if (cancelled) break
-                link.stick(v * dir, 0)
-                sleep(350) // le temps d'accélérer
-                val p1 = fresh() ?: break
-                val t1 = link.anglesAt
-                sleep(700)
-                val p2 = fresh() ?: break
-                val t2 = link.anglesAt
-                link.stick(0, 0)
-                sleep(300)
-                val dt = ((t2 - t1) / 1000.0).coerceAtLeast(0.2)
-                res += v to abs(wrap(p2.pan - p1.pan)) / dt
-                dir = -dir
-            }
-        } finally {
-            link.stick(0, 0)
-            moving = false
-        }
-        if (res.size < 2) return "mesure interrompue"
-        setTable(res)
-        stickCap = Int.MAX_VALUE
-        return "vitesses mesurées : " + res.joinToString(", ") { "%d → %.0f°/s".format(it.first, it.second) } +
-            " ; je garde %d (%.0f°/s)".format(bestStick, bestSpeed)
-    }
-
-    /**
-     * Fait le tour du regard : d'abord sans bouger, puis chaque direction de [pans] (par rapport à « devant ») pour
-     * chaque inclinaison de [tilts]. À chaque arrêt, [probe] (reçoit l'heure de l'arrêt) dit si c'est trouvé.
+     * Fait le tour du regard par arrêts : d'abord sans bouger, puis chaque direction de [pans] (par rapport à « devant »)
+     * pour chaque inclinaison de [tilts]. À chaque arrêt, [probe] (reçoit l'heure de l'arrêt) dit si c'est trouvé.
      */
     fun scan(pans: List<Double>, tilts: List<Double>, probe: (Long) -> Boolean): Boolean {
         cancelled = false
@@ -348,8 +389,78 @@ class Head(
      * l'image, avec les sens appris par le suivi (image -> joystick).
      */
     fun turnStick(panStickDeg: Double, tiltStickDeg: Double): String =
-        look(panStickDeg * rightSign(), (pose()?.second ?: 0.0) + tiltStickDeg * tiltSign())
+        look(panStickDeg * panStick(), (pose()?.second ?: 0.0) + tiltStickDeg * tiltStick())
 
+    // ---- mesure -----------------------------------------------------------------------------------
+    /**
+     * Mesure la vitesse réelle de la tête pour plusieurs valeurs du joystick (gauche, droite, en alternance : la tête
+     * revient à peu près au même endroit), et avec les capteurs du téléphone, le sens du joystick (droite, haut).
+     * Prend ~10 s. La table sert ensuite à tout.
+     */
+    fun calibrate(): String {
+        cancelled = false
+        val ph = phone
+        // Les vitesses et les sens se mesurent avec le téléphone s'il mesure, sinon avec la nacelle.
+        val usePh = ph?.read() != null
+        fun panNow(): Double? = if (usePh) ph!!.read()?.first else freshGimbal()?.pan
+        if (panNow() == null) return "pas d'angles : mesure impossible"
+        val res = ArrayList<Pair<Int, Double>>()
+        var signVotes = 0
+        var dir = 1
+        moving = true
+        val notes = StringBuilder()
+        try {
+            for (v in listOf(200, 314, 450, 600, 800, 1000)) {
+                if (cancelled) break
+                link.stick(v * dir, 0)
+                sleep(350) // le temps d'accélérer
+                val p1 = panNow() ?: break
+                val t1 = now()
+                sleep(700)
+                val p2 = panNow() ?: break
+                val t2 = now()
+                link.stick(0, 0)
+                sleep(300)
+                val d = wrap(p2 - p1)
+                if (abs(d) > 3) signVotes += if (sign(d) == sign(dir.toDouble())) 1 else -1
+                res += v to abs(d) / ((t2 - t1) / 1000.0).coerceAtLeast(0.2)
+                dir = -dir
+            }
+            if (usePh && !cancelled) {
+                // Sens de l'inclinaison : un petit coup de joystick vers +, mesuré, puis retour.
+                val e1 = ph!!.read()?.second
+                link.stick(0, 350)
+                sleep(450)
+                val e2 = ph.read()?.second
+                link.stick(0, -350)
+                sleep(450)
+                link.stick(0, 0)
+                if (e1 != null && e2 != null && abs(e2 - e1) > 2 && signVotes != 0) {
+                    val pan = if (signVotes > 0) 1 else -1
+                    val tilt = if (e2 > e1) 1 else -1
+                    phonePanSign = pan
+                    phoneTiltSign = tilt
+                    homePan = null
+                    homeFromPhone = false
+                    onPhoneSigns(pan, tilt)
+                    notes.append(" ; capteurs du téléphone : joystick + = ${if (pan > 0) "droite" else "gauche"}, " +
+                        if (tilt > 0) "haut" else "bas")
+                } else {
+                    notes.append(" ; sens non mesurés (mouvement trop faible)")
+                }
+            }
+        } finally {
+            link.stick(0, 0)
+            moving = false
+        }
+        if (res.size < 2) return "mesure interrompue"
+        setTable(res)
+        stickCap = Int.MAX_VALUE
+        return "vitesses mesurées : " + res.joinToString(", ") { "%d → %.0f°/s".format(it.first, it.second) } +
+            " ; je garde %d (%.0f°/s)".format(bestStick, bestSpeed) + notes
+    }
+
+    // ---- gestes -----------------------------------------------------------------------------------
     /** Hoche la tête (oui). */
     fun nod(): String {
         val base = pose()?.second ?: 0.0

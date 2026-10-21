@@ -123,7 +123,8 @@ fun JoeyScreen(vm: MainViewModel) {
                     GimbalState.CONNECTING -> "🦒 Connexion…"
                     GimbalState.OFF -> "🦒 Nacelle déconnectée"
                 }) { headPanel = true }
-                if (s.tracking != null) Chip("🔎 ${s.tracking}")
+                if (s.headsetFollow) Chip("🥽 Suit le casque")
+                else if (s.tracking != null) Chip("🔎 ${s.tracking}")
                 else if (s.followFace && s.gimbal == GimbalState.READY) Chip(if (s.seesFace) "👤 Je te vois" else "👤 Personne")
                 Chip(when (s.live) {
                     LiveState.OFF -> "💤 En veille"
@@ -209,7 +210,13 @@ private fun HeadPanel(vm: MainViewModel, s: com.joey.app.UiState, pose: String, 
                 FilledTonalButton(onClick = vm::shake) { Text("Non") }
             }
             FilledTonalButton(onClick = vm::sweep, modifier = Modifier.fillMaxWidth()) { Text("Regarder autour") }
-            FilledTonalButton(onClick = vm::calibrateHead, modifier = Modifier.fillMaxWidth()) { Text("Mesurer la vitesse de la tête") }
+            FilledTonalButton(onClick = vm::calibrateHead, modifier = Modifier.fillMaxWidth()) { Text("Mesurer la tête (vitesse et sens)") }
+            if (s.headsetUrl == null) {
+                Button(onClick = { vm.setHeadset(true) }, modifier = Modifier.fillMaxWidth()) { Text("🥽 Vue dans le casque (Quest)") }
+            } else {
+                Text("🥽 Dans le Quest : ${s.headsetUrl.ifBlank { "(pas de Wi-Fi)" }}", color = ACCENT, fontSize = 14.sp)
+                TextButton(onClick = { vm.setHeadset(false) }) { Text("Arrêter la vue casque") }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Journal", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
                 TextButton(onClick = { clipboard.setText(AnnotatedString(s.log.joinToString("\n"))) }) { Text("Copier") }

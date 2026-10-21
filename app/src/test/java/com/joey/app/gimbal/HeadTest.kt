@@ -196,6 +196,44 @@ class HeadTest {
         assertTrue(found)
     }
 
+    /** Faux téléphone sur la fausse nacelle : joystick + = cap qui DIMINUE (gauche) et élévation qui diminue. */
+    private class FakePhone(val g: FakeGimbal) : Orientation {
+        override fun read() = Pair(-g.pan, -Head.wrap(g.tiltRaw - 180.0))
+    }
+
+    @Test fun phoneSensorsTeachTheRealDirections() {
+        val g = FakeGimbal(pan = 10.0, tiltRaw = 180.0)
+        val signs = mutableListOf<Pair<Int, Int>>()
+        // Réglages nacelle volontairement faux : le téléphone doit corriger.
+        val h = Head(g, rightSign = { 1 }, tiltSign = { 1 }, phone = FakePhone(g), onPhoneSigns = { p, t -> signs += p to t },
+            sleep = { g.advance(it) }, now = { g.t })
+        val r = h.calibrate()
+        assertEquals(r, listOf(-1 to -1), signs)
+        assertTrue(h.usesPhone)
+        val phone = FakePhone(g)
+        val h0 = phone.read().first
+        h.lookDirection("droite", 90.0)
+        assertTrue("cap ${phone.read().first - h0}", abs(Head.wrap(phone.read().first - h0) - 90) < 4)
+        h.lookDirection("haut", 30.0)
+        assertTrue("élévation ${phone.read().second}", abs(phone.read().second - 30) < 4)
+    }
+
+    @Test fun aimFollowsAHeadset() {
+        val (g, h) = setup()
+        h.calibrate()
+        h.setHomeHere()
+        repeat(60) { // 2,4 s de suivi : le casque regarde 50° à droite et 20° vers le haut
+            h.aim(50.0, 20.0)
+            h.aimStep()
+            g.advance(40)
+        }
+        val p = h.pose()!!
+        assertTrue("pose $p", abs(p.first - 50) < 4 && abs(p.second - 20) < 4)
+        g.advance(1000)
+        h.aimStep() // plus de nouvelles du casque : on s'arrête
+        assertEquals(0, g.p)
+    }
+
     @Test fun blindWhenNoAngles() {
         val g = object : GimbalLink {
             val sent = mutableListOf<Pair<Int, Int>>()

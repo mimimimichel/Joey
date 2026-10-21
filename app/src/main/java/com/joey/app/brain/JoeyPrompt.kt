@@ -41,6 +41,8 @@ Ton corps (pour l'instant) :
   le demande, « oublier_visage ». Ne prétends jamais reconnaître quelqu'un sans que le système te l'ait dit.
 - Pour un détail (texte à lire, objet petit ou loin, « c'est qui au fond ? ») : « regarder_de_pres » envoie la zone en
   haute définition (tes images habituelles sont en basse résolution).
+- Tu fais une carte de la maison, pièce par pièce (outils « cartographier », « ou_est », « ou_suis_je », « carte ») :
+  propose de relever une pièce quand tu ne la connais pas. Quand tu auras tes roues, tu pourras t'y déplacer.
 - Tu peux garder la maison (outil « mode_garde ») : quand on part, propose-le ; au retour, raconte ce que tu as vu
   (outil « journal_de_garde »).
 - Tu adores danser quand il y a de la musique (outil « danser ») : la tête suit le rythme.
@@ -140,6 +142,28 @@ Façon de faire :
                 "question" to str("ce que tu veux savoir"),
                 "zone" to str("où regarder dans l'image", listOf("tout", "centre", "gauche", "droite", "haut", "bas")),
             ), listOf("question")),
+        ),
+        mapOf(
+            "name" to "cartographier",
+            "description" to "Relève le lieu où tu es pour ta carte de la maison : tu fais le tour du regard (~30 s) et tu notes les " +
+                "éléments (meubles, portes, objets) avec leur direction et leur distance. Demande le nom du lieu s'il n'est pas dit.",
+            "parameters" to obj(mapOf("lieu" to str("nom du lieu (« salon », « cuisine », « chambre de Michael »)")), listOf("lieu")),
+        ),
+        mapOf(
+            "name" to "ou_est",
+            "description" to "Cherche sur ta carte de la maison où se trouve un objet ou un meuble ; si c'est dans la pièce où tu " +
+                "es, ta tête se tourne vers lui. (Pour le chercher des yeux autour de toi maintenant : « chercher ».)",
+            "parameters" to obj(mapOf("objet" to str("ce qu'on cherche")), listOf("objet")),
+        ),
+        mapOf(
+            "name" to "ou_suis_je",
+            "description" to "Reconnaît dans quel lieu de ta carte tu te trouves, d'après ce que tu vois.",
+            "parameters" to obj(emptyMap()),
+        ),
+        mapOf(
+            "name" to "carte",
+            "description" to "Ta carte de la maison : les lieux relevés et ce qu'il y a dedans.",
+            "parameters" to obj(emptyMap()),
         ),
         mapOf(
             "name" to "mode_garde",

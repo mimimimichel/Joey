@@ -41,6 +41,9 @@ une petite intelligence avec du caractère, qui commente, se souvient, et se dé
 - **Vie propre** : coup d'œil vers ce qui bouge, ennui, sommeil après 10 min, réveil.
 - **Mode garde** : journal avec photos, rondes du regard, personne inconnue / bêtise du chien (jugée par Gemini) ->
   alerte sur le téléphone de Michael par [ntfy](https://ntfy.sh) ; page à distance (Tailscale) avec flèches et journal.
+- **Carte de la maison** (Gemini Robotics-ER) : « cartographie ici, c'est le salon » -> tour du regard en 6 arrêts, éléments
+  pointés avec cap boussole et distance ; « où est la télécommande ? » (la tête se tourne si c'est la pièce actuelle),
+  « où suis-je ? ». Positions (x, y) prévues pour l'odométrie du Roomba.
 - Clé Gemini : réglages ⚙ (ou `-PgeminiKey=...` à la compilation). Compiler : `./gradlew assembleDebug`.
 
 ## Documents

@@ -100,6 +100,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val memory = Memory(File(app.filesDir, "memoire.json"))
     private val people = com.joey.app.brain.People(File(app.filesDir, "personnes.json"))
     private val faceId = com.joey.app.senses.FaceId(app)
+    val houseMap = com.joey.app.brain.HouseMap(File(app.filesDir, "carte.json"))
+    @Volatile private var currentPlace: String? = null
     val watch = com.joey.app.remote.Watch(File(app.filesDir, "garde"), { prefs.getString("ntfy_topic", null) }, ::log)
     val camera = Camera()
     private val faces = FaceSense()
@@ -618,6 +620,83 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun danceUi() = dance(20)
 
+    // ---- carte de la maison (Gemini Robotics-ER) -------------------------------------------------
+    /**
+     * Relève le lieu où Joey se trouve : tour du regard en 6 arrêts (60°), à chaque arrêt Robotics-ER pointe les éléments
+     * et estime leur distance ; on les place au cap boussole. Bloquant (~30 s).
+     */
+    private fun mapHere(name: String): String {
+        log("🗺 Je relève : $name")
+        head.setHomeHere()
+        val compass0 = sensors.compass()
+        val (hfov, vfov) = fov()
+        val items = ArrayList<com.joey.app.brain.HouseMap.Item>()
+        val kinds = ArrayList<String>()
+        val descs = ArrayList<String>()
+        var errors = 0
+        for (k in 0 until 6) {
+            val target = k * 60.0
+            val cur = head.pose()?.first ?: 0.0
+            head.look(Head.wrap(target - cur), -5.0)
+            Thread.sleep(700)
+            val pose = head.pose() ?: (target to -5.0)
+            // Cap absolu de cet arrêt : boussole du départ + rotation mesurée (la boussole bouge avec les moteurs).
+            val stopHeading = compass0?.let { (it + pose.first + 360) % 360 }
+            val jpeg = camera.zoomJpeg("tout") ?: continue
+            val sv = runCatching { vision.survey(jpeg) }.getOrElse { errors++; log("🗺 vue ${k + 1} : ${it.message}"); null } ?: continue
+            if (sv.room.isNotBlank()) kinds.add(sv.room.lowercase())
+            if (sv.description.isNotBlank()) descs.add(sv.description)
+            val now = System.currentTimeMillis()
+            for ((nom, pt, dist) in sv.elements) {
+                if (nom.isBlank()) continue
+                val off = (pt.first * 2 - 1) * hfov / 2
+                val elev = pose.second - (pt.second * 2 - 1) * vfov / 2
+                items.add(com.joey.app.brain.HouseMap.Item(nom.trim(), stopHeading?.let { (it + off + 360) % 360 }, elev, dist, now))
+            }
+            log("🗺 vue ${k + 1}/6 : ${sv.elements.size} éléments")
+        }
+        // Retour au départ.
+        head.look(Head.wrap(-(head.pose()?.first ?: 0.0)), 0.0)
+        if (items.isEmpty()) return "relevé impossible ($errors erreurs de vision)"
+        // Un même élément vu sur deux arrêts voisins : on n'en garde qu'un.
+        val kept = ArrayList<com.joey.app.brain.HouseMap.Item>()
+        for (it in items) {
+            if (kept.none { k -> k.name.equals(it.name, true) && (k.heading == null || it.heading == null ||
+                    kotlin.math.abs(Head.wrap(k.heading - it.heading)) < 25) }) kept.add(it)
+        }
+        val kind = kinds.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key ?: "pièce"
+        houseMap.put(name, kind, descs.joinToString(" ").take(700), kept)
+        currentPlace = houseMap.place(name)?.name ?: name
+        log("🗺 $name relevé : ${kept.size} éléments ($kind)")
+        return "lieu « $name » relevé ($kind) : ${kept.size} éléments, dont " + kept.take(12).joinToString(", ") { it.name } +
+            (if (compass0 == null) ". Pas de boussole : les directions sont approximatives." else ".")
+    }
+
+    /** Où est [what] d'après la carte ; si c'est dans le lieu actuel, la tête se tourne vers lui. */
+    private fun whereIs(what: String): String {
+        val hits = houseMap.find(what)
+        if (hits.isEmpty()) {
+            val mem = memory.search(what, 3)
+            return "pas sur la carte" + if (mem.isNotEmpty()) " ; dans ta mémoire : " + mem.joinToString(" ; ") { it.text } else ""
+        }
+        val fmtAgo = { t: Long -> val m = (System.currentTimeMillis() - t) / 60_000; if (m < 60) "il y a $m min" else if (m < 1440) "il y a ${m / 60} h" else "il y a ${m / 1440} j" }
+        val lines = hits.map { (p, it) ->
+            "${it.name} : ${p.name}" + (it.heading?.let { h -> ", vers le ${com.joey.app.brain.HouseMap.compassName(h)}" } ?: "") +
+                (it.distanceM?.let { d -> ", à ~%.1f m".format(d) } ?: "") + ", vu ${fmtAgo(it.seenAt)}"
+        }
+        val (place, item) = hits.first()
+        val now = sensors.compass()
+        if (place.name == currentPlace && item.heading != null && now != null && gimbal.ready) {
+            moveSync(holdMs = 8000) { head.look(Head.wrap(item.heading - now), item.elevation.coerceIn(-60.0, 60.0)) }
+            live?.sendFrameNow()
+            return lines.joinToString("\n") + "\n(ta tête est tournée vers « ${item.name} » : regarde l'image pour vérifier)"
+        }
+        return lines.joinToString("\n") + (if (place.name != currentPlace) "\n(ce n'est pas le lieu où tu es, d'après ce que tu sais)" else "")
+    }
+
+    fun mapPlaces(): List<com.joey.app.brain.HouseMap.Place> = houseMap.all()
+    fun removePlace(name: String) { houseMap.remove(name); if (currentPlace == name) currentPlace = null }
+
     /** Photo avec compte à rebours sur l'écran (bloquant). */
     fun takePhotoBlocking(countdown: Int): String {
         log("📸 Photo dans $countdown s")
@@ -1024,6 +1103,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val fmt = SimpleDateFormat("EEE d HH:mm", Locale.FRENCH)
                 mapOf("journal" to if (ev.isEmpty()) "rien de noté" else ev.joinToString("\n") { fmt.format(Date(it.time)) + " — " + it.text })
             }
+            "cartographier" -> {
+                if (!gimbal.ready) return mapOf("result" to noHead)
+                if (!flag("camera", true)) return mapOf("result" to "ta caméra est coupée")
+                val lieu = (args["lieu"] as? String)?.trim().orEmpty().ifEmpty { "ici" }
+                var r = ""
+                moveSync(holdMs = 2000, timeoutMs = 150_000) { r = mapHere(lieu); r }
+                live?.sendFrameNow()
+                mapOf("result" to r)
+            }
+            "ou_est" -> {
+                val what = args["objet"] as? String ?: ""
+                mapOf("result" to whereIs(what))
+            }
+            "ou_suis_je" -> {
+                if (houseMap.all().isEmpty()) return mapOf("result" to "carte vide : relève d'abord les pièces (cartographier)")
+                val jpeg = camera.zoomJpeg("tout") ?: return mapOf("result" to "pas d'image")
+                val (lieu, cert, why) = runCatching { vision.whichPlace(jpeg, houseMap.summary()) }
+                    .getOrElse { return mapOf("result" to "vision indisponible : ${it.message}") }
+                if (cert >= 0.5 && houseMap.place(lieu) != null) currentPlace = houseMap.place(lieu)!!.name
+                mapOf("lieu" to lieu, "certitude" to cert, "raison" to why)
+            }
+            "carte" -> mapOf("carte" to houseMap.summary(), "lieu_actuel" to (currentPlace ?: "inconnu"))
             "se_souvenir" -> {
                 val q = args["sujet"] as? String ?: ""
                 val hits = memory.search(q)

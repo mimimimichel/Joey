@@ -50,6 +50,67 @@ class GeminiVision(private val apiKey: () -> String) {
         throw IOException("aucun modèle de vision Gemini disponible (${last?.message})")
     }
 
+    /** Relevé d'une vue pour la carte : type de pièce, description, et éléments pointés avec leur distance. */
+    class Survey(val room: String, val description: String, val elements: List<Triple<String, Pair<Double, Double>, Double?>>)
+
+    /** Gemini Robotics-ER d'abord : il pointe les éléments (x, y de 0 à 1) et estime leur distance. */
+    fun survey(jpegBase64: String): Survey {
+        val schema = JSONObject("""
+        {"type":"object","properties":{
+          "piece":{"type":"string","description":"type de pièce en français (salon, cuisine, chambre, couloir, salle de bain, bureau, entrée, extérieur…)"},
+          "description":{"type":"string","description":"une phrase : ce qu'on voit dans cette direction"},
+          "elements":{"type":"array","items":{"type":"object","properties":{
+            "nom":{"type":"string","description":"nom court en français (« canapé gris », « porte », « fenêtre », « télécommande »)"},
+            "point":{"type":"array","items":{"type":"integer"},"description":"[y, x] du centre de l'élément, de 0 à 1000"},
+            "distance_m":{"type":"number","description":"distance estimée depuis la caméra, en mètres"}},
+            "required":["nom","point"]}}
+        },"required":["piece","description","elements"]}
+        """.trimIndent())
+        val prompt = "Image de la caméra d'un petit robot de maison, posé au sol ou sur un meuble. Pour faire une carte de la maison : " +
+            "dis quel type de pièce c'est, décris la vue en une phrase, et pointe jusqu'à 15 éléments utiles pour s'orienter et " +
+            "retrouver les choses (meubles, portes, fenêtres, appareils, objets posés, couloirs, escaliers), avec leur distance " +
+            "estimée. N'invente rien."
+        val key = apiKey()
+        if (key.isBlank()) throw IllegalStateException("clé Gemini manquante")
+        var last: Exception? = null
+        for (model in MODELS) {
+            try {
+                val j = generateWithImage(model, key, jpegBase64, prompt, schema)
+                val els = ArrayList<Triple<String, Pair<Double, Double>, Double?>>()
+                val arr = j.optJSONArray("elements") ?: JSONArray()
+                for (i in 0 until arr.length()) {
+                    val e = arr.optJSONObject(i) ?: continue
+                    val pt = e.optJSONArray("point") ?: continue
+                    if (pt.length() != 2) continue
+                    els.add(Triple(e.optString("nom"), Pair(pt.optDouble(1) / 1000.0, pt.optDouble(0) / 1000.0),
+                        e.optDouble("distance_m", Double.NaN).takeIf { !it.isNaN() && it > 0 && it < 30 }))
+                }
+                return Survey(j.optString("piece"), j.optString("description"), els)
+            } catch (e: ModelUnavailable) {
+                last = e
+            }
+        }
+        throw IOException("vision Gemini indisponible (${last?.message})")
+    }
+
+    /** Dans quel lieu connu est le robot ? (nom du lieu ou « inconnu », certitude 0..1, raison). */
+    fun whichPlace(jpegBase64: String, places: String): Triple<String, Double, String> {
+        val schema = JSONObject("{\"type\":\"object\",\"properties\":{\"lieu\":{\"type\":\"string\"},\"certitude\":{\"type\":\"number\"},\"raison\":{\"type\":\"string\"}},\"required\":[\"lieu\",\"certitude\"]}")
+        val prompt = "Image de la caméra d'un petit robot de maison. Voici les lieux qu'il a déjà relevés :\n$places\n\n" +
+            "Dans lequel est-il ? Réponds avec le nom exact du lieu (ou « inconnu »), ta certitude (0 à 1) et une courte raison."
+        val key = apiKey()
+        var last: Exception? = null
+        for (model in MODELS) {
+            try {
+                val j = generateWithImage(model, key, jpegBase64, prompt, schema)
+                return Triple(j.optString("lieu", "inconnu"), j.optDouble("certitude", 0.0), j.optString("raison"))
+            } catch (e: ModelUnavailable) {
+                last = e
+            }
+        }
+        throw IOException("vision Gemini indisponible (${last?.message})")
+    }
+
     /** Question sur une image (en bonne résolution) : réponse courte en français. */
     fun ask(jpegBase64: String, question: String): String {
         val schema = JSONObject("{\"type\":\"object\",\"properties\":{\"reponse\":{\"type\":\"string\"}},\"required\":[\"reponse\"]}")

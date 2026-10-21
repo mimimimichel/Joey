@@ -10,7 +10,7 @@ class JoeyPromptTest {
         val a = GeminiLive.toJson(JoeyPrompt.TOOLS) as JSONArray
         assertEquals(JoeyPrompt.TOOLS.size, a.length())
         val names = (0 until a.length()).map { a.getJSONObject(it).getString("name") }
-        assertEquals(listOf("regarder", "chercher", "regarder_autour", "exprimer", "retenir", "apprendre_visage", "oublier_visage", "regarder_de_pres", "mode_garde", "journal_de_garde", "danser", "prendre_photo", "se_souvenir", "oublier", "etat"), names)
+        assertEquals(listOf("regarder", "chercher", "regarder_autour", "exprimer", "retenir", "apprendre_visage", "oublier_visage", "regarder_de_pres", "cartographier", "ou_est", "ou_suis_je", "carte", "mode_garde", "journal_de_garde", "danser", "prendre_photo", "se_souvenir", "oublier", "etat"), names)
         val dir = a.getJSONObject(0).getJSONObject("parameters").getJSONObject("properties").getJSONObject("direction")
         assertEquals(6, dir.getJSONArray("enum").length())
     }
@@ -51,6 +51,25 @@ class JoeyPromptTest {
         assertEquals(listOf("Michael", "Léa"), p2.names())
         p2.forget("léa")
         assertEquals(listOf("Michael"), People(f).names())
+    }
+
+    @Test fun houseMapFindsThings() {
+        val f = java.io.File.createTempFile("carte", ".json")
+        f.delete()
+        val m = HouseMap(f)
+        val now = System.currentTimeMillis()
+        m.put("Salon", "salon", "un canapé gris face à la télé", listOf(
+            HouseMap.Item("canapé gris", 90.0, -10.0, 2.5, now), HouseMap.Item("télécommande", 120.0, -30.0, 1.2, now)))
+        m.put("Cuisine", "cuisine", "plan de travail", listOf(HouseMap.Item("réfrigérateur", 200.0, 0.0, 3.0, now)))
+        assertEquals("Salon", m.find("où est la télécommande").first().first.name)
+        assertEquals("réfrigérateur", m.find("le réfrigérateur").first().second.name)
+        assertEquals("est", HouseMap.compassName(90.0))
+        assertEquals("nord", HouseMap.compassName(355.0))
+        val m2 = HouseMap(f)
+        assertEquals(2, m2.all().size)
+        assertTrue(m2.summary().contains("télécommande"))
+        m2.put("salon", "salon", "relevé à nouveau", listOf(HouseMap.Item("fenêtre", 0.0, 10.0, null, now)))
+        assertEquals(2, HouseMap(f).all().size) // remplacé, pas ajouté
     }
 
     @Test fun memoryRoundTrip() {

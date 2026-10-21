@@ -291,6 +291,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
     var confirmForget by remember { mutableStateOf(false) }
     var showMemories by remember { mutableStateOf(false) }
     var newPerson by remember { mutableStateOf("") }
+    var showMap by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = close,
         title = { Text("Réglages") },
@@ -329,6 +330,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Sous-titres", subs) { subs = it }
                 Text("Souvenirs : ${s.memories} (gardés sur le téléphone)", fontSize = 13.sp)
                 TextButton(onClick = { showMemories = true }) { Text("Voir ses souvenirs") }
+                TextButton(onClick = { showMap = true }) { Text("🗺 Voir sa carte de la maison") }
                 Text("Gens de la maison (visages reconnus, gardés sur le téléphone)", fontSize = 13.sp)
                 s.people.forEach { who ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -354,6 +356,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
         dismissButton = { TextButton(onClick = close) { Text("Annuler") } },
     )
     if (showMemories) MemoriesDialog(vm) { showMemories = false }
+    if (showMap) MapDialog(vm) { showMap = false }
     if (confirmForget) {
         AlertDialog(
             onDismissRequest = { confirmForget = false },
@@ -388,6 +391,32 @@ private fun MemoriesDialog(vm: MainViewModel, close: () -> Unit) {
                         Text((if (n.auto) "💬 " else "🧠 ") + n.text + "  · " + fmt.format(java.util.Date(n.time)),
                             fontSize = 13.sp, modifier = Modifier.weight(1f))
                         TextButton(onClick = { vm.forgetOne(n); list = vm.memories() }) { Text("✕") }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = close) { Text("Fermer") } },
+    )
+}
+
+/** La carte de la maison : les lieux relevés et leurs éléments (direction boussole, distance). */
+@Composable
+private fun MapDialog(vm: MainViewModel, close: () -> Unit) {
+    var places by remember { mutableStateOf(vm.mapPlaces()) }
+    AlertDialog(
+        onDismissRequest = close,
+        title = { Text("Carte de la maison (${places.size} lieux)") },
+        text = {
+            if (places.isEmpty()) Text("Aucun lieu relevé. Dis à Joey : « cartographie ici, c'est le salon ».")
+            else LazyColumn(Modifier.heightIn(max = 480.dp)) {
+                items(places) { p ->
+                    Column(Modifier.padding(vertical = 4.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("📍 ${p.name} (${p.kind})", fontSize = 15.sp, modifier = Modifier.weight(1f))
+                            TextButton(onClick = { vm.removePlace(p.name); places = vm.mapPlaces() }) { Text("✕") }
+                        }
+                        Text(p.items.joinToString(", ") { it.name + (it.heading?.let { h -> " (" + com.joey.app.brain.HouseMap.compassName(h) + ")" } ?: "") },
+                            fontSize = 12.sp, color = Color(0xFFB0BEC5))
                     }
                 }
             }

@@ -83,6 +83,8 @@ Façon de faire :
 - Chercher, aller vers, viens ici, cartographier et « ce que je montre » prennent du temps : l'outil répond « c'est
   lancé », puis le résultat arrive dans un message de l'application. Entre les deux, tu peux parler normalement.
 - Pendant une conversation, ta tête revient d'elle-même vers la personne : après un coup d'œil, inutile de le demander.
+- Plusieurs personnes : ta tête regarde en face celle qui parle (toute seule). Si on te demande de regarder quelqu'un,
+  ou si tu t'adresses à une autre personne que celle que tu regardes, « regarder_personne » (prénom, ou « autre »).
 - On te montre quelque chose (« regarde ça », « tu vois ce que je montre ? ») : « regarder_ce_que_je_montre ».
   Pour aller avec tes roues vers une chose (« va vers la porte ») : « aller_vers ». Un résultat « vérifié » vient de
   Gemini Robotics-ER : tu peux le croire ; « fausse alerte » : dis honnêtement que tu t'étais trompé.
@@ -121,6 +123,15 @@ Façon de faire :
             "parameters" to obj(mapOf(
                 "objet" to str("ce qu'il faut chercher, en français (« personne », « le chien », « mes clés », « la plante verte »)"),
             ), listOf("objet")),
+        ),
+        mapOf(
+            "name" to "regarder_personne",
+            "description" to "Tourne-toi vers une personne et regarde-la bien en face (« regarde Johanna », « regarde-la », " +
+                "« tourne-toi vers lui »). Ensuite tu la gardes en face. Quand quelqu'un d'autre parle, tu le regardes tout seul.",
+            "parameters" to obj(mapOf(
+                "qui" to str("son prénom, ou « autre » (l'autre personne), « gauche » ou « droite » (de ton point de vue, " +
+                    "comme sur ton image)"),
+            ), listOf("qui")),
         ),
         mapOf(
             "name" to "regarder_ce_que_je_montre",

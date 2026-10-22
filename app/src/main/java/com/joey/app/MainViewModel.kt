@@ -281,7 +281,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             // Un « visage » n'est cru que s'il est assez grand, ou si le détecteur voit aussi une personne autour
             // (sinon un motif du sol ou du mur peut passer pour un visage, et Joey croit te voir).
-            val f = faces.find(bmp)?.takeIf { it.size >= 0.025f }?.takeIf { it.size >= 0.09f || personAround(bmp, it) }
+            // Plusieurs visages : celui qu'on lui a demandé, celui qui parle, ou celui qu'il regardait déjà.
+            val all = faces.findAll(bmp).filter { it.size >= 0.025f && (it.size >= 0.09f || personAround(bmp, it)) }
+            val f = chooser.choose(all, speaking = System.currentTimeMillis() - lastPersonTalkAt < 1500)
+            if (all.size > 1 || chooser.count > 1) nameFaces(bmp, frameAbs, framePose)
             faceStreak = if (f != null) faceStreak + 1 else 0
             val sure = f?.takeIf { faceStreak >= 2 }
             follower.onFace(sure?.x, sure?.y)
@@ -293,6 +296,63 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (sees != _state.value.seesFace) _state.update { it.copy(seesFace = sees) }
         detectMotion(bmp)
         if (flag("watch", false)) guard(bmp)
+    }
+
+    // ---- plusieurs personnes : qui regarder -------------------------------------------------------
+    private val chooser = com.joey.app.senses.FaceChooser()
+    @Volatile private var lastPersonTalkAt = 0L
+    @Volatile private var lastNameAt = 0L
+    /** Où il a vu chaque personne reconnue en dernier : cap absolu, inclinaison, heure. */
+    private val seenByName = java.util.concurrent.ConcurrentHashMap<String, Triple<Double, Double, Long>>()
+
+    /** Met un prénom sur les visages visibles, un à la fois (toutes les 0,4 s), pour « regarde Johanna ». */
+    private fun nameFaces(bmp: android.graphics.Bitmap, abs: Double?, pose: Pair<Double, Double>?) {
+        val now = System.currentTimeMillis()
+        if (people.names().isEmpty() || enrolling != null || now - lastNameAt < 400) return
+        val f = chooser.needsName() ?: return
+        lastNameAt = now
+        val box = f.box ?: return
+        if (f.size < 0.035f) return
+        val print = faceId.embed(bmp, box) ?: return
+        val name = people.identify(print).first
+        chooser.setName(f, name)
+        if (name != null && abs != null && pose != null) {
+            val (dp, dt) = imageToDegrees(f.x, f.y, bmp.width, bmp.height)
+            seenByName[name] = Triple(Head.wrap(abs + dp), (pose.second + dt).coerceIn(-60.0, 60.0), now)
+        }
+    }
+
+    /**
+     * « Regarde Johanna » : la tête se tourne vers elle et la garde en face. Si elle est dans l'image, le suivi s'en
+     * charge ; sinon il regarde là où il l'a vue en dernier. Prénom inconnu et deux personnes : « l'autre ».
+     */
+    private fun lookAtPerson(who: String): String {
+        val w = who.trim().ifEmpty { "autre" }
+        val lw = w.lowercase()
+        val isSide = lw in setOf("gauche", "droite", "autre", "l'autre", "à gauche", "à droite")
+        val known = people.names().any { it.equals(w, ignoreCase = true) }
+        val target = if (!isSide && !known) "autre" else w
+        chooser.want(target)
+        follower.pausedUntil = 0
+        Thread.sleep(900)
+        if (chooser.targetName()?.equals(w, ignoreCase = true) == true || (target != w && chooser.count > 1)) {
+            return if (target != w) "tu regardes l'autre personne (tu ne connais pas encore le visage de $w)" else "tu regardes $w en face"
+        }
+        if (isSide) return if (chooser.count > 1) "tu regardes la personne $lw" else "tu ne vois qu'une personne"
+        // Pas dans l'image : là où il l'a vue en dernier (moins de 30 min).
+        val last = seenByName.entries.firstOrNull { it.key.equals(w, ignoreCase = true) }?.value
+        if (last != null && System.currentTimeMillis() - last.third < 30 * 60_000L) {
+            val cur = head.absPan() ?: return "je ne sais pas où regarde ma tête"
+            head.look(Head.wrap(last.first - cur), last.second)
+            chooser.want(w)
+            follower.pausedUntil = 0
+            Thread.sleep(1000)
+            if (chooser.targetName()?.equals(w, ignoreCase = true) == true) return "tu regardes $w en face"
+            return "$w n'est plus là où tu l'as vue en dernier"
+        }
+        return if (known) "tu ne vois pas $w (cherche-la avec « chercher », ou demande-lui de se montrer)"
+        else "tu ne connais pas encore le visage de $w et tu ne vois qu'une personne : demande-lui de se mettre devant toi " +
+            "(tu peux apprendre son visage avec « apprendre_visage »)"
     }
 
     // ---- viser en degrés -------------------------------------------------------------------------
@@ -1620,6 +1680,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun onTranscript(person: Boolean, text: String) {
         lastTalkAt = System.currentTimeMillis()
+        if (person) lastPersonTalkAt = lastTalkAt
         if (person) maybeSearchSpeaker()
         val joey = !person
         _state.update { st ->
@@ -1779,6 +1840,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             distanceText((check?.second ?: h).distance) + ".", "description" to h.description)
                     }
                 }
+            }
+            "regarder_personne" -> {
+                if (!gimbal.ready) return mapOf("result" to noHead)
+                val who = (args["qui"] as? String)?.trim().orEmpty()
+                log("👀 je regarde : ${who.ifEmpty { "l'autre" }}")
+                var r = ""
+                moveSync(holdMs = 0, timeoutMs = 15_000) { r = lookAtPerson(who); r }
+                live?.sendFrameNow()
+                mapOf("result" to r, "visages_dans_l_image" to chooser.count, "reconnus" to chooser.names().joinToString())
             }
             "regarder_ce_que_je_montre" -> {
                 if (!gimbal.ready) return mapOf("result" to noHead)

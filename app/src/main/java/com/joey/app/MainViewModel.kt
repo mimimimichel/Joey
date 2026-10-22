@@ -380,33 +380,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // Ce que voit vraiment la caméra, dit à Gemini quand ça change (il ne doit pas croire voir quelqu'un qui n'est pas là).
-    @Volatile private var sightReported: Boolean? = null
-    @Volatile private var sightChangedAt = 0L
-    @Volatile private var sightLast: Boolean? = null
-    @Volatile private var lastSightEvent = 0L
-
-    private fun reportSight(now: Long, s: UiState) {
-        val l = live ?: run { sightReported = null; return }
-        if (!flag("camera", true)) return
-        val sees = follower.sees && trackLabels == null
-        if (sees != sightLast) { sightLast = sees; sightChangedAt = now }
-        if (sees == sightReported || now - sightChangedAt < 1500 || now - lastSightEvent < 4000) return
-        // Pas pendant qu'il parle ou qu'on lui parle : on ne l'interrompt pas.
-        if (s.live != LiveState.LISTENING || now - lastTalkAt < 1500) return
-        sightReported = sees
-        lastSightEvent = now
-        val tilt = head.pose()?.second
-        val where = when {
-            tilt == null -> ""
-            tilt < -25 -> " Ta caméra regarde vers le bas (le sol)."
-            tilt > 25 -> " Ta caméra regarde vers le haut."
-            else -> ""
-        }
-        l.event(if (sees) "[Capteurs] Ta caméra voit un visage en ce moment." else
-            "[Capteurs] Ta caméra ne voit personne en ce moment.$where Ne dis pas que tu vois la personne.", reply = false)
-    }
-
     /** Regarde là où il a vu quelqu'un en dernier. true s'il le revoit. À appeler sur le fil des mouvements. */
     private fun lookAtLastSeen(): Boolean {
         val last = lastSeenPan ?: return false
@@ -514,7 +487,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val active = live != null || s.busy || questFollowing || s.tracking != null
             if (active || follower.sees) lastLifeAt = now
             runCatching { conversationGaze(now, s) }
-            runCatching { reportSight(now, s) }
             if (!flag("idle_life", true) || !gimbal.ready || !flag("camera", true)) continue
             // Réveil : quelqu'un, du mouvement, ou une conversation.
             if (asleep && (active || follower.sees || now - motionAt < 500)) {
@@ -825,28 +797,72 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Cherche avec Gemini Robotics-ER : arrêts un peu plus serrés que le champ de la caméra, sur deux hauteurs ; à chaque
-     * arrêt il dit si l'objet est là, où, et à quelle distance. Trouvé : la tête se tourne pile dessus.
+     * Cherche avec Gemini Robotics-ER, méthodiquement : un tour complet dans un seul sens, arrêts un peu plus serrés que
+     * le champ de la caméra, à hauteur des yeux puis plus bas (dans l'autre sens). À chaque arrêt l'image part à
+     * Robotics-ER pendant que la tête passe déjà à l'arrêt suivant (2 analyses à la fois) : le tour ne ralentit pas.
+     * Trouvé : la tête revient pile sur l'objet (cap de l'arrêt + position dans l'image).
      */
-    private fun searchSpatial(what: String): com.joey.app.brain.GeminiVision.Spot? {
-        var hit: com.joey.app.brain.GeminiVision.Spot? = null
+    private fun searchSpatial(what: String, firstDir: Int = 1): com.joey.app.brain.GeminiVision.Spot? {
+        class Stop(val job: Future<com.joey.app.brain.GeminiVision.Spot?>, val abs: Double, val tilt: Double, val w: Int, val h: Int)
         _state.update { it.copy(tracking = what) }
+        val pool = Executors.newFixedThreadPool(2)
+        val stops = ArrayList<Stop>()
+        // Une analyse terminée qui a trouvé ? (on retire celles qui sont finies)
+        fun hitDone(): Pair<Stop, com.joey.app.brain.GeminiVision.Spot>? {
+            val it = stops.iterator()
+            while (it.hasNext()) {
+                val st = it.next()
+                if (!st.job.isDone) continue
+                it.remove()
+                val sp = runCatching { st.job.get() }.getOrNull()
+                if (sp != null && sp.found && sp.confidence >= 0.5) return st to sp
+            }
+            return null
+        }
+        fun goTo(hit: Pair<Stop, com.joey.app.brain.GeminiVision.Spot>): com.joey.app.brain.GeminiVision.Spot {
+            val (st, sp) = hit
+            val (dp, dt) = imageToDegrees((sp.x * 2 - 1).toFloat(), (sp.y * 2 - 1).toFloat(), st.w, st.h)
+            val cur = head.absPan() ?: st.abs
+            head.look(Head.wrap(st.abs + dp - cur), (st.tilt + dt).coerceIn(-70.0, 70.0))
+            log("🔎 Robotics-ER : $what" + distanceText(sp.distance))
+            return sp
+        }
         try {
             val hf = camera.frame(3000)?.let { camera.fov(it.width, it.height).first } ?: 60.0
             val step = (hf * 0.85).coerceIn(40.0, 90.0)
             val n = kotlin.math.ceil(360.0 / step).toInt()
-            val pans = (listOf(0.0) + (1..n / 2).flatMap { listOf(it * step, -it * step) })
-                .map { Head.wrap(it) }.distinctBy { Math.round(it / 10) }
-            head.scan(pans, listOf(0.0, -30.0)) { _ ->
-                Thread.sleep(600) // image nette, tête arrêtée
-                val sp = erLocate(what)
-                if (sp != null && sp.found && sp.confidence >= 0.5) { hit = sp; true } else false
+            var dir = if (firstDir < 0) -1 else 1
+            for (tilt in listOf(0.0, -30.0)) {
+                head.look(null, tilt)
+                for (i in 0 until n) {
+                    if (i > 0) head.look(dir * step, null)
+                    Thread.sleep(450) // image nette, tête arrêtée
+                    hitDone()?.let { return goTo(it) }
+                    val img = camera.frame(1000) ?: continue
+                    val jpeg = camera.zoomJpeg("tout") ?: continue
+                    val abs = head.absPan() ?: continue
+                    val t = head.pose()?.second ?: tilt
+                    // Au plus 2 analyses en cours : sinon on attend un peu (et on regarde si l'une a trouvé).
+                    while (stops.count { !it.job.isDone } >= 2) {
+                        hitDone()?.let { return goTo(it) }
+                        Thread.sleep(100)
+                    }
+                    stops.add(Stop(pool.submit<com.joey.app.brain.GeminiVision.Spot?> {
+                        runCatching { vision.locate(jpeg, what) }.onFailure { log("Robotics-ER : ${it.message}") }.getOrNull()
+                    }, abs, t, img.width, img.height))
+                }
+                dir = -dir
             }
-            hit?.let { centerOnImagePoint(it.x, it.y) }
+            // Les dernières analyses.
+            while (stops.isNotEmpty()) {
+                hitDone()?.let { return goTo(it) }
+                Thread.sleep(100)
+            }
+            return null
         } finally {
+            pool.shutdownNow()
             _state.update { it.copy(tracking = null) }
         }
-        return hit
     }
 
     /**
@@ -1630,7 +1646,39 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Appelé sur un fil à part par Gemini Live ; peut bloquer le temps du mouvement. */
+    // ---- outils longs en arrière-plan : la conversation continue pendant qu'il cherche ou se déplace ----------
+    /** Outils qui peuvent durer (recherche, déplacement, relevé) : Gemini n'attend pas, il reçoit le résultat après. */
+    private val longTools = setOf("chercher", "aller_vers", "viens_ici", "cartographier", "regarder_ce_que_je_montre")
+    private val toolPool = Executors.newCachedThreadPool()
+
     private fun onTool(name: String, args: Map<String, Any?>): Map<String, Any?> {
+        if (name !in longTools) return runTool(name, args)
+        val job = toolPool.submit<Map<String, Any?>> { runTool(name, args) }
+        // Réponse rapide (refus, déjà vu…) : on la donne tout de suite.
+        runCatching { return job.get(1500, TimeUnit.MILLISECONDS) }
+        thread(name = "resultat-$name", isDaemon = true) {
+            val r = runCatching { job.get() }.getOrElse { mapOf("result" to "interrompu") }
+            deliverLater(name, args, r)
+        }
+        return mapOf("result" to "C'est lancé (ça prend quelques secondes). Le résultat t'arrivera tout seul dans un message de " +
+            "l'application. En attendant, dis en quelques mots ce que tu fais (« je regarde autour… ») et continue de parler " +
+            "normalement si on te parle. Ne dis pas que c'est trouvé ou fait avant d'avoir reçu le résultat.")
+    }
+
+    /** Donne à Gemini le résultat d'un outil long, quand personne ne parle (sans couper la parole). */
+    private fun deliverLater(name: String, args: Map<String, Any?>, r: Map<String, Any?>) {
+        val l = live ?: return
+        val t0 = System.currentTimeMillis()
+        while (System.currentTimeMillis() - t0 < 15_000 &&
+            (_state.value.live != LiveState.LISTENING || System.currentTimeMillis() - lastTalkAt < 1200)) Thread.sleep(150)
+        if (live !== l) return
+        l.sendFrameNow()
+        val what = args.values.filterIsInstance<String>().joinToString().ifBlank { "" }
+        val res = r.entries.joinToString(" ; ") { "${it.key} : ${it.value}" }
+        l.event("Résultat de « $name${if (what.isNotEmpty()) " $what" else ""} » : $res. Dis-le brièvement.", reply = true)
+    }
+
+    private fun runTool(name: String, args: Map<String, Any?>): Map<String, Any?> {
         CrashReport.mark("outil $name")
         val noHead = "ta nacelle (ton cou) n'est pas connectée : tu ne peux pas bouger la tête pour l'instant"
         return when (name) {

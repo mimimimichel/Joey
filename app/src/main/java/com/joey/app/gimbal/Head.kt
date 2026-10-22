@@ -322,7 +322,7 @@ class Head(
      */
     fun searchTarget(seenSince: (Long) -> Boolean, firstDir: Int = 1, stepDeg: Double = 40.0): Boolean {
         val t0 = now()
-        return stepSearch({ seenSince(t0) }, firstDir = firstDir, stepDeg = stepDeg)
+        return stepSearch({ seenSince(t0) }, firstDir = firstDir, stepDeg = stepDeg, dwellMs = 500)
     }
 
     /**

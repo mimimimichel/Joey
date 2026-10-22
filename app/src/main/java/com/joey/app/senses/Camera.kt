@@ -24,6 +24,17 @@ class Camera : Eyes {
     @Volatile var onFrame: ((Bitmap) -> Unit)? = null
     @Volatile private var latestBitmap: Bitmap? = null
     @Volatile private var latestBitmapAt = 0L
+    /** Comment le téléphone est tenu (0/90/180/270, d'après la pesanteur) : l'image est redressée par rapport au monde. */
+    @Volatile var deviceOrientation: () -> Int = { 0 }
+    @Volatile private var front = true
+    /** Champ de vision (degrés) le long du grand côté et du petit côté du capteur. */
+    @Volatile var fovLong = 66.0
+        private set
+    @Volatile var fovShort = 51.0
+        private set
+
+    /** Champ de vision horizontal et vertical (degrés) pour une image redressée de cette taille. */
+    fun fov(w: Int, h: Int): Pair<Double, Double> = if (w >= h) fovLong to fovShort else fovShort to fovLong
 
     /** Dernière image redressée (null si trop vieille). */
     fun frame(maxAgeMs: Long = 1000): Bitmap? = latestBitmap?.takeIf { System.currentTimeMillis() - latestBitmapAt < maxAgeMs }
@@ -77,6 +88,9 @@ class Camera : Eyes {
                     .build()
                 val analysis = ImageAnalysis.Builder()
                     .setResolutionSelector(res)
+                    // Rotation donnée par rapport au sens naturel du téléphone : on corrige ensuite avec la pesanteur
+                    // (sinon, rotation auto coupée et téléphone couché sur la nacelle, l'image serait de travers).
+                    .setTargetRotation(android.view.Surface.ROTATION_0)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
@@ -87,7 +101,8 @@ class Camera : Eyes {
                         val wantJpeg = now - lastAt >= 500
                         if (wantFace || wantJpeg) {
                             val bmp = img.toBitmap()
-                            val rot = img.imageInfo.rotationDegrees
+                            val o = deviceOrientation()
+                            val rot = ((img.imageInfo.rotationDegrees + (if (front) -o else o)) % 360 + 360) % 360
                             val scale = minOf(1f, 1280f / maxOf(bmp.width, bmp.height))
                             val m = Matrix().apply { postScale(scale, scale); postRotate(rot.toFloat()) }
                             val upright = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
@@ -114,18 +129,19 @@ class Camera : Eyes {
                     }
                 }
                 val selector = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+                this.front = front
                 val capture = androidx.camera.core.ImageCapture.Builder()
                     .setCaptureMode(androidx.camera.core.ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                     .build()
                 imageCapture = capture
                 appContext = ctx.applicationContext
                 try {
-                    p.bindToLifecycle(owner, selector, analysis, capture)
+                    readFov(p.bindToLifecycle(owner, selector, analysis, capture))
                 } catch (e: Exception) {
                     // Certains téléphones refusent les deux ensemble : on garde l'analyse (photo = image d'analyse).
                     imageCapture = null
                     p.unbindAll()
-                    p.bindToLifecycle(owner, selector, analysis)
+                    readFov(p.bindToLifecycle(owner, selector, analysis))
                 }
             } catch (e: Exception) {
                 onError("Caméra indisponible : ${e.message}")
@@ -137,8 +153,35 @@ class Camera : Eyes {
     private var appContext: android.content.Context? = null
 
     /** Prend une vraie photo (pleine définition) et l'enregistre dans la galerie (Images/Joey). [done] : message. */
+    /** Champ de vision réel de l'objectif (focale et taille du capteur). */
+    @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+    private fun readFov(cam: androidx.camera.core.Camera) {
+        runCatching {
+            val info = androidx.camera.camera2.interop.Camera2CameraInfo.from(cam.cameraInfo)
+            val f = info.getCameraCharacteristic(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                ?.firstOrNull() ?: return
+            val size = info.getCameraCharacteristic(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return
+            val long = maxOf(size.width, size.height).toDouble()
+            // L'analyse est en 4:3 : tout le grand côté, et 3/4 de lui pour le petit.
+            val short = minOf(minOf(size.width, size.height).toDouble(), long * 3 / 4)
+            val fl = Math.toDegrees(2 * kotlin.math.atan(long / (2 * f)))
+            val fs = Math.toDegrees(2 * kotlin.math.atan(short / (2 * f)))
+            if (fl in 30.0..130.0 && fs in 20.0..110.0) { fovLong = fl; fovShort = fs }
+            Log.i("Camera", "champ de vision %.0f° x %.0f°".format(fovLong, fovShort))
+        }
+    }
+
+    /** Rotation de l'écran équivalente au sens où le téléphone est tenu (pour que la photo soit droite). */
+    private fun surfaceRotation(o: Int) = when (o) {
+        90 -> android.view.Surface.ROTATION_270
+        180 -> android.view.Surface.ROTATION_180
+        270 -> android.view.Surface.ROTATION_90
+        else -> android.view.Surface.ROTATION_0
+    }
+
     fun takePhoto(done: (String) -> Unit) {
         val ctx = appContext ?: return done("caméra pas prête")
+        imageCapture?.targetRotation = surfaceRotation(deviceOrientation())
         val name = "Joey_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.FRENCH).format(java.util.Date())
         val values = android.content.ContentValues().apply {
             put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)

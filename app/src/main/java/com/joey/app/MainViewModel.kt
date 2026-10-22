@@ -258,6 +258,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var faceStreak = 0
 
     private fun onFrame(bmp: android.graphics.Bitmap) {
+        // Où regardait la tête quand l'image a été prise (avant les calculs) : sert à viser en degrés.
+        val framePose = head.pose()
+        val frameAbs = head.absPan()
         val labels = trackLabels
         if (labels != null && System.currentTimeMillis() < trackUntil) {
             val best = objects.detect(bmp).filter { it.label in labels && it.score >= (if (it.label == "person") 0.55 else 0.5) }
@@ -266,28 +269,152 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val sure = best?.takeIf { targetStreak >= 2 }
             // Une personne : on vise le haut de la silhouette (la tête), pour que le visage apparaisse.
             val y = sure?.let { if (it.label == "person") it.box.cy - it.box.h * 0.3 else it.box.cy }
-            follower.onFace(sure?.let { (it.box.cx * 2 - 1).toFloat() }, y?.let { (it * 2 - 1).toFloat() })
+            val sx = sure?.let { (it.box.cx * 2 - 1).toFloat() }
+            val sy = y?.let { (it * 2 - 1).toFloat() }
+            follower.onFace(sx, sy)
+            angleTrack(sx, sy, framePose, frameAbs, bmp.width, bmp.height, person = "person" in labels)
         } else {
             if (labels != null) {
                 trackLabels = null
                 follower.forget()
                 _state.update { it.copy(tracking = null) }
             }
-            val f = faces.find(bmp)?.takeIf { it.size >= 0.025f }
+            // Un « visage » n'est cru que s'il est assez grand, ou si le détecteur voit aussi une personne autour
+            // (sinon un motif du sol ou du mur peut passer pour un visage, et Joey croit te voir).
+            val f = faces.find(bmp)?.takeIf { it.size >= 0.025f }?.takeIf { it.size >= 0.09f || personAround(bmp, it) }
             faceStreak = if (f != null) faceStreak + 1 else 0
             val sure = f?.takeIf { faceStreak >= 2 }
             follower.onFace(sure?.x, sure?.y)
+            angleTrack(sure?.x, sure?.y, framePose, frameAbs, bmp.width, bmp.height, person = true)
             if (sure != null) recognize(bmp, sure)
             if (sure != null || rpsWaiting) readBody(bmp)
         }
         val sees = follower.sees
         if (sees != _state.value.seesFace) _state.update { it.copy(seesFace = sees) }
-        // Où il a vu quelqu'un pour la dernière fois (cap de la tête, centrée sur la personne par le suivi).
-        if (sees && (trackLabels == null || "person" in (trackLabels ?: emptySet())) && !head.moving) {
-            head.absPan()?.let { lastSeenPan = it; lastSeenAt = System.currentTimeMillis() }
-        }
         detectMotion(bmp)
         if (flag("watch", false)) guard(bmp)
+    }
+
+    // ---- viser en degrés -------------------------------------------------------------------------
+    @Volatile private var personBoxes: List<com.joey.app.senses.Box> = emptyList()
+    @Volatile private var personCheckAt = 0L
+    @Volatile private var aimTarget: Pair<Double, Double>? = null
+    @Volatile private var aimTargetAt = 0L
+    @Volatile private var lastSeenTilt = 0.0
+
+    /** Le détecteur d'objets voit-il une personne autour de ce visage ? (vérifié au plus toutes les 0,6 s) */
+    private fun personAround(bmp: android.graphics.Bitmap, f: com.joey.app.senses.SeenFace): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - personCheckAt > 600) {
+            personCheckAt = now
+            personBoxes = objects.detect(bmp).filter { it.label == "person" && it.score >= 0.4 }.map { it.box }
+        }
+        val fx = (f.x + 1) / 2.0
+        val fy = (f.y + 1) / 2.0
+        return personBoxes.any { b ->
+            fx in (b.cx - b.w / 2 - 0.05)..(b.cx + b.w / 2 + 0.05) && fy in (b.cy - b.h / 2 - 0.05)..(b.cy + b.h / 2 + 0.05)
+        }
+    }
+
+    /** Écart en degrés (droite+, haut+) d'un point de l'image (-1..1, y vers le bas), d'après le champ de la caméra. */
+    private fun imageToDegrees(x: Float, y: Float, w: Int, h: Int): Pair<Double, Double> {
+        val (hf, vf) = camera.fov(w, h)
+        val dPan = Math.toDegrees(kotlin.math.atan(x * kotlin.math.tan(Math.toRadians(hf / 2))))
+        val dTilt = -Math.toDegrees(kotlin.math.atan(y * kotlin.math.tan(Math.toRadians(vf / 2))))
+        return dPan to dTilt
+    }
+
+    /**
+     * La tête vise la cible en degrés : là où elle regardait au moment de l'image + l'écart de la cible dans l'image.
+     * Pas de sens à deviner : les capteurs disent où va la tête. Cible perdue : il finit d'aller là où il l'a vue.
+     */
+    private fun angleTrack(x: Float?, y: Float?, pose: Pair<Double, Double>?, abs: Double?, w: Int, h: Int, person: Boolean) {
+        follower.observeOnly = pose != null && !calibrating
+        if (pose == null) return
+        val now = System.currentTimeMillis()
+        if (x != null && y != null) {
+            val (dPan, dTilt) = imageToDegrees(x, y, w, h)
+            if (person && abs != null) {
+                lastSeenPan = Head.wrap(abs + dPan); lastSeenTilt = (pose.second + dTilt).coerceIn(-60.0, 60.0)
+                lastSeenAt = now
+            }
+            if (!follower.enabled || !gimbal.ready || now < follower.pausedUntil || calibrating) { aimTarget = null; return }
+            val prev = aimTarget?.takeIf { now - aimTargetAt < 1000 }
+            // Petite zone morte (4°) : la tête ne tremble pas pour un visage presque centré.
+            var tp = pose.first + dPan
+            var tt = (pose.second + dTilt).coerceIn(-70.0, 70.0)
+            if (prev != null) {
+                tp = if (kotlin.math.abs(dPan) < 4) prev.first else prev.first + Head.wrap(tp - prev.first) * 0.7
+                tt = if (kotlin.math.abs(dTilt) < 4) prev.second else prev.second + (tt - prev.second) * 0.7
+            } else {
+                if (kotlin.math.abs(dPan) < 4) tp = pose.first
+                if (kotlin.math.abs(dTilt) < 4) tt = pose.second
+            }
+            val t = Head.wrap(tp) to tt
+            aimTarget = t; aimTargetAt = now
+            head.aim(t.first, t.second)
+        } else {
+            val t = aimTarget ?: return
+            if (now < follower.pausedUntil || !follower.enabled) { aimTarget = null; return }
+            // Juste perdu : il finit d'aller là où il l'a vue (elle est sûrement là, un peu plus loin).
+            if (now - aimTargetAt < 1200) head.aim(t.first, t.second) else aimTarget = null
+        }
+    }
+
+    @Volatile private var lastGazeBack = 0L
+
+    /**
+     * En conversation, Joey regarde la personne : s'il ne la voit plus depuis 2,5 s (coup d'œil ailleurs, on lui a
+     * montré quelque chose, elle a bougé…) et que personne ne lui a demandé de regarder ailleurs, il revient vers
+     * l'endroit où il l'a vue en dernier. Sinon (pas revue là), la recherche de celui qui parle prend le relais.
+     */
+    private fun conversationGaze(now: Long, s: UiState) {
+        if (live == null || s.busy || !gimbal.ready || !follower.enabled || !flag("camera", true)) return
+        if (follower.sees || now < follower.pausedUntil || trackLabels != null || dancing || questFollowing) return
+        if (now - lastTalkAt > 20_000 || now - lastGazeBack < 6000) return
+        val since = now - follower.seenAt
+        if (since < 2500 || now - lastSeenAt > 10 * 60_000L || lastSeenPan == null) return
+        lastGazeBack = now
+        moveAsync(holdMs = 0) {
+            if (lookAtLastSeen()) "je te regarde" else "pas revu là où je t'ai vu"
+        }
+    }
+
+    // Ce que voit vraiment la caméra, dit à Gemini quand ça change (il ne doit pas croire voir quelqu'un qui n'est pas là).
+    @Volatile private var sightReported: Boolean? = null
+    @Volatile private var sightChangedAt = 0L
+    @Volatile private var sightLast: Boolean? = null
+    @Volatile private var lastSightEvent = 0L
+
+    private fun reportSight(now: Long, s: UiState) {
+        val l = live ?: run { sightReported = null; return }
+        if (!flag("camera", true)) return
+        val sees = follower.sees && trackLabels == null
+        if (sees != sightLast) { sightLast = sees; sightChangedAt = now }
+        if (sees == sightReported || now - sightChangedAt < 1500 || now - lastSightEvent < 4000) return
+        // Pas pendant qu'il parle ou qu'on lui parle : on ne l'interrompt pas.
+        if (s.live != LiveState.LISTENING || now - lastTalkAt < 1500) return
+        sightReported = sees
+        lastSightEvent = now
+        val tilt = head.pose()?.second
+        val where = when {
+            tilt == null -> ""
+            tilt < -25 -> " Ta caméra regarde vers le bas (le sol)."
+            tilt > 25 -> " Ta caméra regarde vers le haut."
+            else -> ""
+        }
+        l.event(if (sees) "[Capteurs] Ta caméra voit un visage en ce moment." else
+            "[Capteurs] Ta caméra ne voit personne en ce moment.$where Ne dis pas que tu vois la personne.", reply = false)
+    }
+
+    /** Regarde là où il a vu quelqu'un en dernier. true s'il le revoit. À appeler sur le fil des mouvements. */
+    private fun lookAtLastSeen(): Boolean {
+        val last = lastSeenPan ?: return false
+        val cur = head.absPan() ?: return false
+        val t = System.currentTimeMillis()
+        head.look(Head.wrap(last - cur), lastSeenTilt)
+        Thread.sleep(700)
+        return follower.seenSince(t)
     }
 
     // ---- mode garde ------------------------------------------------------------------------------
@@ -386,6 +513,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             val active = live != null || s.busy || questFollowing || s.tracking != null
             if (active || follower.sees) lastLifeAt = now
+            runCatching { conversationGaze(now, s) }
+            runCatching { reportSight(now, s) }
             if (!flag("idle_life", true) || !gimbal.ready || !flag("camera", true)) continue
             // Réveil : quelqu'un, du mouvement, ou une conversation.
             if (asleep && (active || follower.sees || now - motionAt < 500)) {
@@ -413,8 +542,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 lastGlance = now
                 lastLifeAt = now
                 val mx = motionX; val my = motionY
+                val frame = camera.frame(2000)
                 moveAsync(holdMs = 3000) {
-                    head.turnStick(mx * 30.0 * follower.panSign, -my * 20.0 * follower.tiltSign)
+                    val (dp, dt) = imageToDegrees(mx, my, frame?.width ?: 4, frame?.height ?: 3)
+                    head.look(dp, (head.pose()?.second ?: 0.0) + dt)
                     "coup d'œil vers ce qui bouge"
                 }
                 continue
@@ -469,9 +600,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             is com.joey.app.senses.Body.Point -> {
                 if (!gimbal.ready || _state.value.busy) return
                 log("👉 On me montre quelque chose")
-                // Image non retournée : à droite de l'image = à la droite de Joey ; on tourne avec les sens appris du suivi.
+                // L'image est droite et non retournée : le bras tendu vers la droite de l'image montre ce qui est à la
+                // droite de Joey. On tourne franchement de ce côté (on ne sait pas à quelle distance est la chose).
                 moveAsync(holdMs = 6000) {
-                    head.turnStick(g.dx * 50.0 * follower.panSign, -g.dy * 30.0 * follower.tiltSign)
+                    val side = if (g.dx >= 0) 1 else -1
+                    val pan = side * (35.0 + 35.0 * kotlin.math.abs(g.dx))
+                    val tilt = ((head.pose()?.second ?: 0.0) - g.dy * 35.0).coerceIn(-60.0, 45.0)
+                    head.look(pan, tilt)
                     Thread.sleep(500)
                     live?.sendFrameNow()
                     live?.event("La personne te montre quelque chose du doigt : tu as tourné la tête de ce côté. Regarde la nouvelle " +
@@ -648,7 +783,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         trackUntil = System.currentTimeMillis() + 120_000
         follower.forget()
         _state.update { it.copy(tracking = what) }
-        val found = head.searchTarget(follower::seenSince, firstDir)
+        // Pas de recherche un peu plus petits que le champ de la caméra : rien n'échappe entre deux arrêts.
+        val hf = camera.frame(3000)?.let { camera.fov(it.width, it.height).first } ?: 60.0
+        val found = head.searchTarget(follower::seenSince, firstDir, stepDeg = hf * 0.65)
         if (found) {
             trackUntil = System.currentTimeMillis() + keepMs
         } else {
@@ -657,12 +794,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return found
     }
 
-    /** Champ de vision approximatif de la caméra (degrés), selon le sens de l'image. */
-    private fun fov(): Pair<Double, Double> {
-        val b = camera.frame(5000)
-        val landscape = b == null || b.width >= b.height
-        return if (landscape) 68.0 to 50.0 else 50.0 to 68.0
-    }
 
     /** Objet inconnu du détecteur : Gemini regarde chaque direction. Trouvé : la tête se centre dessus. */
     private fun searchGemini(what: String): com.joey.app.brain.Found? {
@@ -676,10 +807,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (f != null && f.found && f.confidence >= 0.5) { hit = f; true } else false
             }
             hit?.box?.let { b ->
-                val (h, v) = fov()
-                val ex = b.cx * 2 - 1
-                val ey = -(b.cy * 2 - 1)
-                head.turnStick(ex * h / 2 * follower.panSign, ey * v / 2 * follower.tiltSign)
+                val img = camera.frame(5000)
+                val (dp, dt) = imageToDegrees((b.cx * 2 - 1).toFloat(), (b.cy * 2 - 1).toFloat(), img?.width ?: 4, img?.height ?: 3)
+                head.look(dp, (head.pose()?.second ?: 0.0) + dt)
             }
         } finally {
             _state.update { it.copy(tracking = null) }
@@ -712,6 +842,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun startMotion(): Int {
         motionJob?.cancel(true)
         follower.pause(120_000)
+        head.stopAim()
+        aimTarget = null
         _state.update { it.copy(busy = true) }
         return motionGen.incrementAndGet()
     }
@@ -985,7 +1117,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         log("🗺 Je relève : $name")
         head.setHomeHere()
         val compass0 = sensors.compass()
-        val (hfov, vfov) = fov()
+        val (hfov, vfov) = camera.frame(5000)?.let { camera.fov(it.width, it.height) } ?: (camera.fovLong to camera.fovShort)
         val items = ArrayList<com.joey.app.brain.HouseMap.Item>()
         val kinds = ArrayList<String>()
         val descs = ArrayList<String>()
@@ -1315,7 +1447,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 log("👀 Je regarde là où je t'ai vu")
                 trackLabels = setOf("person"); trackName = "personne"; trackUntil = System.currentTimeMillis() + 60_000
                 follower.forget()
-                head.look(delta, 5.0)
+                head.look(delta, lastSeenTilt)
                 val t = System.currentTimeMillis()
                 Thread.sleep(700)
                 found = follower.seenSince(t)
@@ -1769,6 +1901,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // Doit rester en dernier (juste avant onCleared) : tout ce qui est au-dessus est prêt (sinon plantage au lancement).
     init {
+        camera.deviceOrientation = { sensors.deviceOrientation }
         sensors.onShake = { shaken() }
         sensors.start()
         head.setPhoneSigns(prefs.getInt("phone_pan_sign", 0), prefs.getInt("phone_tilt_sign", 0))

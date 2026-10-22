@@ -28,6 +28,11 @@ class FaceFollower(
     private val stickFor: ((Double) -> Int)? = null,
 ) {
     @Volatile var enabled = true
+    /**
+     * Ne fait que noter où est le visage, sans toucher au joystick : la tête vise alors en degrés grâce à ses capteurs
+     * (plus sûr que de deviner le sens en regardant l'image bouger).
+     */
+    @Volatile var observeOnly = false
     @Volatile var panSign = initialPanSign
         private set
     @Volatile var tiltSign = initialTiltSign
@@ -83,6 +88,11 @@ class FaceFollower(
         val t = now()
         if (x != null && y != null) {
             faceX = x; faceY = y; seenAt = t
+        }
+        if (observeOnly) {
+            if (driving) { link.stick(0, 0); driving = false }
+            chasing = false
+            return
         }
         if (!enabled || !link.ready || t < pausedUntil) return
         if (x == null || y == null) {

@@ -180,6 +180,20 @@ class HeadTest {
         assertTrue("pan ${g.pan}", abs(Head.wrap(g.pan - start) - 90) < 4)
     }
 
+    @Test fun stepSearchFindsBehindLeftFirst() {
+        val (g, h) = setup()
+        h.calibrate()
+        val start = g.pan
+        val target = Head.wrap(start - 120.0) // à gauche, presque derrière
+        var firstMove = 0.0
+        val found = h.stepSearch({
+            if (firstMove == 0.0 && abs(Head.wrap(g.pan - start)) > 10) firstMove = Head.wrap(g.pan - start)
+            abs(Head.wrap(g.pan - target)) < 25
+        }, firstDir = -1, dwellMs = 100)
+        assertTrue(found)
+        assertTrue("parti à gauche ($firstMove)", firstMove * Head.wrap(target - start) > 0)
+    }
+
     @Test fun spinSearchGoesAllTheWayAround() {
         val (g, h) = setup()
         h.calibrate()

@@ -290,6 +290,9 @@ class Head(
         aimAt = now()
     }
 
+    /** Oublie la cible continue (un mouvement demandé prend la main). */
+    fun stopAim() { aimAt = 0L }
+
     /** Un pas de suivi (appelé ~25 fois par seconde). true tant que la cible est récente. */
     fun aimStep(): Boolean {
         val active = now() - aimAt < 600 && link.ready
@@ -317,9 +320,48 @@ class Head(
      * Cherche du regard (un visage, une personne, un objet : selon ce que suit la caméra) : d'abord là où il regarde,
      * puis un tour complet. [seenSince] : la cible a-t-elle été vue depuis cette heure ?
      */
-    fun searchTarget(seenSince: (Long) -> Boolean, firstDir: Int = 1): Boolean {
+    fun searchTarget(seenSince: (Long) -> Boolean, firstDir: Int = 1, stepDeg: Double = 40.0): Boolean {
         val t0 = now()
-        return spinSearch({ seenSince(t0) }, firstDir = firstDir)
+        return stepSearch({ seenSince(t0) }, firstDir = firstDir, stepDeg = stepDeg)
+    }
+
+    /**
+     * Fait le tour par petits pas ([stepDeg], moins que le champ de la caméra pour ne rien rater), en s'arrêtant
+     * [dwellMs] à chaque fois : les images sont nettes à l'arrêt (en tournant, elles sont floues et le détecteur rate).
+     * D'abord à hauteur des yeux, puis plus bas. S'arrête dès que [found] dit oui ; la suite (centrer) est au suivi.
+     */
+    fun stepSearch(found: () -> Boolean, tilts: List<Double> = listOf(5.0, -30.0), stepDeg: Double = 40.0,
+                   dwellMs: Long = 700, firstDir: Int = 1): Boolean {
+        cancelled = false
+        fun dwell(): Boolean {
+            val t = now()
+            while (!cancelled && now() - t < dwellMs) {
+                if (found()) return true
+                sleep(50)
+            }
+            return found()
+        }
+        if (dwell()) return true
+        if (cur() == null) return false
+        val step = stepDeg.coerceIn(15.0, 90.0)
+        val steps = kotlin.math.ceil(360.0 / step).toInt() - 1
+        var dir = if (firstDir < 0) -1 else 1
+        for (tilt in tilts) {
+            if (cancelled) return false
+            look(null, tilt)
+            if (dwell()) return true
+            for (i in 1..steps) {
+                if (cancelled) return false
+                look(dir * step, null)
+                if (dwell()) {
+                    onLog("Trouvé après %.0f° (incliné à %.0f°).".format(i * step, tilt))
+                    return true
+                }
+            }
+            onLog("Tour à %.0f° d'inclinaison : rien.".format(tilt))
+            dir = -dir
+        }
+        return false
     }
 
     /**

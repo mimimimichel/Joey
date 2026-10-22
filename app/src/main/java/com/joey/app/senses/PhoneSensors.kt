@@ -6,6 +6,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import com.joey.app.gimbal.Orientation
+import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
 
@@ -84,7 +85,39 @@ class PhoneSensors(context: Context, private val frontCamera: () -> Boolean) : O
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
+    /**
+     * Comment le téléphone est tenu (0, 90, 180, 270), d'après la pesanteur, comme OrientationEventListener : sert à
+     * redresser l'image de la caméra quel que soit le sens de l'écran (rotation auto coupée, téléphone en paysage…).
+     */
+    @Volatile var deviceOrientation = 0
+        private set
+    private val gravitySensor: Sensor? = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    private val gravityListener = object : SensorEventListener {
+        override fun onSensorChanged(ev: SensorEvent) {
+            orientationFrom(ev.values[0], ev.values[1], ev.values[2], deviceOrientation)?.let { deviceOrientation = it }
+        }
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    companion object {
+        /**
+         * Orientation (0/90/180/270) d'après l'accéléromètre (x, y, z du téléphone), avec une marge pour ne pas osciller
+         * entre deux positions. null si le téléphone est presque à plat (on garde la précédente).
+         */
+        fun orientationFrom(ax: Float, ay: Float, az: Float, previous: Int): Int? {
+            val x = -ax; val y = -ay; val z = -az
+            if ((x * x + y * y) * 4 < z * z) return null
+            var o = 90 - Math.round(Math.toDegrees(atan2(-y.toDouble(), x.toDouble()))).toInt()
+            o = ((o % 360) + 360) % 360
+            // Il faut dépasser la bissectrice de 15° pour changer.
+            val d = abs(((o - previous + 540) % 360) - 180)
+            if (d < 60) return previous
+            return ((o + 45) / 90 % 4) * 90
+        }
+    }
+
     fun start() {
+        gravitySensor?.let { sm.registerListener(gravityListener, it, SensorManager.SENSOR_DELAY_UI) }
         accel?.let { sm.registerListener(shakeListener, it, SensorManager.SENSOR_DELAY_GAME) }
         game?.let { sm.registerListener(gameListener, it, SensorManager.SENSOR_DELAY_GAME) }
         if (compassSensor != null && compassSensor != game) sm.registerListener(compassListener, compassSensor, SensorManager.SENSOR_DELAY_UI)
@@ -94,6 +127,7 @@ class PhoneSensors(context: Context, private val frontCamera: () -> Boolean) : O
         sm.unregisterListener(gameListener)
         sm.unregisterListener(compassListener)
         sm.unregisterListener(shakeListener)
+        sm.unregisterListener(gravityListener)
     }
 
     override fun read(): Pair<Double, Double>? =

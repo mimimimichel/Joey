@@ -18,7 +18,23 @@ class Found(val found: Boolean, val confidence: Double, val box: Box?, val descr
 class GeminiVision(private val apiKey: () -> String) {
     companion object {
         private const val TAG = "GeminiVision"
-        val MODELS = listOf("gemini-robotics-er-2-preview", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash")
+        /**
+         * Robotics-ER d'abord (le meilleur pour situer les choses), puis d'autres modèles : chacun a son propre quota
+         * gratuit par jour, on passe au suivant quand l'un est épuisé. Tous testés sur une image (ils pointent juste).
+         * Gemma 4 : modèle ouvert de Google, gratuit, aux quotas larges.
+         */
+        val MODELS = listOf(
+            "gemini-robotics-er-2-preview",
+            "gemini-3-flash-preview",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+            "gemini-flash-lite-latest",
+            "gemma-4-31b-it",
+            "gemma-4-26b-a4b-it",
+            "gemini-3.8-flash",
+            "gemini-3.5-flash",
+            "gemini-2.5-flash",
+        )
         private val SCHEMA = JSONObject("""
         {"type":"object","properties":{
           "found":{"type":"boolean","description":"true seulement si l'objet cherché est vraiment visible sur l'image"},
@@ -53,6 +69,8 @@ class GeminiVision(private val apiKey: () -> String) {
 
     /** Erreur d'un modèle : s'il s'agit d'un quota, on le met de côté le temps indiqué par Google. */
     private fun unavailable(model: String, code: Int, msg: String): IOException {
+        // Surchargé (503) : on le laisse souffler 2 minutes.
+        if (code == 503) downUntil[model] = System.currentTimeMillis() + 120_000
         if (code == 429) {
             val m = Regex("retry in (?:(\\d+)h)?(?:(\\d+)m)?(?:([\\d.]+)s)?").find(msg)
             val delayS = m?.let { (it.groupValues[1].toLongOrNull() ?: 0) * 3600 + (it.groupValues[2].toLongOrNull() ?: 0) * 60 +
@@ -353,7 +371,7 @@ class GeminiVision(private val apiKey: () -> String) {
             val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
             if (code !in 200..299) {
                 val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull() ?: text.take(200)
-                if (code == 404 || code == 429 || code >= 500 || code == 400 && msg.contains("model", ignoreCase = true)) throw unavailable(model, code, msg)
+                if (code == 404 || code == 429 || code >= 500 || code == 400) throw unavailable(model, code, msg)
                 throw IOException("Gemini, erreur $code : $msg")
             }
             val p = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
@@ -409,7 +427,7 @@ class GeminiVision(private val apiKey: () -> String) {
                 ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
             if (code !in 200..299) {
                 val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull() ?: text.take(200)
-                if (code == 404 || code == 429 || code >= 500 || code == 400 && msg.contains("model", ignoreCase = true)) throw unavailable(model, code, msg)
+                if (code == 404 || code == 429 || code >= 500 || code == 400) throw unavailable(model, code, msg)
                 throw IOException("Gemini, erreur $code : $msg")
             }
             val parts = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
@@ -499,7 +517,7 @@ class GeminiVision(private val apiKey: () -> String) {
                 ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
             if (code !in 200..299) {
                 val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull() ?: text.take(200)
-                if (code == 404 || code == 429 || code >= 500 || code == 400 && msg.contains("model", ignoreCase = true)) throw unavailable(model, code, msg)
+                if (code == 404 || code == 429 || code >= 500 || code == 400) throw unavailable(model, code, msg)
                 throw IOException("Gemini, erreur $code : $msg")
             }
             val parts = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")

@@ -209,7 +209,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             prefs.edit().putString("device_id", it).apply()
         }) + "-" + android.os.Build.MODEL,
         version = BuildConfig.VERSION_NAME,
-        enabled = { flag("upload_journal", true) },
+        enabled = { flag("upload_journal", true) && !android.os.Build.FINGERPRINT.contains("robolectric", ignoreCase = true) },
     ).also { u ->
         journal.onLine = { at, kind, text -> u.add(at, kind, text) }
         u.start()
@@ -489,7 +489,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // Elle regarde ailleurs (tête tournée) sans parler : il regarde aussi (attention partagée).
         if (kotlin.math.abs(f.yaw) > 30) { if (turnedSince == 0L) turnedSince = now } else turnedSince = 0
         if (turnedSince != 0L && now - turnedSince > 1500 && now - lastPersonTalkAt > 2000 && now - lastGazeFollowAt > 25_000 &&
-            !_state.value.busy && gimbal.ready && geminiKey.isNotBlank() && flag("follow_gaze", true) && !handAttention.active) {
+            !_state.value.busy && gimbal.ready && geminiKey.isNotBlank() && flag("auto_vision", false) && vision.available() &&
+            !handAttention.active) {
             lastGazeFollowAt = now
             turnedSince = 0
             moveAsync(holdMs = 0) { followGaze() }
@@ -607,7 +608,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun initiatives(now: Long, s: UiState) {
         if (!flag("initiatives", true) || s.busy || s.night || flag("watch", false) || now - lastNoveltyCheck < 10 * 60_000L) return
-        if (!flag("camera", true) || geminiKey.isBlank() || head.moving) return
+        if (!flag("camera", true) || geminiKey.isBlank() || head.moving || !flag("auto_vision", false) || !vision.available()) return
         val heading = sensors.compass() ?: return
         val sector = (((heading + 22.5) % 360) / 45).toInt()
         val file = File(viewsDir, "vue_$sector.jpg")
@@ -704,6 +705,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     @Volatile private var lastGazeBack = 0L
+    @Volatile private var poseLoggedAt = 0L
+    @Volatile private var poseLogged: Pair<Double, Double>? = null
+
+    /** Où regarde la tête, dans le journal (toutes les 2 s au plus, quand ça change) : pour comprendre les ratés. */
+    private fun journalPose(now: Long) {
+        if (now - poseLoggedAt < 2000 || !gimbal.ready) return
+        val p = head.pose() ?: return
+        val last = poseLogged
+        if (last != null && kotlin.math.abs(Head.wrap(p.first - last.first)) < 5 && kotlin.math.abs(p.second - last.second) < 5) return
+        poseLoggedAt = now; poseLogged = p
+        val g = gimbal.angles
+        val ph = sensors.read()
+        journal.write("tete", "pan %.0f° incl. %.0f° (source %s ; téléphone %s ; nacelle %s ; voit quelqu'un : %s)".format(
+            p.first, p.second, if (head.usesPhone) "téléphone" else "nacelle",
+            ph?.let { "cap %.0f élév. %.0f".format(it.first, it.second) } ?: "-",
+            g?.let { "pan %.0f tilt %.0f roll %.0f".format(it.pan, it.tilt, it.roll) } ?: "-", follower.sees))
+    }
 
     /**
      * En conversation, Joey regarde la personne : s'il ne la voit plus depuis 2,5 s (coup d'œil ailleurs, on lui a
@@ -828,6 +846,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             val active = live != null || s.busy || questFollowing || s.tracking != null
             if (active || follower.sees) lastLifeAt = now
+            runCatching { journalPose(now) }
             runCatching { conversationGaze(now, s) }
             runCatching { idlePose(now, s) }
             runCatching { initiatives(now, s) }
@@ -934,7 +953,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // droite de Joey. On tourne franchement de ce côté (on ne sait pas à quelle distance est la chose).
                 moveAsync(holdMs = 6000) {
                     // Gemini Robotics-ER suit la direction du bras ; sans lui, on tourne franchement du côté montré.
-                    val er = if (geminiKey.isNotBlank()) lookWherePointed() else null
+                    val er = if (geminiKey.isNotBlank() && vision.available()) lookWherePointed() else null
                     if (er == null) {
                         val side = if (g.dx >= 0) 1 else -1
                         val pan = side * (35.0 + 35.0 * kotlin.math.abs(g.dx))
@@ -1141,6 +1160,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Gemini Robotics-ER sur l'image de maintenant (pleine résolution). null s'il ne répond pas. */
     private fun erLocate(what: String, floor: Boolean = false): com.joey.app.brain.GeminiVision.Spot? {
+        if (!vision.available()) return null // quota épuisé : inutile d'essayer (et de perdre du temps)
         val jpeg = camera.zoomJpeg("tout") ?: return null
         return runCatching { vision.locate(jpeg, what, floor) }.onFailure { log("Robotics-ER : ${it.message}") }.getOrNull()
     }
@@ -1164,6 +1184,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Trouvé : la tête revient pile sur l'objet (cap de l'arrêt + position dans l'image).
      */
     private fun searchSpatial(what: String, firstDir: Int = 1): com.joey.app.brain.GeminiVision.Spot? {
+        if (!vision.available()) { log("🔎 ${vision.quotaText()}"); return null }
         class Stop(val job: Future<com.joey.app.brain.GeminiVision.Spot?>, val abs: Double, val tilt: Double, val w: Int, val h: Int)
         _state.update { it.copy(tracking = what) }
         val pool = Executors.newFixedThreadPool(2)
@@ -2186,9 +2207,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     var confirmed = false
                     var erNote = ""
                     if (found.get()) {
-                        Thread.sleep(900)
-                        val now = seenNow()
-                        confirmed = now.any { it.label in labels && it.score >= 0.5 } || (person && follower.sees)
+                        // Vu pendant le tour : on le suit des yeux ; s'il est revu dans la seconde et demie (même s'il a
+                        // bougé un peu, le suivi le garde), c'est confirmé.
+                        val foundAt = System.currentTimeMillis()
+                        Thread.sleep(1500)
+                        confirmed = follower.seenSince(foundAt) || seenNow().any { it.label in labels && it.score >= 0.45 } ||
+                            (person && follower.sees)
                         if (!confirmed) log("🔎 fausse alerte : plus de « $what » une fois la tête tournée")
                         // Un objet : Gemini Robotics-ER a le dernier mot (le détecteur du téléphone se trompe parfois).
                         if (confirmed && !person) {
@@ -2211,8 +2235,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         live?.sendFrameNow()
                         return sp?.let { mapOf("result" to "trouvé (vérifié par Gemini Robotics-ER) : ta tête est tournée vers « $what »" +
                             distanceText(it.distance) + ". Regarde l'image pour en dire plus.", "description" to it.description) }
-                            ?: mapOf("result" to "pas de « $what » en faisant le tour (détecteur puis Gemini Robotics-ER, 360°, deux " +
-                                "hauteurs). Peut-être caché, trop loin ou dans le noir. Dis-le honnêtement.")
+                            ?: mapOf("result" to "pas de « $what » en faisant le tour (360°, deux hauteurs" +
+                                (vision.quotaText()?.let { " ; détecteur du téléphone seulement : $it" } ?: ", détecteur puis Gemini Robotics-ER") +
+                                "). Peut-être caché, trop loin ou dans le noir. Dis-le honnêtement ; si la personne te dit où il est, " +
+                                "regarde là (« regarder »).")
                     }
                     live?.sendFrameNow()
                     if (confirmed) mapOf("result" to "trouvé (vérifié) : ta tête est tournée vers « $what » et le suit des yeux" +
@@ -2247,10 +2273,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (!gimbal.ready) return mapOf("result" to noHead)
                 val who = (args["qui"] as? String)?.trim().orEmpty()
                 log("👀 je regarde : ${who.ifEmpty { "l'autre" }}")
-                var r = ""
-                moveSync(holdMs = 0, timeoutMs = 15_000) { r = lookAtPerson(who); r }
-                live?.sendFrameNow()
-                mapOf("result" to r, "visages_dans_l_image" to chooser.count, "reconnus" to chooser.names().joinToString())
+                // Tout de suite : la tête s'en charge pendant qu'il parle (avant, il attendait 2 à 4 s pour répondre).
+                moveAsync(holdMs = 0) { lookAtPerson(who) }
+                mapOf("result" to "tu te tournes vers ${who.ifEmpty { "l'autre personne" }}", "visages_dans_l_image" to chooser.count,
+                    "reconnus" to chooser.names().joinToString())
             }
             "regarder_ce_que_je_montre" -> {
                 if (!gimbal.ready) return mapOf("result" to noHead)
@@ -2562,6 +2588,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     init {
         journal.write("demarrage", "Joey ${BuildConfig.VERSION_NAME} sur ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, " +
             "Android ${android.os.Build.VERSION.RELEASE}")
+        vision.onQuota = { model, until ->
+            log("⛔ Quota Gemini atteint pour $model, jusqu'à " +
+                java.text.SimpleDateFormat("HH:mm", java.util.Locale.FRENCH).format(Date(until)))
+        }
         camera.deviceOrientation = { sensors.deviceOrientation }
         head.expression = { exprPose.pan to exprPose.tilt }
         sensors.onMotion = { e -> bodyMoved(e) }

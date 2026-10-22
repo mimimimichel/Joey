@@ -68,6 +68,8 @@ class SpgGimbal(
     @Volatile private var writeChar: BluetoothGattCharacteristic? = null
     @Volatile private var state = GimbalState.OFF
     @Volatile private var scanning = false
+    /** Numéro de la tentative de connexion en cours (les minuteurs des anciennes tentatives ne font plus rien). */
+    @Volatile private var attempt = 0
 
     @Volatile override var angles: SpgProtocol.Angles? = null
         private set
@@ -116,9 +118,11 @@ class SpgGimbal(
         val addr = savedAddress()
         if (addr != null && BluetoothAdapter.checkBluetoothAddress(addr)) {
             log("Connexion directe à $addr…")
+            val gen = ++attempt
             connectTo(a.getRemoteDevice(addr))
-            // Si rien au bout de 8 s : on cherche à nouveau (la nacelle a pu changer d'adresse).
-            main.postDelayed({ if (wanted && state == GimbalState.CONNECTING) { closeGatt(); scan() } }, 8000)
+            // Si rien au bout de 8 s : on cherche à nouveau (la nacelle a pu changer d'adresse). Seulement pour CETTE
+            // tentative (sinon un vieux minuteur coupait une connexion en train de réussir).
+            main.postDelayed({ if (gen == attempt && wanted && state == GimbalState.CONNECTING) { closeGatt(); scan() } }, 8000)
         } else {
             scan()
         }
@@ -158,8 +162,9 @@ class SpgGimbal(
         runCatching {
             scanner.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scanCb)
         }.onFailure { log("Recherche impossible : ${it.message}"); scanning = false; setState(GimbalState.OFF) }
+        val gen = ++attempt
         main.postDelayed({
-            if (scanning) {
+            if (scanning && gen == attempt && state == GimbalState.SEARCHING) {
                 stopScan()
                 log("Nacelle introuvable. Est-elle allumée ? L'app Feiyu est-elle fermée ?" +
                     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) " Sur ce téléphone, la localisation doit être activée." else "")
@@ -252,6 +257,7 @@ class SpgGimbal(
                 send(SpgProtocol.PING)
                 send(SpgProtocol.readParam(0x7F))
                 readBattery()
+                stopScan() // connectée : plus besoin de chercher
                 setState(GimbalState.READY)
                 log("Nacelle prête.")
             }, 400)

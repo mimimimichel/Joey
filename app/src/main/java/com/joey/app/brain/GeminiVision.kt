@@ -32,12 +32,47 @@ class GeminiVision(private val apiKey: () -> String) {
     @Volatile private var modelIndex = 0
     private class ModelUnavailable(msg: String) : IOException(msg)
 
+    // ---- quotas : un modèle refusé (« quota dépassé, réessaie dans 13 h ») n'est plus appelé jusque-là ----
+    private val downUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    /** Appelé quand un modèle devient indisponible (pour le journal, une seule fois). */
+    @Volatile var onQuota: ((model: String, until: Long) -> Unit)? = null
+
+    private fun usable(model: String) = System.currentTimeMillis() >= (downUntil[model] ?: 0L)
+    private fun models() = MODELS.filter(::usable)
+
+    /** Au moins un modèle de vision est utilisable maintenant. */
+    fun available(): Boolean = MODELS.any(::usable)
+
+    /** « vision Gemini épuisée jusqu'à 08:56 (quota gratuit) », ou null. */
+    fun quotaText(): String? {
+        if (available()) return null
+        val until = downUntil.values.minOrNull() ?: return null
+        return "vision Gemini épuisée jusqu'à " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.FRENCH).format(java.util.Date(until)) +
+            " (quota gratuit atteint)"
+    }
+
+    /** Erreur d'un modèle : s'il s'agit d'un quota, on le met de côté le temps indiqué par Google. */
+    private fun unavailable(model: String, code: Int, msg: String): IOException {
+        if (code == 429) {
+            val m = Regex("retry in (?:(\\d+)h)?(?:(\\d+)m)?(?:([\\d.]+)s)?").find(msg)
+            val delayS = m?.let { (it.groupValues[1].toLongOrNull() ?: 0) * 3600 + (it.groupValues[2].toLongOrNull() ?: 0) * 60 +
+                (it.groupValues[3].toDoubleOrNull() ?: 0.0).toLong() }?.takeIf { it > 0 }
+                ?: Regex("\"retryDelay\"\\s*:\\s*\"(\\d+)s\"").find(msg)?.groupValues?.get(1)?.toLongOrNull()
+                ?: if (msg.contains("PerDay") || msg.contains("free_tier")) 3600L else 60L
+            val until = System.currentTimeMillis() + delayS * 1000
+            val was = downUntil.put(model, until)
+            if (was == null || was < System.currentTimeMillis()) runCatching { onQuota?.invoke(model, until) }
+        }
+        return ModelUnavailable("$code ${msg.take(160)}")
+    }
+
     fun find(jpegBase64: String, target: String): Found {
         val key = apiKey()
         if (key.isBlank()) throw IllegalStateException("clé Gemini manquante")
         var last: Exception? = null
         for (attempt in MODELS.indices) {
             val model = MODELS[(modelIndex + attempt) % MODELS.size]
+            if (!usable(model)) continue
             try {
                 val f = call(model, key, jpegBase64, target)
                 modelIndex = (modelIndex + attempt) % MODELS.size // on garde celui qui marche
@@ -47,7 +82,7 @@ class GeminiVision(private val apiKey: () -> String) {
                 last = e
             }
         }
-        throw IOException("aucun modèle de vision Gemini disponible (${last?.message})")
+        throw IOException(quotaText() ?: "aucun modèle de vision Gemini disponible (${last?.message})")
     }
 
     /** Relevé d'une vue pour la carte : type de pièce, description, et éléments pointés avec leur distance. */
@@ -73,7 +108,7 @@ class GeminiVision(private val apiKey: () -> String) {
         val key = apiKey()
         if (key.isBlank()) throw IllegalStateException("clé Gemini manquante")
         var last: Exception? = null
-        for (model in MODELS) {
+        for (model in models()) {
             try {
                 val j = generateWithImage(model, key, jpegBase64, prompt, schema)
                 val els = ArrayList<Triple<String, Pair<Double, Double>, Double?>>()
@@ -90,7 +125,7 @@ class GeminiVision(private val apiKey: () -> String) {
                 last = e
             }
         }
-        throw IOException("vision Gemini indisponible (${last?.message})")
+        throw IOException(quotaText() ?: "vision Gemini indisponible (${last?.message})")
     }
 
     /** Dans quel lieu connu est le robot ? (nom du lieu ou « inconnu », certitude 0..1, raison). */
@@ -100,7 +135,7 @@ class GeminiVision(private val apiKey: () -> String) {
             "Dans lequel est-il ? Réponds avec le nom exact du lieu (ou « inconnu »), ta certitude (0 à 1) et une courte raison."
         val key = apiKey()
         var last: Exception? = null
-        for (model in MODELS) {
+        for (model in models()) {
             try {
                 val j = generateWithImage(model, key, jpegBase64, prompt, schema)
                 return Triple(j.optString("lieu", "inconnu"), j.optDouble("certitude", 0.0), j.optString("raison"))
@@ -108,7 +143,7 @@ class GeminiVision(private val apiKey: () -> String) {
                 last = e
             }
         }
-        throw IOException("vision Gemini indisponible (${last?.message})")
+        throw IOException(quotaText() ?: "vision Gemini indisponible (${last?.message})")
     }
 
     /** Qui parle dans [clip] (WAV), parmi les voix de référence ? (prénom ou « inconnu », certitude 0..1). */
@@ -125,7 +160,7 @@ class GeminiVision(private val apiKey: () -> String) {
         parts.put(JSONObject().put("text", "Qui parle dans l'extrait ? Compare le timbre, la hauteur et la façon de parler (pas ce qui est dit). " +
             "Réponds par le prénom exact, ou « inconnu » si aucune voix ne correspond vraiment, avec ta certitude (0 à 1)."))
         var last: Exception? = null
-        for (model in MODELS.drop(1)) {
+        for (model in models().filter { it != MODELS[0] }) {
             try {
                 val gen = JSONObject().put("responseMimeType", "application/json").put("responseJsonSchema", schema).put("temperature", 0.1)
                 if (model.startsWith("gemini-3")) gen.put("thinkingConfig", JSONObject().put("thinkingLevel", "LOW"))
@@ -137,7 +172,7 @@ class GeminiVision(private val apiKey: () -> String) {
                     conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
                     val code = conn.responseCode
                     val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
-                    if (code !in 200..299) throw IOException("$model : erreur $code")
+                    if (code !in 200..299) throw unavailable(model, code, text)
                     val p = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
                     val answer = buildString { if (p != null) for (i in 0 until p.length()) { val x = p.optJSONObject(i) ?: continue; if (!x.optBoolean("thought")) append(x.optString("text")) } }
                     val j = JSONObject(answer.substring(answer.indexOf('{'), answer.lastIndexOf('}') + 1))
@@ -149,7 +184,7 @@ class GeminiVision(private val apiKey: () -> String) {
                 last = e
             }
         }
-        throw IOException("Gemini indisponible (${last?.message})")
+        throw IOException(quotaText() ?: "Gemini indisponible (${last?.message})")
     }
 
     // ---- Gemini Robotics-ER : comprendre l'espace -------------------------------------------------
@@ -161,7 +196,8 @@ class GeminiVision(private val apiKey: () -> String) {
         val key = apiKey()
         if (key.isBlank()) throw IllegalStateException("clé Gemini manquante")
         var last: Exception? = null
-        val models = if (System.currentTimeMillis() < erDownUntil) MODELS.drop(1) else MODELS
+        val models = models().filter { it != MODELS[0] || System.currentTimeMillis() >= erDownUntil }
+        if (models.isEmpty()) throw IOException(quotaText() ?: "vision Gemini indisponible")
         for (model in models) {
             try {
                 return block(model, key)
@@ -171,7 +207,7 @@ class GeminiVision(private val apiKey: () -> String) {
                 last = e
             }
         }
-        throw IOException("vision Gemini indisponible (${last?.message})")
+        throw IOException(quotaText() ?: "vision Gemini indisponible (${last?.message})")
     }
 
     /** Un objet repéré : où dans l'image (x, y de 0 à 1), son cadre, sa distance estimée, et ce qu'on voit. */
@@ -317,7 +353,7 @@ class GeminiVision(private val apiKey: () -> String) {
             val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
             if (code !in 200..299) {
                 val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull() ?: text.take(200)
-                if (code == 404 || code == 429 || code >= 500 || code == 400 && msg.contains("model", ignoreCase = true)) throw ModelUnavailable("$code $msg")
+                if (code == 404 || code == 429 || code >= 500 || code == 400 && msg.contains("model", ignoreCase = true)) throw unavailable(model, code, msg)
                 throw IOException("Gemini, erreur $code : $msg")
             }
             val p = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
@@ -341,13 +377,14 @@ class GeminiVision(private val apiKey: () -> String) {
         var last: Exception? = null
         for (attempt in MODELS.indices) {
             val model = MODELS[(modelIndex + attempt) % MODELS.size]
+            if (!usable(model)) continue
             try {
                 return generateWithImage(model, key, jpegBase64, prompt, schema).optString("reponse")
             } catch (e: ModelUnavailable) {
                 last = e
             }
         }
-        throw IOException("vision Gemini indisponible (${last?.message})")
+        throw IOException(quotaText() ?: "vision Gemini indisponible (${last?.message})")
     }
 
     private fun generateWithImage(model: String, key: String, jpeg: String, prompt: String, schema: JSONObject): JSONObject {
@@ -372,7 +409,7 @@ class GeminiVision(private val apiKey: () -> String) {
                 ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
             if (code !in 200..299) {
                 val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull() ?: text.take(200)
-                if (code == 404 || code == 429 || code >= 500 || code == 400 && msg.contains("model", ignoreCase = true)) throw ModelUnavailable("$code $msg")
+                if (code == 404 || code == 429 || code >= 500 || code == 400 && msg.contains("model", ignoreCase = true)) throw unavailable(model, code, msg)
                 throw IOException("Gemini, erreur $code : $msg")
             }
             val parts = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
@@ -395,7 +432,7 @@ class GeminiVision(private val apiKey: () -> String) {
         val key = apiKey()
         if (key.isBlank()) throw IllegalStateException("clé Gemini manquante")
         var last: Exception? = null
-        for (model in MODELS.drop(1)) { // modèles Flash (Robotics-ER est pour les images)
+        for (model in models().filter { it != MODELS[0] }) { // modèles Flash (Robotics-ER est pour les images)
             try {
                 val gen = JSONObject().put("responseMimeType", "application/json").put("responseJsonSchema", schema).put("temperature", 0.2)
                 if (model.startsWith("gemini-3")) gen.put("thinkingConfig", JSONObject().put("thinkingLevel", "LOW"))
@@ -415,7 +452,7 @@ class GeminiVision(private val apiKey: () -> String) {
                     val code = conn.responseCode
                     val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
                         ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
-                    if (code !in 200..299) throw IOException("$model : erreur $code")
+                    if (code !in 200..299) throw unavailable(model, code, text)
                     val parts = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
                     val answer = buildString {
                         if (parts != null) for (i in 0 until parts.length()) {
@@ -433,7 +470,7 @@ class GeminiVision(private val apiKey: () -> String) {
                 last = e
             }
         }
-        throw IOException("Gemini indisponible (${last?.message})")
+        throw IOException(quotaText() ?: "Gemini indisponible (${last?.message})")
     }
 
     private fun call(model: String, key: String, jpeg: String, target: String): Found {
@@ -462,7 +499,7 @@ class GeminiVision(private val apiKey: () -> String) {
                 ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
             if (code !in 200..299) {
                 val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull() ?: text.take(200)
-                if (code == 404 || code == 429 || code >= 500 || code == 400 && msg.contains("model", ignoreCase = true)) throw ModelUnavailable("$code $msg")
+                if (code == 404 || code == 429 || code >= 500 || code == 400 && msg.contains("model", ignoreCase = true)) throw unavailable(model, code, msg)
                 throw IOException("Gemini, erreur $code : $msg")
             }
             val parts = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")

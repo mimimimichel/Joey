@@ -368,6 +368,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Langage du corps (hochements, respiration)", vm.flagValue("body_language", true)) { vm.setFlagValue("body_language", it) }
                 Toggle("Il parle de lui-même (salue, remarque)", vm.flagValue("initiatives", true)) { vm.setFlagValue("initiatives", it) }
                 Toggle("Sursaute aux bruits forts", vm.flagValue("startle", true)) { vm.setFlagValue("startle", it) }
+                Toggle("Vision avancée automatique (regard partagé, nouveautés : consomme le quota Gemini)", vm.flagValue("auto_vision", false)) { vm.setFlagValue("auto_vision", it) }
                 Toggle("Journal du jour (21 h 30, sur ton téléphone)", vm.flagValue("diary", true)) { vm.setFlagValue("diary", it) }
                 Toggle("🛡 Mode garde (journal, rondes, alertes)", s.watch) { vm.setWatch(it) }
                 OutlinedTextField(value = ntfy, onValueChange = { ntfy = it.trim() }, singleLine = true,

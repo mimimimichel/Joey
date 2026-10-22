@@ -29,8 +29,8 @@ Ton corps (pour l'instant) :
   plus la personne qui te parle : « chercher » avec objet = « personne ». Pour un objet ou un animal (« cherche le
   chien », « où sont mes clés ? ») : « chercher » avec cet objet. Ne réponds jamais « je ne te vois pas » ou « je ne
   le vois pas » sans avoir cherché.
-- Tu fais des gestes de la tête (outil « exprimer » : oui, non, hésiter) : ils se font PENDANT que tu parles,
-  appelle l'outil et parle aussitôt, sans attendre.
+- Tes expressions et tes gestes de la tête (oui, non, hésiter, surprise, rire…) suivent tout seuls ce que tu dis :
+  parle simplement avec émotion, ton visage et ta tête s'accordent d'eux-mêmes.
 - Ta tête suit toute seule le visage de la personne qui te parle (tu la regardes naturellement). Quand tu tournes
   la tête avec « regarder », tu gardes ce regard quelques secondes puis tu reviens vers elle.
 - Tu reçois environ une image par seconde de ta caméra : c'est ce que tu vois. Ne décris pas l'image sans raison ;
@@ -151,15 +151,6 @@ Façon de faire :
             "description" to "Balaye la pièce du regard (gauche, devant, droite) : tu reçois une image à chaque arrêt, et la " +
                 "liste de ce que le détecteur reconnaît. Pour découvrir où tu es ou décrire la pièce (pour chercher : « chercher »).",
             "parameters" to obj(mapOf("raison" to str("ce que tu cherches (facultatif)"))),
-        ),
-        mapOf(
-            "name" to "exprimer",
-            "description" to "Change l'expression de tes yeux et fais un geste de la tête (le geste se fait pendant que tu " +
-                "parles). De temps en temps, quand une émotion compte. Ne dis jamais à voix haute l'expression ni le geste.",
-            "parameters" to obj(mapOf(
-                "emotion" to str("expression des yeux", listOf("neutre", "content", "triste", "etonne", "fache", "fatigue", "amuse", "mefiant")),
-                "geste" to str("geste de la tête", listOf("aucun", "oui", "non", "hesiter")),
-            ), listOf("emotion")),
         ),
         mapOf(
             "name" to "retenir",

@@ -5,11 +5,12 @@ package com.joey.app.life
  * puis retombée rapide (moins de 0,35 s). La parole monte aussi, mais elle dure : elle ne compte pas.
  * [jump] : écart au-dessus du fond (dB) ; [floor] : niveau minimum du pic.
  */
-class Startle(private val jump: Double, private val floor: Double, private val now: () -> Long = { System.currentTimeMillis() }) {
+class Startle(private val jump: Double, private val floor: Double, private val maxMs: Long = 350,
+              private val now: () -> Long = { System.currentTimeMillis() }) {
     private var background = Double.NaN
     private var onsetAt = 0L
     private var peak = Double.NEGATIVE_INFINITY
-    private var lastFired = 0L
+    private var lastFired = Long.MIN_VALUE / 2
 
     /** Un niveau (dB). Renvoie true quand un bruit soudain vient de se terminer. */
     fun feed(db: Double): Boolean {
@@ -24,10 +25,10 @@ class Startle(private val jump: Double, private val floor: Double, private val n
         val dur = t - onsetAt
         if (db < peak - jump * 0.6 && db < background + jump * 0.5) {
             onsetAt = 0L
-            if (dur <= 350 && t - lastFired > 3000) { lastFired = t; return true }
+            if (dur <= maxMs && t - lastFired > 10_000) { lastFired = t; return true }
             return false
         }
-        if (dur > 350) { // ça dure : c'est de la parole ou de la musique
+        if (dur > maxMs) { // ça dure : c'est de la parole ou de la musique
             if (dur > 1500) { onsetAt = 0L; background += (db - background) * 0.2 }
         }
         return false

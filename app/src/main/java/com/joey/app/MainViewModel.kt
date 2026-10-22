@@ -429,8 +429,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var lastJoeyTalkAt = 0L
     @Volatile private var lastTrackAimAt = 0L
     @Volatile private var idleBase: Pair<Double, Double>? = null
-    private val liveStartle = com.joey.app.life.Startle(jump = 20.0, floor = -30.0)
-    private val wakeStartle = com.joey.app.life.Startle(jump = 6.0, floor = 6.0)
+    // Bien moins sensible qu'avant : seul un vrai bruit fort et très bref compte (porte qui claque, verre qui tombe).
+    private val liveStartle = com.joey.app.life.Startle(jump = 28.0, floor = -16.0, maxMs = 250)
     @Volatile private var lastStartleAt = 0L
 
     /** L'expression du moment revient à celle-ci (fatigué tard le soir). */
@@ -1821,8 +1821,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         live = l
         l.onMicPcm = { pcm, n ->
             voices.feed(pcm, n)
-            // Bruit fort et soudain (pas pendant qu'il parle : il s'entendrait lui-même).
-            if (_state.value.live != LiveState.SPEAKING && n > 0) {
+            // Bruit fort et soudain : pas pendant qu'il parle ni juste après (il s'entendrait lui-même), ni quand sa tête
+            // bouge (les moteurs de la nacelle), ni si on l'a désactivé.
+            val quietNow = _state.value.live == LiveState.LISTENING && System.currentTimeMillis() - lastSpeakingAt > 2000 &&
+                !head.moving && flag("startle", true)
+            if (quietNow && n > 0) {
                 var acc = 0.0
                 for (i in 0 until n) acc += pcm[i].toDouble() * pcm[i]
                 val db = 20 * kotlin.math.log10(kotlin.math.sqrt(acc / n).coerceAtLeast(1.0) / 32768.0)
@@ -1844,6 +1847,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     @Volatile private var lastLatencyMark = 0L
+    @Volatile private var lastSpeakingAt = 0L
     @Volatile private var lastJournalState: LiveState? = null
 
     private fun onLiveState(s: LiveState) {
@@ -1861,6 +1865,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 "Ton humeur en ce moment : ${temperament.describe()}. " +
                 "Salue en une phrase courte, à ta façon.", reply = true)
         }
+        if (s == LiveState.SPEAKING || _state.value.live == LiveState.SPEAKING) lastSpeakingAt = System.currentTimeMillis()
         if (s == LiveState.SPEAKING) {
             val now = System.currentTimeMillis()
             if (lastPersonTalkAt > lastLatencyMark && now - lastPersonTalkAt < 30_000) {
@@ -2019,7 +2024,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         turnPerson = null
     }
 
+    @Volatile private var lastSpokenMoodAt = 0L
+
+    /**
+     * Ses expressions suivent ce qu'il dit (au lieu d'un outil, que le modèle avait tendance à lire à voix haute) :
+     * « oui » au début -> hochement, « non » -> non de la tête, « hmm » -> hésitation ; « oh ! » -> étonné, « haha » -> amusé…
+     */
+    private fun expressFromSpeech(chunk: String, turnStart: Boolean) {
+        val t = chunk.lowercase()
+        val now = System.currentTimeMillis()
+        if (turnStart) {
+            val first = t.trimStart().take(14)
+            when {
+                Regex("^(oui|ouais|d'accord|exactement|bien sûr|absolument|carrément)").containsMatchIn(first) -> expressive.cue(com.joey.app.life.Expressive.Cue.YES)
+                Regex("^(non|pas du tout|jamais|hors de question)").containsMatchIn(first) -> expressive.cue(com.joey.app.life.Expressive.Cue.NO)
+                Regex("^(hm+|euh|bof|peut-être)").containsMatchIn(first) -> expressive.cue(com.joey.app.life.Expressive.Cue.HMM)
+            }
+        }
+        if (now - lastSpokenMoodAt < 3000) return
+        val m = when {
+            Regex("ha ?ha|hi ?hi|hé hé|mdr|trop drôle|rigol").containsMatchIn(t) -> Mood.AMUSE
+            Regex("\\b(oh|ah|waouh|wow|ouah|incroyable|sérieux|quoi) ?!").containsMatchIn(t) -> Mood.ETONNE
+            Regex("désolé|dommage|triste|snif|pauvre").containsMatchIn(t) -> Mood.TRISTE
+            Regex("grr|agaçant|énervé|ça m'énerve|pas content").containsMatchIn(t) -> Mood.FACHE
+            Regex("super|génial|bravo|trop bien|content|chouette|youpi|cool").containsMatchIn(t) -> Mood.CONTENT
+            Regex("suspect|bizarre|louche|mouais").containsMatchIn(t) -> Mood.MEFIANT
+            Regex("fatigué|bâill|dodo|crevé").containsMatchIn(t) -> Mood.FATIGUE
+            else -> null
+        } ?: return
+        lastSpokenMoodAt = now
+        setMood(m, sound = false)
+    }
+
     private fun onTranscript(person: Boolean, text: String) {
+        if (!person) expressFromSpeech(text, turnStart = turnPerson != false)
         synchronized(turnText) {
             if (turnPerson != null && turnPerson != person) flushTurn()
             turnPerson = person
@@ -2222,33 +2260,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 mapOf("result" to "fait (tu as reçu une image à chaque arrêt)", "detecteur" to seen.toString().trim())
-            }
-            "exprimer" -> {
-                val mood = when (args["emotion"] as? String) {
-                    "content" -> Mood.CONTENT
-                    "triste" -> Mood.TRISTE
-                    "etonne" -> Mood.ETONNE
-                    "fache" -> Mood.FACHE
-                    "fatigue" -> Mood.FATIGUE
-                    "amuse" -> Mood.AMUSE
-                    "mefiant" -> Mood.MEFIANT
-                    else -> Mood.NEUTRE
-                }
-                setMood(mood)
-                val geste = args["geste"] as? String ?: "aucun"
-                // Le geste se fait pendant qu'il parle : réponse immédiate.
-                val r = if (geste != "aucun" && gimbal.ready) {
-                    moveAsync(holdMs = 1500) {
-                        when (geste) {
-                            "oui" -> { roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.YES); head.nod() }
-                            "non" -> { roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.NO); head.shake() }
-                            "hesiter" -> { roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.HESITATE); head.hesitate() }
-                            else -> ""
-                        }
-                    }
-                    "fait"
-                } else if (geste != "aucun") "expression affichée ; geste impossible ($noHead)" else "fait"
-                mapOf("result" to r)
             }
             "retenir" -> {
                 val note = args["note"] as? String ?: ""
@@ -2540,7 +2551,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         camera.deviceOrientation = { sensors.deviceOrientation }
         head.expression = { exprPose.pan to exprPose.tilt }
         sensors.onMotion = { e -> bodyMoved(e) }
-        wake.onLevel = { db -> if (wakeStartle.feed(db.toDouble())) startled() }
+        // (Le niveau de la reconnaissance du mot de réveil saute à chaque relance : il n'est plus utilisé pour sursauter.)
         sensors.onShake = { shaken() }
         sensors.start()
         head.setPhoneSigns(prefs.getInt("phone_pan_sign", 0), prefs.getInt("phone_tilt_sign", 0))

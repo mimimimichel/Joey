@@ -148,3 +148,19 @@ class TemperamentTest {
         assertTrue(m.loneliness() < 0.1)
     }
 }
+
+class SpeechCueTest {
+    @Test fun yesNodsNoShakes() {
+        var t = 10_000L
+        val x = Expressive({ t }, { 0.5 })
+        val base = Expressive({ t }, { 0.5 })
+        x.cue(Expressive.Cue.YES)
+        var deepest = 0.0
+        repeat(20) { deepest = minOf(deepest, x.pose(0f, true, false, false, 0.8).tilt - base.pose(0f, true, false, false, 0.8).tilt); t += 50 }
+        assertTrue("oui de la tête ($deepest)", deepest < -5)
+        x.cue(Expressive.Cue.NO)
+        var lo = 0.0; var hi = 0.0
+        repeat(20) { val d = x.pose(0f, false, false, false, 0.8).pan - base.pose(0f, false, false, false, 0.8).pan; lo = minOf(lo, d); hi = maxOf(hi, d); t += 50 }
+        assertTrue("non de la tête ($lo..$hi)", hi - lo > 8)
+    }
+}

@@ -91,10 +91,30 @@ class Expressive(private val now: () -> Long = { System.currentTimeMillis() }, p
             com.joey.app.face.Mood.DORT -> tilt -= 20.0 * ease
             else -> {}
         }
+        val (cp, ct) = cueOffset(t)
+        pan += cp; tilt += ct
+        if (cue == Cue.HMM && t - cueAt in 0..1200) screen += 9f
         return Pose(pan, tilt, screen)
     }
 
     private var thinkW = 0.0
+
+    /** Petits gestes accordés à ce qu'il dit. */
+    enum class Cue { YES, NO, HMM }
+    @Volatile private var cue: Cue? = null
+    @Volatile private var cueAt = -10_000L
+
+    fun cue(c: Cue) { cue = c; cueAt = now() }
+
+    private fun cueOffset(t: Long): Pair<Double, Double> {
+        val ms = t - cueAt
+        return when (cue) {
+            Cue.YES -> 0.0 to (nod(ms) + nod(ms - 450)) // oui oui
+            Cue.NO -> (if (ms in 0..900) 8.0 * sin(2 * PI * ms / 300.0) * (1 - ms / 900.0) else 0.0) to 0.0
+            Cue.HMM -> (if (ms in 0..1200) 6.0 * sin(PI * ms / 1200.0) else 0.0) to (if (ms in 0..1200) 3.0 * sin(PI * ms / 1200.0) else 0.0)
+            null -> 0.0 to 0.0
+        }
+    }
 
     /** Un hochement : la tête descend de 7° et remonte, en 0,5 s. */
     private fun nod(ms: Long): Double = if (ms in 0..500) -7.0 * sin(PI * ms / 500.0) else 0.0

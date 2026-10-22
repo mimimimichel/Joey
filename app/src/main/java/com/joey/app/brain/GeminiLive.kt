@@ -427,10 +427,19 @@ class GeminiLive(
 
         // Micro du téléphone : facultatif quand le casque fournit le sien.
         val rec = try {
-            val minIn = AudioRecord.getMinBufferSize(IN_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-            AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, IN_RATE,
-                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minIn, IN_RATE))
-                .also { if (it.state != AudioRecord.STATE_INITIALIZED) { it.release(); throw IllegalStateException("micro occupé") } }
+            // Stéréo si le téléphone le permet (les deux micros : d'où vient la voix), sinon mono.
+            val stereo = runCatching {
+                val minSt = AudioRecord.getMinBufferSize(IN_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
+                AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, IN_RATE,
+                    AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minSt, IN_RATE * 2))
+                    .takeIf { it.state == AudioRecord.STATE_INITIALIZED && it.channelCount == 2 || run { it.release(); false } }
+            }.getOrNull()
+            stereo ?: run {
+                val minIn = AudioRecord.getMinBufferSize(IN_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+                AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, IN_RATE,
+                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minIn, IN_RATE))
+                    .also { if (it.state != AudioRecord.STATE_INITIALIZED) { it.release(); throw IllegalStateException("micro occupé") } }
+            }
         } catch (e: Exception) {
             if (!micOptional) throw e
             Log.w(TAG, "micro du téléphone indisponible, micro du casque seulement", e)
@@ -483,12 +492,32 @@ class GeminiLive(
         }
     }
 
+    /** Les deux micros séparés (stéréo), quand le téléphone les donne : gauche, droite, nombre d'échantillons. */
+    @Volatile var onStereo: ((ShortArray, ShortArray, Int) -> Unit)? = null
+
     private fun micLoop(rec: AudioRecord) {
         val buf = ShortArray(IN_RATE / 10) // 100 ms
         val bytes = ByteArray(buf.size * 2)
+        val stereo = rec.channelCount == 2
+        val raw = ShortArray(if (stereo) buf.size * 2 else 0)
+        val left = ShortArray(buf.size)
+        val right = ShortArray(buf.size)
         var quietUntil = 0L
         while (active && record === rec) {
-            val n = rec.read(buf, 0, buf.size)
+            val n: Int
+            if (stereo) {
+                val got = rec.read(raw, 0, raw.size)
+                if (got <= 0) continue
+                n = got / 2
+                // Gemini reçoit un seul canal (la moyenne des deux) ; les deux canaux servent à la direction.
+                for (i in 0 until n) {
+                    left[i] = raw[2 * i]; right[i] = raw[2 * i + 1]
+                    buf[i] = ((raw[2 * i].toInt() + raw[2 * i + 1].toInt()) / 2).toShort()
+                }
+                if (!speaking) onStereo?.let { cb -> runCatching { cb(left, right, n) } }
+            } else {
+                n = rec.read(buf, 0, buf.size)
+            }
             if (n <= 0) continue
             onMicPcm?.let { cb -> runCatching { cb(buf, n) } }
             if (!setupDone) continue

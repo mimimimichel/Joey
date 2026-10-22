@@ -307,6 +307,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val sure = f?.takeIf { faceStreak >= 2 }
             follower.onFace(sure?.x, sure?.y)
             if (sure != null) { targetFaceX = sure.x; targetFaceY = sure.y; targetFaceAt = System.currentTimeMillis() }
+            // Elle parle et on voit son visage : les micros se règlent (au centre : équilibre ; sur un côté : sens).
+            if (sure != null && System.currentTimeMillis() - lastPersonTalkAt < 800 && chooser.count <= 1) stereoDir.learn(sure.x)
             runCatching { faceSocial(sure) }
             // Elle bouge les mains : un coup d'œil à ses mains (en gardant le visage dans l'image si possible).
             val handAim = handAttention.aimPoint(sure?.x, sure?.y)
@@ -324,6 +326,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- plusieurs personnes : qui regarder -------------------------------------------------------
     private val chooser = com.joey.app.senses.FaceChooser()
     @Volatile private var lastPersonTalkAt = 0L
+
+    /** Direction de la voix avec les deux micros, réglée toute seule en t'écoutant (gardée sur le téléphone). */
+    private val stereoDir = com.joey.app.audio.StereoDirection(
+        balanceDb = prefs.getFloat("mic_balance_db", 0f).toDouble(),
+        lagBias = prefs.getFloat("mic_lag_bias", 0f).toDouble(),
+        sideSign = prefs.getInt("stereo_side_sign", 1),
+        save = { b, l, sgn, n ->
+            prefs.edit().putFloat("mic_balance_db", b.toFloat()).putFloat("mic_lag_bias", l.toFloat()).putInt("stereo_side_sign", sgn).apply()
+            log("🎙️ Micros réglés : écart %.1f dB, sens %d (%d mesures)".format(b, sgn, n))
+        },
+    )
     @Volatile private var lastNameAt = 0L
     /** Où il a vu chaque personne reconnue en dernier : cap absolu, inclinaison, heure. */
     private val seenByName = java.util.concurrent.ConcurrentHashMap<String, Triple<Double, Double, Long>>()
@@ -390,6 +403,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             appendLine("Téléphone : ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}")
             appendLine("Nacelle : ${_state.value.gimbal} ; capteurs du téléphone pour la tête : ${head.usesPhone} ; vitesse max mesurée : %.0f°/s".format(head.bestSpeed))
             appendLine("Caméra : ${camera.cameraChoice}")
+            appendLine(stereoDir.describe())
             appendLine("Roomba : ${if (roomba != null) "branché" else "non"} ; personnes connues : ${people.names().size} ; souvenirs : ${memory.all().size}")
             appendLine("Humeur : ${temperament.describe()}")
             appendLine("Réglages : $safeFlags")
@@ -1185,8 +1199,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Robotics-ER pendant que la tête passe déjà à l'arrêt suivant (2 analyses à la fois) : le tour ne ralentit pas.
      * Trouvé : la tête revient pile sur l'objet (cap de l'arrêt + position dans l'image).
      */
-    private fun searchSpatial(what: String, firstDir: Int = 1): com.joey.app.brain.GeminiVision.Spot? {
-        if (!vision.available()) { log("🔎 ${vision.quotaText()}"); return null }
+    private fun searchSpatial(what: String, labels: Set<String>? = null, firstDir: Int = 1): com.joey.app.brain.GeminiVision.Spot? {
+        val useEr = vision.available()
+        if (!useEr) log("🔎 ${vision.quotaText() ?: "vision Gemini indisponible"} : détecteur du téléphone seulement")
+        if (!useEr && labels == null) return null
+        // Le détecteur du téléphone regarde aussi à chaque arrêt (instantané) : le premier des deux qui trouve gagne.
+        if (labels != null) {
+            trackName = what; trackLabels = labels; trackUntil = System.currentTimeMillis() + 120_000
+            follower.forget()
+        }
+        /** Le détecteur l'a vu depuis [since], et le revoit dans la seconde (sinon : fausse alerte, on continue). */
+        fun localHit(since: Long): com.joey.app.brain.GeminiVision.Spot? {
+            if (labels == null || !follower.seenSince(since)) return null
+            val t = System.currentTimeMillis()
+            var again = false
+            while (System.currentTimeMillis() - t < 1200) { Thread.sleep(80); if (follower.seenSince(t + 100)) { again = true; break } }
+            if (!again) { log("🔎 fausse alerte du détecteur : je continue"); return null }
+            trackUntil = System.currentTimeMillis() + 15_000
+            // La tête se centre dessus tout de suite (là où le détecteur l'a vu en dernier).
+            centerOnImagePoint(((follower.faceX + 1) / 2).toDouble(), ((follower.faceY + 1) / 2).toDouble())
+            log("🔎 Détecteur : $what")
+            return com.joey.app.brain.GeminiVision.Spot(true, 0.8, 0.5, 0.5, null, null, "vu par le détecteur du téléphone", "téléphone")
+        }
         class Stop(val job: Future<com.joey.app.brain.GeminiVision.Spot?>, val abs: Double, val tilt: Double, val w: Int, val h: Int)
         _state.update { it.copy(tracking = what) }
         val pool = Executors.newFixedThreadPool(2)
@@ -1220,8 +1254,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 head.look(null, tilt)
                 for (i in 0 until n) {
                     if (i > 0) head.look(dir * step, null)
-                    Thread.sleep(450) // image nette, tête arrêtée
+                    val stopAt = System.currentTimeMillis()
+                    // Image nette, tête arrêtée : le détecteur a ~0,45 s pour le voir.
+                    while (System.currentTimeMillis() - stopAt < 450) {
+                        localHit(stopAt - 300)?.let { return it }
+                        Thread.sleep(50)
+                    }
                     hitDone()?.let { return goTo(it) }
+                    if (!useEr) continue
                     val img = camera.frame(1000) ?: continue
                     val jpeg = camera.zoomJpeg("tout") ?: continue
                     val abs = head.absPan() ?: continue
@@ -1229,6 +1269,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // Au plus 2 analyses en cours : sinon on attend un peu (et on regarde si l'une a trouvé).
                     while (stops.count { !it.job.isDone } >= 2) {
                         hitDone()?.let { return goTo(it) }
+                        localHit(System.currentTimeMillis() - 300)?.let { return it }
                         Thread.sleep(100)
                     }
                     stops.add(Stop(pool.submit<com.joey.app.brain.GeminiVision.Spot?> {
@@ -1246,6 +1287,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } finally {
             pool.shutdownNow()
             _state.update { it.copy(tracking = null) }
+            if (labels != null && System.currentTimeMillis() > trackUntil - 14_000) { trackLabels = null; trackUntil = 0 }
         }
     }
 
@@ -1854,6 +1896,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             micOptional = headsetAudioClients > 0,
         )
         live = l
+        l.onStereo = { left, right, n -> stereoDir.feed(left, right, n) }
         l.onMicPcm = { pcm, n ->
             voices.feed(pcm, n)
             // Bruit fort et soudain : pas pendant qu'il parle ni juste après (il s'entendrait lui-même), ni quand sa tête
@@ -1978,7 +2021,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * commençant du côté d'où venait la voix ([side] : -1 gauche, +1 droite, 0 inconnu). Avec les roues, s'approche si
      * elle est loin. Apprend aussi dans quel sens sont câblés les micros. Bloquant (fil des mouvements).
      */
-    private fun findCaller(side: Int): String {
+    private fun findCaller(side: Int, oriented: Boolean = false): String {
         if (follower.sees) return "je te vois déjà"
         val startPan = head.pose()?.first ?: 0.0
         var found = false
@@ -2001,7 +2044,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!found) {
             val micSign = prefs.getInt("mic_side_sign", 1)
             val dir = when {
-                side != 0 -> side * micSign
+                side != 0 -> if (oriented) side else side * micSign
                 last != null && cur != null -> if (Head.wrap(last - cur) >= 0) 1 else -1
                 else -> 1
             }
@@ -2012,7 +2055,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (!found) return "je ne te trouve pas"
         // Le côté de la voix était-il le bon ? (on apprend le câblage des micros : il peut être inversé)
-        if (side != 0) {
+        if (side != 0 && !oriented) {
             Thread.sleep(800)
             val moved = Head.wrap((head.pose()?.first ?: startPan) - startPan)
             if (kotlin.math.abs(moved) in 25.0..155.0) {
@@ -2039,14 +2082,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** On lui parle et il ne voit personne : il cherche du regard, tout seul (au plus toutes les 20 s). */
+    /** Il regarde ce qu'il vient de trouver : pas de recherche de qui parle jusque-là. */
+    @Volatile private var showingFoundUntil = 0L
+
     private fun maybeSearchSpeaker() {
         val now = System.currentTimeMillis()
+        if (now < showingFoundUntil || now < follower.pausedUntil) return
         if (!gimbal.ready || !follower.enabled || !flag("camera", true) || follower.sees) return
         // On ne cherche que si personne n'est vu depuis un moment (sinon la tête bouge « toute seule » sans raison).
         if (_state.value.busy || now - follower.seenAt < 8000 || now - lastAutoSearch < 30_000) return
         lastAutoSearch = now
-        log("👀 on me parle, je cherche qui")
-        moveAsync(holdMs = 0) { findCaller(0) }
+        // Les deux micros disent de quel côté vient la voix (s'ils sont réglés) : il commence par là.
+        val (side, conf) = stereoDir.side()
+        log("👀 on me parle, je cherche qui" + if (conf >= 0.35 && side != 0) " (voix ${if (side > 0) "à ma droite" else "à ma gauche"})" else "")
+        moveAsync(holdMs = 0) { findCaller(if (conf >= 0.35) side else 0, oriented = true) }
     }
 
     private val turnText = StringBuilder()
@@ -2161,8 +2210,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun deliverLater(name: String, args: Map<String, Any?>, r: Map<String, Any?>) {
         val l = live ?: return
         val t0 = System.currentTimeMillis()
-        while (System.currentTimeMillis() - t0 < 15_000 &&
-            (_state.value.live != LiveState.LISTENING || System.currentTimeMillis() - lastTalkAt < 1200)) Thread.sleep(150)
+        // Tout de suite, sauf s'il est en train de parler (8 s au plus) ou si la personne parle à l'instant (3 s au plus).
+        while (System.currentTimeMillis() - t0 < 8000 && (_state.value.live == LiveState.SPEAKING ||
+                (System.currentTimeMillis() - lastPersonTalkAt < 700 && System.currentTimeMillis() - t0 < 3000))) Thread.sleep(100)
         if (live !== l) return
         l.sendFrameNow()
         val what = args.values.filterIsInstance<String>().joinToString().ifBlank { "" }
@@ -2204,78 +2254,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     live?.sendFrameNow()
                     return mapOf("result" to if (r.startsWith("trouvé") || r.startsWith("je te vois")) "$r (vérifie sur l'image)" else r)
                 }
-                if (labels != null) {
-                    val person = "person" in labels
-                    val found = AtomicBoolean(false)
-                    moveSync(holdMs = 0, timeoutMs = 40_000) {
-                        found.set(searchLocal(what, labels, keepMs = if (person) 2500 else 15_000))
-                        if (found.get()) "trouvé : $what" else "pas trouvé : $what"
-                    }
-                    // Vérification : une fois la tête centrée, on regarde à nouveau (une fausse détection ne compte pas).
-                    var confirmed = false
-                    var erNote = ""
-                    if (found.get()) {
-                        // Vu pendant le tour : on le suit des yeux ; s'il est revu dans la seconde et demie (même s'il a
-                        // bougé un peu, le suivi le garde), c'est confirmé.
-                        val foundAt = System.currentTimeMillis()
-                        Thread.sleep(1500)
-                        confirmed = follower.seenSince(foundAt) || seenNow().any { it.label in labels && it.score >= 0.45 } ||
-                            (person && follower.sees)
-                        if (!confirmed) log("🔎 fausse alerte : plus de « $what » une fois la tête tournée")
-                        // Un objet : Gemini Robotics-ER a le dernier mot (le détecteur du téléphone se trompe parfois).
-                        if (confirmed && !person) {
-                            val v = erVerify(what)
-                            if (v != null) {
-                                confirmed = v.first
-                                erNote = if (v.first) " Vérifié par Gemini Robotics-ER" + distanceText(v.second?.distance) + "." else
-                                    " Gemini Robotics-ER ne le voit pas : ${v.second?.description}"
-                            }
-                        }
-                    }
-                    // Pas trouvé par le détecteur (ou fausse alerte) : Gemini Robotics-ER fait le tour, il voit mieux.
-                    if (!confirmed && !person) {
-                        var sp: com.joey.app.brain.GeminiVision.Spot? = null
-                        log("🔎 je cherche « $what » avec Gemini Robotics-ER")
-                        moveSync(holdMs = 8000, timeoutMs = 100_000) {
-                            sp = searchSpatial(what)
-                            if (sp != null) "trouvé : $what" else "pas trouvé : $what"
-                        }
-                        live?.sendFrameNow()
-                        return sp?.let { mapOf("result" to "trouvé (vérifié par Gemini Robotics-ER) : ta tête est tournée vers « $what »" +
-                            distanceText(it.distance) + ". Regarde l'image pour en dire plus.", "description" to it.description) }
-                            ?: mapOf("result" to "pas de « $what » en faisant le tour (360°, deux hauteurs" +
-                                (vision.quotaText()?.let { " ; détecteur du téléphone seulement : $it" } ?: ", détecteur puis Gemini Robotics-ER") +
-                                "). Peut-être caché, trop loin ou dans le noir. Dis-le honnêtement ; si la personne te dit où il est, " +
-                                "regarde là (« regarder »).")
-                    }
-                    live?.sendFrameNow()
-                    if (confirmed) mapOf("result" to "trouvé (vérifié) : ta tête est tournée vers « $what » et le suit des yeux" +
-                        (if (person) " (puis suit son visage)" else " pendant 15 s") + ".$erNote Regarde l'image pour en dire plus.",
-                        "vu_maintenant" to objects.describe(seenNow()))
-                    else if (found.get()) mapOf("result" to "fausse alerte : j'ai cru voir « $what » en tournant, mais une fois la " +
-                        "tête tournée il n'y est pas. Dis-le honnêtement (« j'ai cru… ») et propose de chercher encore.",
-                        "vu_maintenant" to objects.describe(seenNow()))
-                    else mapOf("result" to "pas de « $what » en faisant le tour (360°, deux hauteurs). Peut-être caché, trop loin, " +
-                        "ou dans le noir.")
-                } else {
-                    var hit: com.joey.app.brain.GeminiVision.Spot? = null
-                    var check: Pair<Boolean, com.joey.app.brain.GeminiVision.Spot?>? = null
-                    moveSync(holdMs = 8000, timeoutMs = 100_000) {
-                        hit = searchSpatial(what)
-                        if (hit != null) check = erVerify(what)
-                        if (hit != null) "trouvé : $what" else "pas trouvé : $what"
-                    }
-                    live?.sendFrameNow()
-                    val h = hit
-                    when {
-                        h == null -> mapOf("result" to "pas de « $what » en faisant le tour (Gemini Robotics-ER, 360°, deux hauteurs). " +
-                            "Dis-le honnêtement.")
-                        check?.first == false -> mapOf("result" to "fausse alerte : Gemini Robotics-ER a cru voir « $what », mais une " +
-                            "fois la tête tournée il ne le voit plus (${check?.second?.description}). Dis-le honnêtement.")
-                        else -> mapOf("result" to "trouvé (vérifié par Gemini Robotics-ER) : ta tête est tournée vers « $what »" +
-                            distanceText((check?.second ?: h).distance) + ".", "description" to h.description)
-                    }
+                // Un objet ou un animal : un seul tour, détecteur du téléphone et Gemini à chaque arrêt.
+                var sp: com.joey.app.brain.GeminiVision.Spot? = null
+                moveSync(holdMs = 8000, timeoutMs = 100_000) {
+                    sp = searchSpatial(what, labels?.takeIf { "person" !in it })
+                    if (sp != null) "trouvé : $what" else "pas trouvé : $what"
                 }
+                val found = sp
+                if (found != null) showingFoundUntil = System.currentTimeMillis() + 8000
+                live?.sendFrameNow()
+                return if (found != null) mapOf("result" to "trouvé (vérifié) : ta tête est tournée vers « $what »" +
+                    distanceText(found.distance) + ". Dis-le tout de suite ; regarde l'image pour en dire plus.",
+                    "description" to found.description)
+                else mapOf("result" to "pas de « $what » en faisant le tour (360°, deux hauteurs" +
+                    (vision.quotaText()?.let { " ; détecteur du téléphone seulement : $it" } ?: ", détecteur et Gemini") +
+                    "). Peut-être caché, trop loin ou dans le noir. Dis-le honnêtement ; si la personne te dit où il est, " +
+                    "regarde là (« regarder »).")
             }
             "regarder_personne" -> {
                 if (!gimbal.ready) return mapOf("result" to noHead)

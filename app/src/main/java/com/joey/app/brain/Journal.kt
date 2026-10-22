@@ -24,9 +24,13 @@ class Journal(private val dir: File, private val now: () -> Long = { System.curr
         }
     }
 
+    /** Appelé pour chaque ligne (envoi à Supabase). */
+    @Volatile var onLine: ((at: Long, kind: String, text: String) -> Unit)? = null
+
     /** Une ligne : [kind] (log, toi, joey, outil, mesure, erreur…) et le texte. */
     fun write(kind: String, text: String) {
         val t = now()
+        runCatching { onLine?.invoke(t, kind, text) }
         val line = "${time.format(Date(t))} [$kind] ${text.replace('\n', ' ')}\n"
         writer.execute { runCatching { File(dir, "journal_${day.format(Date(t))}.txt").appendText(line) } }
     }

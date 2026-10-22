@@ -357,6 +357,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                     kotlin.concurrent.thread { saved = vm.saveJournalToDownloads() }
                 }, modifier = Modifier.fillMaxWidth()) { Text("📥 Enregistrer le journal (Téléchargements)") }
                 saved?.let { Text(it, fontSize = 12.sp, color = Color.Gray) }
+                Toggle("Envoyer le journal à Claude (pour l'améliorer)", vm.flagValue("upload_journal", true)) { vm.setFlagValue("upload_journal", it) }
                 Toggle("Voix de robot", robot) { robot = it }
                 Toggle("Joey voit (caméra)", camera) { camera = it }
                 Toggle("Caméra avant (côté écran)", front) { front = it }

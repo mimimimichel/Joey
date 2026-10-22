@@ -202,6 +202,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.FRENCH)
     /** Journal de bord sur le téléphone (exportable) : conversations, actions, mesures. */
     private val journal = com.joey.app.brain.Journal(File(app.filesDir, "journal"))
+    /** Le journal part aussi dans Supabase (pour que Claude voie ce qui se passe), si activé. */
+    private val upload = com.joey.app.remote.JournalUpload(
+        url = BuildConfig.SUPABASE_URL, key = BuildConfig.SUPABASE_KEY,
+        device = (prefs.getString("device_id", null) ?: java.util.UUID.randomUUID().toString().take(8).also {
+            prefs.edit().putString("device_id", it).apply()
+        }) + "-" + android.os.Build.MODEL,
+        version = BuildConfig.VERSION_NAME,
+        enabled = { flag("upload_journal", true) },
+    ).also { u ->
+        journal.onLine = { at, kind, text -> u.add(at, kind, text) }
+        u.start()
+    }
 
     fun log(text: String) {
         journal.write("log", text)
@@ -2548,6 +2560,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // Doit rester en dernier (juste avant onCleared) : tout ce qui est au-dessus est prêt (sinon plantage au lancement).
     init {
+        journal.write("demarrage", "Joey ${BuildConfig.VERSION_NAME} sur ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, " +
+            "Android ${android.os.Build.VERSION.RELEASE}")
         camera.deviceOrientation = { sensors.deviceOrientation }
         head.expression = { exprPose.pan to exprPose.tilt }
         sensors.onMotion = { e -> bodyMoved(e) }

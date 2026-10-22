@@ -18,9 +18,12 @@ android {
         applicationId = "com.joey.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 29
-        versionName = "0.29"
+        versionCode = 30
+        versionName = "0.30"
         buildConfigField("String", "GEMINI_KEY", "\"" + geminiKey + "\"")
+        // Journal envoyé à Supabase (projet « joey ») : injecté à la compilation, comme la clé Gemini.
+        buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("supabaseUrl") as String? ?: System.getenv("SUPABASE_URL") ?: "") + "\"")
+        buildConfigField("String", "SUPABASE_KEY", "\"" + (project.findProperty("supabaseKey") as String? ?: System.getenv("SUPABASE_KEY") ?: "") + "\"")
         // Seulement les processeurs ARM 64 bits (S10, S8+ et presque tous depuis 2017) : APK bien plus léger.
         // -PallAbis=true pour tout inclure.
         if (project.findProperty("allAbis") != "true") ndk { abiFilters += listOf("arm64-v8a") }

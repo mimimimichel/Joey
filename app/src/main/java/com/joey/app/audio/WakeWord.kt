@@ -24,8 +24,15 @@ class WakeWord(
 ) {
     companion object {
         /** « Joey » tel que la reconnaissance française l'écrit souvent. */
-        val WAKE = Regex("(?U)\\b(joey|joeys|joÿ|joie|joé|jo[eé]y|djo[eé]y|joy|joe|jaw[ie])\\b", RegexOption.IGNORE_CASE)
-        fun matches(text: String) = WAKE.containsMatchIn(text)
+        // Pas de \b ni de (?U) : sur Android (ICU) l'option (?U) n'existe pas et faisait planter l'app au lancement.
+        // On encadre le mot « à la main » : ni lettre ni chiffre juste avant ou juste après.
+        private const val WORDS = "joey|joeys|joÿ|joie|joé|jo[eé]y|djo[eé]y|joy|joe|jaw[ie]"
+        val WAKE: Regex? = runCatching {
+            Regex("(?<![\\p{L}\\p{N}_])($WORDS)(?![\\p{L}\\p{N}_])", RegexOption.IGNORE_CASE)
+        }.getOrNull()
+        private val WORD_LIST = listOf("joey", "joeys", "joÿ", "joie", "joé", "joéy", "djoey", "djoéy", "joy", "joe", "jawi", "jawe")
+        fun matches(text: String): Boolean = WAKE?.containsMatchIn(text)
+            ?: text.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).any { it in WORD_LIST }
     }
 
     private val main = Handler(Looper.getMainLooper())

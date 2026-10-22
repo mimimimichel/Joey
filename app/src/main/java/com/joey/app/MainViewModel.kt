@@ -308,7 +308,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             follower.onFace(sure?.x, sure?.y)
             if (sure != null) { targetFaceX = sure.x; targetFaceY = sure.y; targetFaceAt = System.currentTimeMillis() }
             // Elle parle et on voit son visage : les micros se règlent (au centre : équilibre ; sur un côté : sens).
-            if (sure != null && System.currentTimeMillis() - lastPersonTalkAt < 800 && chooser.count <= 1) stereoDir.learn(sure.x)
+            if (sure != null && System.currentTimeMillis() - lastPersonTalkAt < 800 && (chooser.count <= 1 || chooser.targetTalking())) stereoDir.learn(sure.x)
             runCatching { faceSocial(sure) }
             // Elle bouge les mains : un coup d'œil à ses mains (en gardant le visage dans l'image si possible).
             val handAim = handAttention.aimPoint(sure?.x, sure?.y)
@@ -377,7 +377,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (isSide) return if (chooser.count > 1) "tu regardes la personne $lw" else "tu ne vois qu'une personne"
         // Pas dans l'image : là où il l'a vue en dernier (moins de 30 min).
         val last = seenByName.entries.firstOrNull { it.key.equals(w, ignoreCase = true) }?.value
-        if (last != null && System.currentTimeMillis() - last.third < 30 * 60_000L) {
+        // Quelqu'un est visible mais pas reconnu : c'est peut-être elle, on ne part pas ailleurs (« tu tournes trop »).
+        if (chooser.count > 0) return "tu regardes la personne devant toi (son visage n'est pas reconnu avec certitude)"
+        if (last != null && System.currentTimeMillis() - last.third < 5 * 60_000L) {
             val cur = head.absPan() ?: return "je ne sais pas où regarde ma tête"
             head.look(Head.wrap(last.first - cur), last.second)
             chooser.want(w)
@@ -1125,6 +1127,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val coherent = prints.filter { p -> p.indices.sumOf { (p[it] * ref[it]).toDouble() } > 0.5 }
         if (coherent.size < prints.size * 0.7) return "j'ai vu plusieurs visages différents : qu'une personne à la fois, bien en face, et recommence"
         val other = people.identify(ref).first
+        // Ce visage est déjà celui de quelqu'un d'autre : on ne l'enregistre pas sous un autre prénom (sinon il confond).
+        if (other != null && !other.equals(n, true)) {
+            log("👤 Refusé : ce visage est celui de $other, pas de $n")
+            return "je n'ai rien enregistré : le visage que je regarde est celui de $other. Tourne-toi d'abord vers $n " +
+                "(« regarder_personne »), qu'elle se mette bien en face, et recommence"
+        }
         people.learn(n, coherent)
         refreshSettings()
         log("👤 Visage appris : $n (${coherent.size} empreintes)")
@@ -1299,7 +1307,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun lookWherePointed(): String? {
         val jpeg = camera.zoomJpeg("tout") ?: return null
         val pt = runCatching { vision.pointedAt(jpeg) }.onFailure { log("Robotics-ER : ${it.message}") }.getOrNull() ?: return null
-        if (!pt.pointing) return "personne ne montre rien sur l'image"
+        if (!pt.pointing) {
+            // Pas de doigt pointé : elle tient peut-être quelque chose devant la caméra (un écran, un papier…).
+            val held = runCatching { vision.shownObject(jpeg) }.getOrNull()
+            return held?.let { "la personne te montre : $it" } ?: "la personne ne montre rien de précis sur l'image"
+        }
         log("👉 Robotics-ER : on me montre ${pt.target} (${pt.description})")
         turnToPointing(pt)
         return "la personne montre ${pt.target} : ${pt.description}"
@@ -1896,7 +1908,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             micOptional = headsetAudioClients > 0,
         )
         live = l
-        l.onStereo = { left, right, n -> stereoDir.feed(left, right, n) }
+        var stereoSeen = false
+        l.onStereo = { left, right, n ->
+            if (!stereoSeen) { stereoSeen = true; log("🎙️ Micro de la conversation en stéréo (${stereoDir.describe()})") }
+            stereoDir.feed(left, right, n)
+        }
         l.onMicPcm = { pcm, n ->
             voices.feed(pcm, n)
             // Bruit fort et soudain : pas pendant qu'il parle ni juste après (il s'entendrait lui-même), ni quand sa tête
@@ -2271,6 +2287,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "). Peut-être caché, trop loin ou dans le noir. Dis-le honnêtement ; si la personne te dit où il est, " +
                     "regarde là (« regarder »).")
             }
+            "dormir" -> {
+                // Il dit au revoir, puis la conversation s'arrête ; « Joey » le réveille.
+                log("💤 Je vais dormir (on me l'a demandé)")
+                thread(isDaemon = true) { Thread.sleep(3500); stopLive() }
+                mapOf("result" to "dis au revoir en quelques mots : la conversation s'arrête dans 3 s ; on te réveille en disant « Joey »")
+            }
             "regarder_personne" -> {
                 if (!gimbal.ready) return mapOf("result" to noHead)
                 val who = (args["qui"] as? String)?.trim().orEmpty()
@@ -2523,6 +2545,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "souvenirs" to memory.size,
                     "visage_vu" to follower.sees,
                     "personne_reconnue" to (seeing() ?: "personne de connu en vue"),
+                    "visages_visibles" to chooser.count,
+                    "visages_reconnus" to chooser.names().distinct().joinToString().ifEmpty { "aucun" },
+                    "micros" to stereoDir.describe(),
                     "batterie_telephone" to phoneBattery(),
                     "heure" to SimpleDateFormat("EEEE d MMMM, HH:mm", Locale.FRENCH).format(Date()),
                     "mode_nuit" to _state.value.night,

@@ -288,6 +288,9 @@ class GeminiLive(
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
             // Ses outils, plus la recherche Google (météo, actualités, horaires…).
             .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", tools)).put(JSONObject().put("googleSearch", JSONObject())))
+            // Fin de phrase détectée plus vite (500 ms de silence au lieu de ~1 s) : il répond plus tôt.
+            .put("realtimeInputConfig", JSONObject().put("automaticActivityDetection", JSONObject()
+                .put("endOfSpeechSensitivity", "END_SENSITIVITY_HIGH").put("silenceDurationMs", 500).put("prefixPaddingMs", 100)))
             .put("inputAudioTranscription", JSONObject())
             .put("outputAudioTranscription", JSONObject())
             // Sans ça, audio + vidéo = 2 minutes de conversation au maximum.

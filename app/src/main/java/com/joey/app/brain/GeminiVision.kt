@@ -384,6 +384,16 @@ class GeminiVision(private val apiKey: () -> String) {
         }
     }
 
+    /** Ce que la personne tient ou montre à la caméra (pas du doigt) : une phrase, ou null si rien. */
+    fun shownObject(jpegBase64: String): String? = spatial { model, key ->
+        val schema = JSONObject("{\"type\":\"object\",\"properties\":{\"montre\":{\"type\":\"boolean\"},\"description\":{\"type\":\"string\"}},\"required\":[\"montre\"]}")
+        val prompt = "Image de la caméra d'un petit robot de maison. La personne tient-elle ou montre-t-elle quelque chose à la " +
+            "caméra (un objet, un écran, un papier, un texte) ? Si oui, montre = true et décris-le en une phrase courte en " +
+            "français (lis le texte s'il y en a). Sinon montre = false."
+        val j = generateWithImage(model, key, jpegBase64, prompt, schema)
+        if (j.optBoolean("montre")) j.optString("description").takeIf { it.isNotBlank() } else null
+    }
+
     /** Question sur une image (en bonne résolution) : réponse courte en français. */
     fun ask(jpegBase64: String, question: String): String {
         val schema = JSONObject("{\"type\":\"object\",\"properties\":{\"reponse\":{\"type\":\"string\"}},\"required\":[\"reponse\"]}")
@@ -416,9 +426,10 @@ class GeminiVision(private val apiKey: () -> String) {
         val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key")
             .openConnection() as HttpURLConnection
         try {
+          try {
             conn.requestMethod = "POST"
             conn.connectTimeout = 10_000
-            conn.readTimeout = 25_000
+            conn.readTimeout = 12_000 // lent = on passe au modèle suivant
             conn.doOutput = true
             conn.setRequestProperty("content-type", "application/json")
             conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
@@ -440,6 +451,10 @@ class GeminiVision(private val apiKey: () -> String) {
             val a = answer.indexOf('{'); val b = answer.lastIndexOf('}')
             if (a < 0 || b <= a) throw IOException("réponse illisible")
             return JSONObject(answer.substring(a, b + 1))
+          } catch (e: java.net.SocketTimeoutException) {
+            downUntil[model] = System.currentTimeMillis() + 120_000 // trop lent en ce moment : 2 min de côté
+            throw ModelUnavailable("$model : trop lent")
+          }
         } finally {
             conn.disconnect()
         }

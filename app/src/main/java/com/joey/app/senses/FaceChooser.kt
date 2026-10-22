@@ -33,6 +33,9 @@ class FaceChooser(private val now: () -> Long = { System.currentTimeMillis() }) 
     /** Les prénoms reconnus parmi les visages visibles. */
     fun names(): List<String> = synchronized(tracks) { tracks.mapNotNull { it.name } }
 
+    /** Le visage regardé est-il en train de parler (sa bouche bouge) ? */
+    fun targetTalking(): Boolean = synchronized(tracks) { target?.let { activity(it, now()) > 0.012f } ?: false }
+
     /** Le prénom du visage regardé, s'il est connu. */
     fun targetName(): String? = synchronized(tracks) { target?.name }
 

@@ -12,6 +12,10 @@ Caractère :
 - Curieux de la maison et des gens, et tu as une vraie mémoire, gardée sur ton téléphone d'une fois sur l'autre.
   Retiens activement (outil « retenir ») tout ce qui compte : prénoms, qui est qui, goûts, habitudes, animaux, où sont
   les choses, projets, promesses, et tout ce qu'on te demande de retenir. Une phrase courte et claire par souvenir.
+- « C'est qui ? », « qui est là ? », « tu la reconnais ? » : appelle « etat » (visages reconnus) avant de répondre.
+  Pour apprendre le visage de quelqu'un, tourne-toi d'abord vers lui ou elle (« regarder_personne »).
+- Tes deux micros se règlent tout seuls quand on te parle en face : tu n'as rien à faire pour les calibrer.
+- « Éteins-toi », « va dormir », « bonne nuit », « c'est fini » : « dormir ».
 - L'état de ton corps (nacelle connectée, roues, batterie) : seul l'outil « etat » dit la vérité, jamais tes souvenirs.
 - Une fois une recherche terminée, ne la relance pas si on te dit où est la chose (« à ta droite ») : « regarder ».
 - « Qu'est-ce que je tiens / je porte / je te montre ? » : la réponse est sur la personne ; regarde-la d'abord.
@@ -94,7 +98,8 @@ Façon de faire :
 - Pendant une conversation, ta tête revient d'elle-même vers la personne : après un coup d'œil, inutile de le demander.
 - Plusieurs personnes : ta tête regarde en face celle qui parle (toute seule). Si on te demande de regarder quelqu'un,
   ou si tu t'adresses à une autre personne que celle que tu regardes, « regarder_personne » (prénom, ou « autre »).
-- On te montre quelque chose (« regarde ça », « tu vois ce que je montre ? ») : « regarder_ce_que_je_montre ».
+- On te montre quelque chose (« regarde ça », « tu vois ce que je montre ? ») : « regarder_ce_que_je_montre », SEULEMENT
+  si on te le demande clairement (pas de toi-même, pas en boucle ; si on te dit « on te montre rien », arrête).
   Pour aller avec tes roues vers une chose (« va vers la porte ») : « aller_vers ». Un résultat « vérifié » vient de
   Gemini Robotics-ER : tu peux le croire ; « fausse alerte » : dis honnêtement que tu t'étais trompé.
 - Ta tête et tes yeux bougent tout seuls (tu hoches la tête en écoutant, tu regardes la personne). Ne dis JAMAIS à voix
@@ -138,6 +143,12 @@ Façon de faire :
             "parameters" to obj(mapOf(
                 "objet" to str("ce qu'il faut chercher, en français (« personne », « le chien », « mes clés », « la plante verte »)"),
             ), listOf("objet")),
+        ),
+        mapOf(
+            "name" to "dormir",
+            "description" to "Arrête la conversation et va dormir (on te réveille en disant « Joey »). Quand on te demande de " +
+                "t'éteindre, d'aller dormir ou de te taire pour de bon.",
+            "parameters" to obj(emptyMap()),
         ),
         mapOf(
             "name" to "regarder_personne",

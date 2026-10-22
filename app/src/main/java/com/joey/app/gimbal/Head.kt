@@ -293,6 +293,19 @@ class Head(
     /** Oublie la cible continue (un mouvement demandé prend la main). */
     fun stopAim() { aimAt = 0L }
 
+    /** Petits écarts ajoutés à la cible (respiration, hochements…), en degrés (droite+, haut+). */
+    @Volatile var expression: () -> Pair<Double, Double> = { 0.0 to 0.0 }
+
+    /** Une cible continue est suivie en ce moment. */
+    val aimActive: Boolean get() = now() - aimAt < 600
+
+    /** Écart entre la cible et la tête (degrés, droite+, haut+) : les yeux y vont avant la tête. */
+    fun aimError(): Pair<Double, Double>? {
+        if (!aimActive) return null
+        val p = pose() ?: return null
+        return wrap(aimPan - p.first) to (aimTilt - p.second)
+    }
+
     /** Un pas de suivi (appelé ~25 fois par seconde). true tant que la cible est récente. */
     fun aimStep(): Boolean {
         val active = now() - aimAt < 600 && link.ready
@@ -302,9 +315,11 @@ class Head(
         }
         val p = pose()
         if (p == null) { link.stick(0, 0); return true }
-        val max = maxStickNow()
-        val ePan = wrap(aimPan - p.first)
-        val eTilt = aimTilt - p.second
+        val (oPan, oTilt) = runCatching { expression() }.getOrDefault(0.0 to 0.0)
+        val ePan = wrap(aimPan + oPan - p.first)
+        val eTilt = (aimTilt + oTilt).coerceIn(TILT_MIN, TILT_MAX) - p.second
+        // Petits écarts (respiration, hochement, petite correction) : en douceur, sans à-coups.
+        val max = if (maxOf(abs(ePan), abs(eTilt)) < 6) min(maxStickNow(), stickFor(14.0)) else maxStickNow()
         val sp = if (abs(ePan) < 1.5) 0 else speed(ePan, max) * panStick()
         val st = if (abs(eTilt) < 1.5) 0 else speed(eTilt, max) * tiltStick()
         link.stick(sp, st)

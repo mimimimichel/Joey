@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.rotate
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlin.math.min
@@ -45,6 +46,8 @@ fun Face(
     gazeX: Float,
     gazeY: Float,
     modifier: Modifier = Modifier,
+    /** Tête penchée (degrés) : il réfléchit, il est curieux. */
+    tilt: Float = 0f,
 ) {
     // Clignement : toutes les 2 à 6 s.
     val blink = remember { Animatable(1f) }
@@ -89,9 +92,16 @@ fun Face(
         }
     }
     val listen by animateFloatAsState(if (activity == Activity.ECOUTE) 1f else 0f, tween(300), label = "listen")
+    val lean by animateFloatAsState(tilt, tween(450), label = "lean")
 
     Canvas(modifier) {
         drawRect(Color.Black)
+        rotate(lean) { drawFace(this, mood, activity, voice, listen, gx, gy, blink.value) }
+    }
+}
+
+private fun drawFace(scope: DrawScope, mood: Mood, activity: Activity, voice: Float, listen: Float, gx: Float, gy: Float, blinkValue: Float) = with(scope) {
+    run {
         val w = size.width
         val h = size.height
         val unit = min(w / 2.6f, h / 1.6f)
@@ -107,7 +117,7 @@ fun Face(
         }
         for (side in listOf(-1, 1)) {
             val ex = cx + side * (gap / 2f + eyeW / 2f)
-            drawEye(ex, cy, eyeW, eyeH * blink.value, side, mood, color)
+            drawEye(ex, cy, eyeW, eyeH * blinkValue, side, mood, color)
         }
         // Écoute : un petit halo sous les yeux.
         if (listen > 0.01f) {

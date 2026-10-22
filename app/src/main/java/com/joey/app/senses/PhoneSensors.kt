@@ -45,9 +45,13 @@ class PhoneSensors(context: Context, private val frontCamera: () -> Boolean) : O
         return h to e
     }
 
+    /** Rotation téléphone -> monde la plus récente (pour remettre les accélérations dans le repère du monde). */
+    private val world = FloatArray(9).also { it[0] = 1f; it[4] = 1f; it[8] = 1f }
+
     private val gameListener = object : SensorEventListener {
         override fun onSensorChanged(ev: SensorEvent) {
             SensorManager.getRotationMatrixFromVector(r, ev.values)
+            synchronized(world) { System.arraycopy(r, 0, world, 0, 9) }
             val (h, e) = direction(r)
             heading = h; elevation = e; at = System.currentTimeMillis()
         }
@@ -68,16 +72,30 @@ class PhoneSensors(context: Context, private val frontCamera: () -> Boolean) : O
     private val accel: Sensor? = sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
     private val jolts = ArrayDeque<Long>()
     private var lastShake = 0L
+    /** Soulevé, reposé, poussé, chute. */
+    val motion = com.joey.app.life.BodyMotion()
+    @Volatile var onMotion: ((com.joey.app.life.BodyMotion.Event) -> Unit)? = null
+
     private val shakeListener = object : SensorEventListener {
         override fun onSensorChanged(ev: SensorEvent) {
+            // Dans le repère du monde (z vers le haut) : soulevé, poussé…
+            val v = ev.values
+            val (wx, wy, wz) = synchronized(world) {
+                Triple(world[0] * v[0] + world[1] * v[1] + world[2] * v[2],
+                    world[3] * v[0] + world[4] * v[1] + world[5] * v[2],
+                    world[6] * v[0] + world[7] * v[1] + world[8] * v[2])
+            }
+            motion.feed(wx.toDouble(), wy.toDouble(), wz.toDouble())?.let { e -> onMotion?.invoke(e) }
             val a = kotlin.math.sqrt(ev.values[0] * ev.values[0] + ev.values[1] * ev.values[1] + ev.values[2] * ev.values[2])
             // La nacelle bouge doucement (< 5 m/s²) ; une main qui secoue dépasse largement 15.
             if (a < 15f) return
             val now = System.currentTimeMillis()
+            motion.quietUntil = maxOf(motion.quietUntil, now + 1500) // à-coup violent : on secoue, ce n'est pas « soulevé »
             jolts.addLast(now)
             while (jolts.isNotEmpty() && now - jolts.first() > 1000) jolts.removeFirst()
             if (jolts.size >= 4 && now - lastShake > 4000) {
                 lastShake = now
+                motion.quietUntil = now + 3000 // secoué : ce n'est pas « soulevé »
                 jolts.clear()
                 onShake?.invoke()
             }
@@ -95,6 +113,8 @@ class PhoneSensors(context: Context, private val frontCamera: () -> Boolean) : O
     private val gravityListener = object : SensorEventListener {
         override fun onSensorChanged(ev: SensorEvent) {
             orientationFrom(ev.values[0], ev.values[1], ev.values[2], deviceOrientation)?.let { deviceOrientation = it }
+            val g = kotlin.math.sqrt(ev.values[0] * ev.values[0] + ev.values[1] * ev.values[1] + ev.values[2] * ev.values[2])
+            motion.feedRaw(g.toDouble())?.let { e -> onMotion?.invoke(e) }
         }
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
@@ -117,7 +137,7 @@ class PhoneSensors(context: Context, private val frontCamera: () -> Boolean) : O
     }
 
     fun start() {
-        gravitySensor?.let { sm.registerListener(gravityListener, it, SensorManager.SENSOR_DELAY_UI) }
+        gravitySensor?.let { sm.registerListener(gravityListener, it, SensorManager.SENSOR_DELAY_GAME) }
         accel?.let { sm.registerListener(shakeListener, it, SensorManager.SENSOR_DELAY_GAME) }
         game?.let { sm.registerListener(gameListener, it, SensorManager.SENSOR_DELAY_GAME) }
         if (compassSensor != null && compassSensor != game) sm.registerListener(compassListener, compassSensor, SensorManager.SENSOR_DELAY_UI)

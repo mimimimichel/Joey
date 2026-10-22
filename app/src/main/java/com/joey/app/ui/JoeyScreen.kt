@@ -72,10 +72,12 @@ fun JoeyScreen(vm: MainViewModel) {
     var headPanel by remember { mutableStateOf(false) }
     var settings by remember { mutableStateOf(false) }
     var gaze by remember { mutableStateOf(0f to 0f) }
+    var lean by remember { mutableStateOf(0f) }
     var pose by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
         while (true) {
             gaze = vm.gaze()
+            lean = vm.screenTilt()
             pose = vm.poseText()
             delay(100)
         }
@@ -88,6 +90,7 @@ fun JoeyScreen(vm: MainViewModel) {
             level = vm::voiceLevel,
             gazeX = gaze.first,
             gazeY = gaze.second,
+            tilt = lean,
             modifier = Modifier.fillMaxSize()
                 // Toucher : appui = commandes (et il sursaute), double appui = chatouilles, appui long = caresse.
                 .pointerInput(Unit) {

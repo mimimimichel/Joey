@@ -35,6 +35,8 @@ class WakeWord(
             ?: text.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).any { it in WORD_LIST }
     }
 
+    /** Niveau du micro pendant l'écoute (dB de la reconnaissance vocale), pour sursauter aux bruits forts. */
+    @Volatile var onLevel: ((Float) -> Unit)? = null
     private val main = Handler(Looper.getMainLooper())
     private val audio = context.getSystemService(AudioManager::class.java)
     private var recognizer: SpeechRecognizer? = null
@@ -123,7 +125,7 @@ class WakeWord(
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {}
         override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onRmsChanged(rmsdB: Float) { onLevel?.invoke(rmsdB) }
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {}
         override fun onPartialResults(partialResults: Bundle?) { check(partialResults) }

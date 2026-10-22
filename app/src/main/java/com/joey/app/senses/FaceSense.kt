@@ -17,6 +17,10 @@ data class SeenFace(
     val id: Int? = null,
     /** Ouverture de la bouche (bas de la bouche - base du nez, rapporté à la hauteur du visage), ou null. */
     val mouth: Float? = null,
+    /** Probabilité de sourire (0..1), ou null. */
+    val smile: Float? = null,
+    /** Tête tournée (degrés, autour de l'axe vertical) : 0 = elle regarde la caméra. */
+    val yaw: Float = 0f,
 )
 
 /** Détection des visages sur le téléphone (ML Kit, rapide, sans Internet). Bloquant : à appeler hors du fil principal. */
@@ -28,6 +32,7 @@ class FaceSense {
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
             .setMinFaceSize(0.035f) // image de 1280 px : visages de ~45 px et plus (quelqu'un à 3-4 m)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL) // nez et bouche : qui parle ?
+            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL) // sourire : il sourit aussi
             .enableTracking() // le même numéro pour le même visage d'une image à l'autre
             .build()
         )
@@ -55,6 +60,8 @@ class FaceSense {
                 box = android.graphics.Rect(b),
                 id = f.trackingId,
                 mouth = if (nose != null && mouth != null && b.height() > 0) (mouth.y - nose.y) / b.height() else null,
+                smile = f.smilingProbability,
+                yaw = f.headEulerAngleY,
             )
         }
         lastSize = list.firstOrNull()?.size

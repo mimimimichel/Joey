@@ -251,6 +251,85 @@ class GeminiVision(private val apiKey: () -> String) {
             j.optString("description"))
     }
 
+    /**
+     * Où regarde la personne (elle a tourné la tête, elle ne regarde pas la caméra) : ce qu'elle regarde, et où.
+     * Même réponse que [pointedAt] (pointing = elle regarde clairement quelque chose).
+     */
+    fun gazeAt(jpegBase64: String): Pointing = spatial { model, key ->
+        val schema = JSONObject("""
+        {"type":"object","properties":{
+          "regarde":{"type":"boolean","description":"true si la personne regarde clairement quelque chose (pas la caméra)"},
+          "objet":{"type":"string","description":"ce qu'elle regarde, nom court en français, ou « inconnu »"},
+          "dans_image":{"type":"boolean","description":"true si ce qu'elle regarde est visible sur l'image"},
+          "point":{"type":"array","items":{"type":"integer"},"description":"[y, x] de ce qu'elle regarde, entre 0 et 1000"},
+          "direction":{"type":"string","enum":["gauche","droite","haut","bas","derriere_le_robot","devant"],"description":"si ce n'est pas dans l'image : de quel côté le robot doit tourner la tête (gauche/droite DU ROBOT = de l'image)"},
+          "angle_deg":{"type":"number","description":"de combien de degrés il faudrait tourner, à peu près"},
+          "description":{"type":"string","description":"une phrase : ce qu'elle regarde"}
+        },"required":["regarde","objet","dans_image","description"]}
+        """.trimIndent())
+        val prompt = "Image de la caméra d'un petit robot de maison. La personne a tourné la tête : suis la direction de son " +
+            "regard (orientation du visage et des yeux) et dis ce qu'elle regarde. Si c'est visible sur l'image, pointe-le ; " +
+            "sinon dis de quel côté le robot doit tourner la tête (la gauche du robot est la gauche de l'image). N'invente rien."
+        val j = generateWithImage(model, key, jpegBase64, prompt, schema)
+        val pt = j.optJSONArray("point")
+        val inImage = j.optBoolean("dans_image") && pt != null && pt.length() == 2
+        Pointing(j.optBoolean("regarde"), j.optString("objet", "inconnu"), inImage,
+            if (inImage) (pt!!.optDouble(1) / 1000).coerceIn(0.0, 1.0) else 0.5,
+            if (inImage) (pt!!.optDouble(0) / 1000).coerceIn(0.0, 1.0) else 0.5,
+            j.optString("direction", ""), j.optDouble("angle_deg", Double.NaN).takeIf { !it.isNaN() },
+            j.optString("description"))
+    }
+
+    /**
+     * Deux vues de la même direction, à des moments différents : qu'est-ce qui a changé de notable ?
+     * Renvoie null si ce n'est pas le même point de vue ou si rien de notable n'a changé.
+     */
+    fun compare(beforeJpeg: String, afterJpeg: String): String? = spatial { model, key ->
+        val schema = JSONObject("{\"type\":\"object\",\"properties\":{\"meme_vue\":{\"type\":\"boolean\"}," +
+            "\"changement\":{\"type\":\"boolean\"},\"description\":{\"type\":\"string\"}},\"required\":[\"meme_vue\",\"changement\"]}")
+        val prompt = "Deux images de la caméra d'un petit robot de maison, prises dans la même direction à des moments " +
+            "différents (1 = avant, 2 = maintenant). Est-ce le même point de vue (même endroit de la pièce) ? Si oui, y a-t-il " +
+            "un changement notable : un objet nouveau, disparu ou déplacé, un meuble bougé, une décoration ? Ignore les " +
+            "personnes, les animaux, la lumière, le cadrage et les petits détails. Décris le changement en une phrase courte, " +
+            "en français (« un bouquet de fleurs sur la table »)."
+        val gen = JSONObject().put("responseMimeType", "application/json").put("responseJsonSchema", schema).put("temperature", 0.2)
+        if (model.startsWith("gemini-3")) gen.put("thinkingConfig", JSONObject().put("thinkingLevel", "LOW"))
+        val parts = JSONArray()
+            .put(JSONObject().put("text", "Image 1 (avant) :"))
+            .put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", beforeJpeg)))
+            .put(JSONObject().put("text", "Image 2 (maintenant) :"))
+            .put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", afterJpeg)))
+            .put(JSONObject().put("text", prompt))
+        val j = generateParts(model, key, parts, gen)
+        if (j.optBoolean("meme_vue") && j.optBoolean("changement")) j.optString("description").takeIf { it.isNotBlank() } else null
+    }
+
+    private fun generateParts(model: String, key: String, parts: JSONArray, gen: JSONObject): JSONObject {
+        val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
+            .put("generationConfig", gen)
+        val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key")
+            .openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "POST"; conn.connectTimeout = 10_000; conn.readTimeout = 30_000; conn.doOutput = true
+            conn.setRequestProperty("content-type", "application/json")
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            val code = conn.responseCode
+            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            if (code !in 200..299) {
+                val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull() ?: text.take(200)
+                if (code == 404 || code == 429 || code >= 500 || code == 400 && msg.contains("model", ignoreCase = true)) throw ModelUnavailable("$code $msg")
+                throw IOException("Gemini, erreur $code : $msg")
+            }
+            val p = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+            val answer = buildString { if (p != null) for (i in 0 until p.length()) { val x = p.optJSONObject(i) ?: continue; if (!x.optBoolean("thought")) append(x.optString("text")) } }
+            val a = answer.indexOf('{'); val b = answer.lastIndexOf('}')
+            if (a < 0 || b <= a) throw IOException("réponse illisible")
+            return JSONObject(answer.substring(a, b + 1))
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     /** Question sur une image (en bonne résolution) : réponse courte en français. */
     fun ask(jpegBase64: String, question: String): String {
         val schema = JSONObject("{\"type\":\"object\",\"properties\":{\"reponse\":{\"type\":\"string\"}},\"required\":[\"reponse\"]}")

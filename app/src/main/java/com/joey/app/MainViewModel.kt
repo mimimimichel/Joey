@@ -156,7 +156,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Capteurs du téléphone (posé sur la nacelle) : où regarde vraiment la caméra. */
     val sensors: PhoneSensors = PhoneSensors(app) { flag("camera", true) && flag("front_camera", true) }
     val head: Head = Head(gimbal, rightSign = { if (flag("invert_pan", false)) -1 else 1 }, tiltSign = { viewTiltSign },
-        speedFraction = { headSpeed / 100.0 }, onLog = ::log, phone = sensors,
+        speedFraction = { headSpeed / 100.0 * (0.65 + 0.35 * temperament.energy()) }, onLog = ::log, phone = sensors,
         onPhoneSigns = { p, t -> prefs.edit().putInt("phone_pan_sign", p).putInt("phone_tilt_sign", t).apply() })
     val follower: FaceFollower = FaceFollower(
         gimbal,
@@ -289,6 +289,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val sure = f?.takeIf { faceStreak >= 2 }
             follower.onFace(sure?.x, sure?.y)
             if (sure != null) { targetFaceX = sure.x; targetFaceY = sure.y; targetFaceAt = System.currentTimeMillis() }
+            runCatching { faceSocial(sure) }
             // Elle bouge les mains : un coup d'œil à ses mains (en gardant le visage dans l'image si possible).
             val handAim = handAttention.aimPoint(sure?.x, sure?.y)
             if (handAim != null) angleTrack(handAim.first, handAim.second, framePose, frameAbs, bmp.width, bmp.height, person = false)
@@ -359,6 +360,203 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "(tu peux apprendre son visage avec « apprendre_visage »)"
     }
 
+    // ---- vie : humeur, langage du corps, réactions, initiatives ------------------------------------
+    private val temperament = com.joey.app.life.Temperament()
+    private val expressive = com.joey.app.life.Expressive()
+    @Volatile private var exprPose = com.joey.app.life.Expressive.Pose(0.0, 0.0, 0f)
+    @Volatile private var lastJoeyTalkAt = 0L
+    @Volatile private var lastTrackAimAt = 0L
+    @Volatile private var idleBase: Pair<Double, Double>? = null
+    private val liveStartle = com.joey.app.life.Startle(jump = 20.0, floor = -30.0)
+    private val wakeStartle = com.joey.app.life.Startle(jump = 6.0, floor = 6.0)
+    @Volatile private var lastStartleAt = 0L
+
+    /** L'expression du moment revient à celle-ci (fatigué tard le soir). */
+    private fun baseMood(): Mood = if (temperament.energy() < 0.3) Mood.FATIGUE else Mood.NEUTRE
+
+    /**
+     * Personne à suivre, rien à faire : la tête tient sa pose (et respire, hoche…) au lieu de rester figée.
+     * Tout mouvement demandé, le suivi ou le casque reprennent la main.
+     */
+    private fun idlePose(now: Long, s: UiState) {
+        val free = gimbal.ready && !s.busy && now >= follower.pausedUntil && !dancing && !questFollowing && !calibrating &&
+            trackLabels == null && now - lastTrackAimAt > 1500 && follower.enabled
+        if (!free) { idleBase = null; return }
+        val base = idleBase ?: head.pose()?.also { idleBase = it } ?: return
+        head.aim(base.first, base.second)
+    }
+
+    // Visage de la personne regardée : sourire, regard ailleurs, arrivée.
+    private var smileFrames = 0
+    @Volatile private var lastMimicAt = 0L
+    @Volatile private var turnedSince = 0L
+    @Volatile private var lastGazeFollowAt = 0L
+    @Volatile private var lastFaceSeenAt = 0L
+
+    private fun faceSocial(f: com.joey.app.senses.SeenFace?) {
+        val now = System.currentTimeMillis()
+        if (f == null) { smileFrames = 0; turnedSince = 0; return }
+        temperament.sawPerson()
+        // Arrivée : personne vu depuis 20 min -> il salue (initiative).
+        if (lastFaceSeenAt > 0 && now - lastFaceSeenAt > 20 * 60_000L) arrival(now - lastFaceSeenAt)
+        lastFaceSeenAt = now
+        // Il sourit quand on lui sourit (sans musique, c'est discret).
+        smileFrames = if ((f.smile ?: 0f) > 0.75f) smileFrames + 1 else 0
+        if (smileFrames >= 4 && now - lastMimicAt > 12_000 && _state.value.mood in setOf(Mood.NEUTRE, Mood.FATIGUE)) {
+            lastMimicAt = now
+            temperament.feel(0.03)
+            setMood(Mood.CONTENT, sound = false)
+            if (Math.random() < 0.3) roombaGesture(RoombaGesture.HAPPY)
+        }
+        // Elle regarde ailleurs (tête tournée) sans parler : il regarde aussi (attention partagée).
+        if (kotlin.math.abs(f.yaw) > 30) { if (turnedSince == 0L) turnedSince = now } else turnedSince = 0
+        if (turnedSince != 0L && now - turnedSince > 1500 && now - lastPersonTalkAt > 2000 && now - lastGazeFollowAt > 25_000 &&
+            !_state.value.busy && gimbal.ready && geminiKey.isNotBlank() && flag("follow_gaze", true) && !handAttention.active) {
+            lastGazeFollowAt = now
+            turnedSince = 0
+            moveAsync(holdMs = 0) { followGaze() }
+        }
+    }
+
+    /** Il regarde ce que la personne regarde, un instant, puis revient vers elle. Fil des mouvements. */
+    private fun followGaze(): String {
+        val jpeg = camera.zoomJpeg("tout") ?: return "pas d'image"
+        val pt = runCatching { vision.gazeAt(jpeg) }.getOrNull() ?: return "vision indisponible"
+        if (!pt.pointing) return "elle ne regarde rien de précis"
+        log("👀 Tu regardes ${pt.target} : je regarde aussi")
+        turnToPointing(pt)
+        live?.sendFrameNow()
+        Thread.sleep(2500)
+        lookAtLastSeen()
+        return "j'ai regardé ce que tu regardais (${pt.target})"
+    }
+
+    /** Bruit fort et soudain : il sursaute (yeux ronds, petit recul de la tête et du corps) et s'en étonne. */
+    private fun startled() {
+        val now = System.currentTimeMillis()
+        if (now - lastStartleAt < 8000 || _state.value.mood == Mood.DORT && Math.random() < 0.5) return
+        lastStartleAt = now
+        log("😲 Un bruit !")
+        setMood(Mood.ETONNE, sound = false)
+        roombaGesture(RoombaGesture.SURPRISE)
+        if (gimbal.ready && !_state.value.busy) moveAsync(holdMs = 1500) {
+            val p = head.pose()
+            if (p != null) { head.look(null, (p.second + 9).coerceAtMost(60.0), timeoutMs = 600); head.look(null, p.second, timeoutMs = 800) }
+            "sursaut"
+        }
+        live?.event("Un bruit fort et soudain vient de retentir près de toi : sursaute (« Oh ! ») et demande ce que c'est, " +
+            "en quelques mots.", reply = true)
+    }
+
+    /** On le soulève, on le repose, on le pousse, il tombe. */
+    private fun bodyMoved(e: com.joey.app.life.BodyMotion.Event) {
+        val r = roomba
+        // Ses propres roues : pas une surprise.
+        if (r != null && System.currentTimeMillis() - roombaMovedAt < 3000 && e == com.joey.app.life.BodyMotion.Event.PUSHED) return
+        val (mood, text) = when (e) {
+            com.joey.app.life.BodyMotion.Event.LIFTED -> Mood.ETONNE to "On te soulève ! Réagis tout de suite, en quelques mots (surpris, un peu inquiet ou amusé)."
+            com.joey.app.life.BodyMotion.Event.PUT_DOWN -> Mood.CONTENT to "On vient de te reposer : réagis en quelques mots (soulagé)."
+            com.joey.app.life.BodyMotion.Event.PUSHED -> Mood.MEFIANT to "On te pousse ou on te déplace (tes roues ne tournaient pas) : réagis en quelques mots."
+            com.joey.app.life.BodyMotion.Event.FALLING -> Mood.ETOURDI to "Tu tombes ou on te lâche ! Réagis tout de suite (« Aaah ! »)."
+        }
+        log(when (e) {
+            com.joey.app.life.BodyMotion.Event.LIFTED -> "🫴 On me soulève"
+            com.joey.app.life.BodyMotion.Event.PUT_DOWN -> "⬇️ On me repose"
+            com.joey.app.life.BodyMotion.Event.PUSHED -> "↔️ On me pousse"
+            com.joey.app.life.BodyMotion.Event.FALLING -> "🪂 Je tombe"
+        })
+        if (e == com.joey.app.life.BodyMotion.Event.LIFTED || e == com.joey.app.life.BodyMotion.Event.FALLING) r?.stop()
+        temperament.feel(if (e == com.joey.app.life.BodyMotion.Event.PUT_DOWN) 0.02 else -0.03)
+        setMood(mood, sound = e != com.joey.app.life.BodyMotion.Event.PUT_DOWN)
+        if (flag("react_motion", true)) speakUp(text)
+    }
+
+    // ---- le Roomba exprime aussi -------------------------------------------------------------------
+    enum class RoombaGesture { SURPRISE, HAPPY, ATTENTION }
+    @Volatile private var roombaGestureAt = 0L
+    @Volatile private var roombaMovedAt = 0L
+
+    /** Petit recul (surpris), tortillement (content), petit pas en avant (il veut ton attention). */
+    private fun roombaGesture(g: RoombaGesture) {
+        val r = roomba ?: return
+        val now = System.currentTimeMillis()
+        if (!flag("roomba_expressive", true) || following || _state.value.busy || r.onBase || now - roombaGestureAt < 20_000) return
+        roombaGestureAt = now
+        roombaMovedAt = now
+        thread(name = "roomba-geste", isDaemon = true) {
+            runCatching {
+                when (g) {
+                    RoombaGesture.SURPRISE -> { r.velocity(-0.15, 0.0, 300); Thread.sleep(350) }
+                    RoombaGesture.HAPPY -> repeat(2) {
+                        r.velocity(0.0, 70.0, 220); Thread.sleep(250)
+                        r.velocity(0.0, -70.0, 220); Thread.sleep(250)
+                    }
+                    RoombaGesture.ATTENTION -> { r.velocity(0.12, 0.0, 600); Thread.sleep(650) }
+                }
+                r.velocity(0.0, 0.0, 100)
+                roombaMovedAt = System.currentTimeMillis()
+            }
+        }
+    }
+
+    // ---- initiatives : il salue, il remarque ce qui a changé ---------------------------------------
+    @Volatile private var lastArrivalAt = 0L
+    @Volatile private var lastNoveltyCheck = 0L
+    @Volatile private var lastNoveltyRemark = 0L
+    private val viewsDir by lazy { File(getApplication<Application>().filesDir, "vues").apply { mkdirs() } }
+
+    /** Quelqu'un arrive (personne vu depuis longtemps) : il le salue, de lui-même. */
+    private fun arrival(absentMs: Long) {
+        val now = System.currentTimeMillis()
+        if (!flag("initiatives", true) || flag("watch", false) || _state.value.night || now - lastArrivalAt < 20 * 60_000L) return
+        lastArrivalAt = now
+        roombaGesture(RoombaGesture.ATTENTION)
+        thread(isDaemon = true) {
+            Thread.sleep(2500) // le temps de le reconnaître
+            val who = seeing()
+            val hm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.FRENCH).format(java.util.Date())
+            log("👋 ${who ?: "Quelqu'un"} arrive")
+            speakUp("[Initiative] ${who ?: "Quelqu'un"} vient d'arriver devant toi (tu ne l'avais pas vu depuis " +
+                "${absentMs / 60_000} min). Il est $hm. Ton humeur : ${temperament.describe()}. Salue en une phrase, à ta " +
+                "façon ; si tu connais une habitude de cette personne à cette heure-ci (dans tes souvenirs), tu peux en parler.")
+        }
+    }
+
+    /**
+     * Il remarque ce qui a changé : il garde une vue de chaque direction (boussole), et de temps en temps, quand
+     * quelqu'un est là et que la conversation est calme, il compare (Gemini) avec la vue de maintenant.
+     */
+    private fun initiatives(now: Long, s: UiState) {
+        if (!flag("initiatives", true) || s.busy || s.night || flag("watch", false) || now - lastNoveltyCheck < 10 * 60_000L) return
+        if (!flag("camera", true) || geminiKey.isBlank() || head.moving) return
+        val heading = sensors.compass() ?: return
+        val sector = (((heading + 22.5) % 360) / 45).toInt()
+        val file = File(viewsDir, "vue_$sector.jpg")
+        val ref = file.takeIf { it.exists() }
+        val calm = live == null || now - lastTalkAt > 20_000
+        val someone = follower.sees
+        // Pas de vue de référence (ou très vieille) : il en prend une, tranquillement.
+        if (ref == null || now - ref.lastModified() > 3 * 24 * 3600_000L) {
+            lastNoveltyCheck = now
+            camera.zoomJpeg("tout")?.let { runCatching { file.writeBytes(android.util.Base64.decode(it, android.util.Base64.NO_WRAP)) } }
+            return
+        }
+        if (!someone || !calm || now - lastNoveltyRemark < 2 * 3600_000L || now - ref.lastModified() < 2 * 3600_000L) return
+        lastNoveltyCheck = now
+        val after = camera.zoomJpeg("tout") ?: return
+        val before = android.util.Base64.encodeToString(ref.readBytes(), android.util.Base64.NO_WRAP)
+        thread(isDaemon = true) {
+            val change = runCatching { vision.compare(before, after) }.getOrNull()
+            runCatching { file.writeBytes(android.util.Base64.decode(after, android.util.Base64.NO_WRAP)) }
+            if (change != null) {
+                lastNoveltyRemark = System.currentTimeMillis()
+                log("🧐 Ça a changé : $change")
+                speakUp("[Initiative] Tu remarques un changement dans la pièce depuis la dernière fois : $change. Fais-en une " +
+                    "remarque curieuse ou amusée, en une phrase (pose une question si tu veux).")
+            }
+        }
+    }
+
     // ---- viser en degrés -------------------------------------------------------------------------
     @Volatile private var personBoxes: List<com.joey.app.senses.Box> = emptyList()
     @Volatile private var personCheckAt = 0L
@@ -416,12 +614,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             val t = Head.wrap(tp) to tt
             aimTarget = t; aimTargetAt = now
+            lastTrackAimAt = now
             head.aim(t.first, t.second)
         } else {
             val t = aimTarget ?: return
             if (now < follower.pausedUntil || !follower.enabled) { aimTarget = null; return }
             // Juste perdu : il finit d'aller là où il l'a vue (elle est sûrement là, un peu plus loin).
-            if (now - aimTargetAt < 1200) head.aim(t.first, t.second) else aimTarget = null
+            if (now - aimTargetAt < 1200) { lastTrackAimAt = now; head.aim(t.first, t.second) } else aimTarget = null
         }
     }
 
@@ -551,6 +750,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val active = live != null || s.busy || questFollowing || s.tracking != null
             if (active || follower.sees) lastLifeAt = now
             runCatching { conversationGaze(now, s) }
+            runCatching { idlePose(now, s) }
+            runCatching { initiatives(now, s) }
             if (!flag("idle_life", true) || !gimbal.ready || !flag("camera", true)) continue
             // Réveil : quelqu'un, du mouvement, ou une conversation.
             if (asleep && (active || follower.sees || now - motionAt < 500)) {
@@ -639,8 +840,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             handAttention.update(pose, if (recentFace) targetFaceX else null, if (recentFace) targetFaceY else null)
         when (val g = body.update(now, hand, pose)) {
             null -> {}
-            com.joey.app.senses.Body.ThumbUp -> { log("👍"); setMood(Mood.CONTENT); live?.event("La personne te fait un pouce levé 👍.", reply = true) }
-            com.joey.app.senses.Body.ThumbDown -> { log("👎"); setMood(Mood.TRISTE); live?.event("La personne te fait un pouce vers le bas 👎.", reply = true) }
+            com.joey.app.senses.Body.ThumbUp -> { log("👍"); temperament.feel(0.1); roombaGesture(RoombaGesture.HAPPY); setMood(Mood.CONTENT); live?.event("La personne te fait un pouce levé 👍.", reply = true) }
+            com.joey.app.senses.Body.ThumbDown -> { log("👎"); temperament.feel(-0.08); setMood(Mood.TRISTE); live?.event("La personne te fait un pouce vers le bas 👎.", reply = true) }
             com.joey.app.senses.Body.Victory -> { log("✌"); live?.event("La personne fait le V avec ses doigts ✌ (veut-elle une photo ?).", reply = true) }
             com.joey.app.senses.Body.Wave -> {
                 log("👋 Coucou")
@@ -678,6 +879,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun tickled() {
+        temperament.feel(0.08)
+        roombaGesture(RoombaGesture.HAPPY)
         setMood(Mood.AMUSE)
         roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.HAPPY)
         if (gimbal.ready && !_state.value.busy) moveAsync(holdMs = 1000) { head.shake() }
@@ -692,6 +895,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun shaken() {
         log("😵 On me secoue")
+        temperament.feel(-0.1)
         moodResetAt = 0
         _state.update { it.copy(mood = Mood.ETOURDI) }
         roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.SURPRISED)
@@ -953,6 +1157,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val pt = runCatching { vision.pointedAt(jpeg) }.onFailure { log("Robotics-ER : ${it.message}") }.getOrNull() ?: return null
         if (!pt.pointing) return "personne ne montre rien sur l'image"
         log("👉 Robotics-ER : on me montre ${pt.target} (${pt.description})")
+        turnToPointing(pt)
+        return "la personne montre ${pt.target} : ${pt.description}"
+    }
+
+    /** Tourne la tête vers ce que la personne montre ou regarde (pile dessus si c'est dans l'image). */
+    private fun turnToPointing(pt: com.joey.app.brain.GeminiVision.Pointing) {
         if (pt.inImage) {
             centerOnImagePoint(pt.x, pt.y)
         } else {
@@ -972,7 +1182,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 erLocate(pt.target)?.takeIf { it.found && it.confidence >= 0.5 }?.let { centerOnImagePoint(it.x, it.y) }
             }
         }
-        return "la personne montre ${pt.target} : ${pt.description}"
     }
 
     /**
@@ -1531,6 +1740,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         live = l
         l.onMicPcm = { pcm, n ->
             voices.feed(pcm, n)
+            // Bruit fort et soudain (pas pendant qu'il parle : il s'entendrait lui-même).
+            if (_state.value.live != LiveState.SPEAKING && n > 0) {
+                var acc = 0.0
+                for (i in 0 until n) acc += pcm[i].toDouble() * pcm[i]
+                val db = 20 * kotlin.math.log10(kotlin.math.sqrt(acc / n).coerceAtLeast(1.0) / 32768.0)
+                if (liveStartle.feed(db)) startled()
+            }
             if (dancing) beatDetector.feed(pcm, n) { beats++ }
         }
         l.start()
@@ -1558,6 +1774,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             live?.event((if (startedByWake) "On vient de t'appeler par ton nom (« Joey »). Réponds présent, brièvement. "
                 else "La conversation commence (la personne vient d'appuyer sur ton bouton). ") +
                 (if (who != null) "Tu reconnais $who (reconnaissance du visage). " else "") +
+                "Ton humeur en ce moment : ${temperament.describe()}. " +
                 "Salue en une phrase courte, à ta façon.", reply = true)
         }
         if (s == LiveState.SPEAKING) lastTalkAt = System.currentTimeMillis()
@@ -1699,7 +1916,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun onTranscript(person: Boolean, text: String) {
         lastTalkAt = System.currentTimeMillis()
-        if (person) lastPersonTalkAt = lastTalkAt
+        if (person) lastPersonTalkAt = lastTalkAt else lastJoeyTalkAt = lastTalkAt
         if (person) maybeSearchSpeaker()
         val joey = !person
         _state.update { st ->
@@ -2146,9 +2363,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun setMood(m: Mood) {
+    private fun setMood(m: Mood, sound: Boolean = true) {
         _state.update { it.copy(mood = m) }
-        roomba?.let { r ->
+        if (sound) roomba?.let { r ->
             when (m) {
                 Mood.CONTENT, Mood.AMUSE -> { r.sing(com.joey.app.robot.RoombaRobot.Tune.HAPPY); r.lights(0) }
                 Mood.TRISTE -> { r.sing(com.joey.app.robot.RoombaRobot.Tune.SAD); r.lights(60, 120) }
@@ -2164,12 +2381,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // L'expression s'efface toute seule après quelques secondes.
         thread(isDaemon = true) {
             Thread.sleep(9000)
-            if (moodResetAt == at) _state.update { it.copy(mood = Mood.NEUTRE) }
+            if (moodResetAt == at) _state.update { it.copy(mood = baseMood()) }
         }
     }
 
     // ---- pour le visage ----------------------------------------------------------------------
     fun voiceLevel(): Float = live?.level ?: 0f
+
+    /** Tête penchée à l'écran (il réfléchit). */
+    fun screenTilt(): Float = exprPose.screenTilt
 
     fun faceActivity(s: UiState): Activity = when {
         s.live == LiveState.SPEAKING -> Activity.PARLE
@@ -2179,6 +2399,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun gaze(): Pair<Float, Float> {
+        // Les yeux partent vers la cible avant la tête (comme nous) : tant que la tête n'y est pas, ils y regardent.
+        head.aimError()?.let { (ep, et) ->
+            if (kotlin.math.abs(ep) > 6 || kotlin.math.abs(et) > 6)
+                return Pair((-ep / 35).coerceIn(-1.0, 1.0).toFloat(), (-et / 35).coerceIn(-1.0, 1.0).toFloat())
+        }
         if (head.moving) {
             // Joey regarde à sa droite = vers la gauche de l'écran vu de face ; vers le haut = haut de l'écran.
             return Pair(-head.gazeX * 0.8f, -head.gazeY * 0.8f)
@@ -2197,6 +2422,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // Doit rester en dernier (juste avant onCleared) : tout ce qui est au-dessus est prêt (sinon plantage au lancement).
     init {
         camera.deviceOrientation = { sensors.deviceOrientation }
+        head.expression = { exprPose.pan to exprPose.tilt }
+        sensors.onMotion = { e -> bodyMoved(e) }
+        wake.onLevel = { db -> if (wakeStartle.feed(db.toDouble())) startled() }
         sensors.onShake = { shaken() }
         sensors.start()
         head.setPhoneSigns(prefs.getInt("phone_pan_sign", 0), prefs.getInt("phone_tilt_sign", 0))
@@ -2277,6 +2505,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun aimLoop() {
         while (true) {
             Thread.sleep(40)
+            runCatching {
+                val st = _state.value
+                val now = System.currentTimeMillis()
+                exprPose = expressive.pose(
+                    voice = live?.level ?: 0f,
+                    speaking = st.live == LiveState.SPEAKING,
+                    listening = now - lastPersonTalkAt < 1500,
+                    thinking = st.busy || st.live == LiveState.CONNECTING ||
+                        (st.live == LiveState.LISTENING && now - lastPersonTalkAt in 700..5000 && lastJoeyTalkAt < lastPersonTalkAt),
+                    energy = temperament.energy(),
+                )
+            }
             runCatching { head.aimStep() }
         }
     }

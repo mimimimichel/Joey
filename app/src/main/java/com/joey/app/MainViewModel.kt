@@ -875,7 +875,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun lifeLoop() {
         var lastGlance = 0L
         var nextBoredom = System.currentTimeMillis() + 90_000
-        while (true) {
+        while (!cleared) {
             Thread.sleep(300)
             val now = System.currentTimeMillis()
             runCatching { clockTasks(now) }
@@ -1414,7 +1414,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Ce que voit le détecteur du téléphone en ce moment. */
     private fun seenNow(): List<Seen> = camera.frame()?.let { objects.detect(it) } ?: emptyList()
 
-    fun connectGimbal() = gimbal.connect()
+    fun connectGimbal() { if (!cleared) gimbal.connect() }
     fun disconnectGimbal() = gimbal.disconnect()
 
     // ---- commandes à la main (écran « tête ») -----------------------------------------------
@@ -1920,6 +1920,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Le mot de réveil écoute quand il n'y a pas de conversation (et que c'est activé). */
     fun updateWake() {
+        if (cleared) { wake.stop(); return }
         val mic = androidx.core.content.ContextCompat.checkSelfPermission(getApplication(), android.Manifest.permission.RECORD_AUDIO) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
         if (flag("wake_word", true) && live == null && mic && geminiKey.isNotBlank()) wake.start() else wake.stop()
@@ -1939,6 +1940,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun startLive() {
+        if (cleared) return
         convStarts++
         wake.stop()
         lastTalkAt = System.currentTimeMillis()
@@ -2857,7 +2859,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun aimLoop() {
-        while (true) {
+        while (!cleared) {
             Thread.sleep(40)
             runCatching {
                 val p = head.pose()
@@ -2955,7 +2957,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             .toString()
     }
 
+    /** L'app est fermée : plus rien ne doit tourner (avant, le cerveau continuait et relançait le micro). */
+    @Volatile private var cleared = false
+
     override fun onCleared() {
+        cleared = true
+        upload.stop()
         wake.stop()
         headset?.stop()
         sensors.stop()

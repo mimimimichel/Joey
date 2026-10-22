@@ -45,8 +45,14 @@ class WakeWord(
     private var muted = false
     private var onDevice = false
 
+    /** Déjà annoncé dans le journal (on ne le répète pas à chaque relance). */
+    private var announced = false
+    /** Erreurs « occupé » de suite : on attend de plus en plus (sinon il relançait toutes les 1,5 s, avec un bip). */
+    private var busyStreak = 0
+
     fun start() = main.post {
         if (running) return@post
+        announced = false; busyStreak = 0
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             log("Mot de réveil : pas de reconnaissance vocale sur ce téléphone.")
             return@post
@@ -89,7 +95,7 @@ class WakeWord(
         val r = recognizer ?: create().also {
             recognizer = it
             it.setRecognitionListener(listener)
-            log("👂 Mot de réveil « Joey » actif" + if (onDevice) " (reconnaissance sur le téléphone)" else "")
+            if (!announced) { announced = true; log("👂 Mot de réveil « Joey » actif" + if (onDevice) " (reconnaissance sur le téléphone)" else "") }
         }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -123,7 +129,7 @@ class WakeWord(
     }
 
     private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {}
+        override fun onReadyForSpeech(params: Bundle?) { busyStreak = 0 }
         override fun onBeginningOfSpeech() {}
         override fun onRmsChanged(rmsdB: Float) { onLevel?.invoke(rmsdB) }
         override fun onBufferReceived(buffer: ByteArray?) {}
@@ -135,7 +141,11 @@ class WakeWord(
         override fun onError(error: Int) {
             // Silence ou rien compris : on relance (plus doucement si le service est occupé).
             val wait = when (error) {
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> 1500L
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> {
+                    busyStreak++
+                    if (busyStreak == 4) log("Mot de réveil : le micro est occupé (autre app ?), j'espace les essais")
+                    minOf(30_000L, 1500L shl minOf(busyStreak - 1, 5))
+                }
                 SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT, SpeechRecognizer.ERROR_SERVER -> 5000L
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> { log("Mot de réveil : permission micro refusée."); running = false; return }
                 else -> 150L

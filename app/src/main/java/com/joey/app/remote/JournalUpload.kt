@@ -44,10 +44,13 @@ class JournalUpload(
         while (queue.size > 5000) queue.poll()
     }
 
+    @Volatile private var stopped = false
+    fun stop() { stopped = true; thread(isDaemon = true) { runCatching { flush() } } }
+
     fun start() {
         if (!configured) return
         thread(name = "journal-envoi", isDaemon = true) {
-            while (true) {
+            while (!stopped) {
                 Thread.sleep(30_000)
                 runCatching { flush() }
             }

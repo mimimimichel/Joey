@@ -166,8 +166,13 @@ class SpgGimbal(
         main.postDelayed({
             if (scanning && gen == attempt && state == GimbalState.SEARCHING) {
                 stopScan()
-                log("Nacelle introuvable. Est-elle allumée ? L'app Feiyu est-elle fermée ?" +
-                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) " Sur ce téléphone, la localisation doit être activée." else "")
+                val locOff = Build.VERSION.SDK_INT < Build.VERSION_CODES.S && runCatching {
+                    val lm = context.getSystemService(android.location.LocationManager::class.java)
+                    if (Build.VERSION.SDK_INT >= 28) !lm.isLocationEnabled else false
+                }.getOrDefault(false)
+                log(if (locOff) "Nacelle introuvable : la LOCALISATION du téléphone est coupée (Android 9 en a besoin pour le Bluetooth). Active-la."
+                    else "Nacelle introuvable. Est-elle allumée ? Est-elle encore reliée à un autre téléphone (Joey ouvert sur le S10, " +
+                        "ou l'app Feiyu) ? Une nacelle ne parle qu'à un téléphone à la fois.")
                 setState(GimbalState.OFF)
                 wanted = false
             }

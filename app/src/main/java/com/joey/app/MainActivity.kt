@@ -81,6 +81,18 @@ class MainActivity : ComponentActivity() {
         CrashReport.mark("démarrage fini")
     }
 
+    /** Plein écran remis quand on revient sur l'app (Android 9 le perd parfois). */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && Build.VERSION.SDK_INT < 30) {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                android.view.View.SYSTEM_UI_FLAG_FULLSCREEN or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
+        }
+    }
+
     /** Carte USB-série du Roomba branchée pendant que Joey tourne. */
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
@@ -115,6 +127,14 @@ class MainActivity : ComponentActivity() {
         // Plein écran : c'est un visage, pas une app.
         WindowCompat.getInsetsController(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.systemBars())
+            // Android 9 et avant : on force aussi l'ancien plein écran (sinon la barre restait visible sur le S8+).
+            if (Build.VERSION.SDK_INT < 30) {
+                @Suppress("DEPRECATION")
+                window.decorView.systemUiVisibility = (android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                    android.view.View.SYSTEM_UI_FLAG_FULLSCREEN or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
+            }
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
         // Il a planté la dernière fois : on montre le rapport SEUL, avant de démarrer quoi que ce soit

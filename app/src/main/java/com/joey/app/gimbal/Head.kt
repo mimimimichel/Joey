@@ -129,6 +129,9 @@ class Head(
         return "tête droite devant"
     }
 
+    /** Cap absolu de la tête dans la source actuelle (+ = droite), pour retenir où on a vu quelqu'un. */
+    fun absPan(): Double? = cur()?.first
+
     /** « Devant » = là où la tête regarde maintenant. */
     fun setHomeHere() { cur()?.let { homePan = it.first } }
 
@@ -314,23 +317,23 @@ class Head(
      * Cherche du regard (un visage, une personne, un objet : selon ce que suit la caméra) : d'abord là où il regarde,
      * puis un tour complet. [seenSince] : la cible a-t-elle été vue depuis cette heure ?
      */
-    fun searchTarget(seenSince: (Long) -> Boolean): Boolean {
+    fun searchTarget(seenSince: (Long) -> Boolean, firstDir: Int = 1): Boolean {
         val t0 = now()
-        return spinSearch({ seenSince(t0) })
+        return spinSearch({ seenSince(t0) }, firstDir = firstDir)
     }
 
     /**
      * Fait un tour complet (360°) en tournant en continu pendant que la caméra analyse les images, d'abord à hauteur
      * des yeux, puis plus bas (sol, tables). S'arrête dès que [found] dit oui ; la suite (centrer) est au suivi.
      */
-    fun spinSearch(found: () -> Boolean, tilts: List<Double> = listOf(5.0, -30.0), degPerSec: Double = 60.0): Boolean {
+    fun spinSearch(found: () -> Boolean, tilts: List<Double> = listOf(5.0, -30.0), degPerSec: Double = 60.0, firstDir: Int = 1): Boolean {
         cancelled = false
         sleep(300) // une image ou deux là où il regarde déjà
         if (found()) return true
         if (cur() == null) return false
         val stick = stickFor(min(degPerSec, bestSpeed * 0.9))
         val limit = timeFor(360.0, stick) + 2000
-        var dir = 1
+        var dir = if (firstDir < 0) -1 else 1
         for (tilt in tilts) {
             if (cancelled) return false
             look(null, tilt)

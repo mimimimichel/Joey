@@ -282,6 +282,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         val sees = follower.sees
         if (sees != _state.value.seesFace) _state.update { it.copy(seesFace = sees) }
+        // Où il a vu quelqu'un pour la dernière fois (cap de la tête, centrée sur la personne par le suivi).
+        if (sees && (trackLabels == null || "person" in (trackLabels ?: emptySet())) && !head.moving) {
+            head.absPan()?.let { lastSeenPan = it; lastSeenAt = System.currentTimeMillis() }
+        }
         detectMotion(bmp)
         if (flag("watch", false)) guard(bmp)
     }
@@ -634,13 +638,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Cherche du regard une catégorie du détecteur du téléphone (personne, chien, chaise…) en faisant le tour.
      * Trouvé : la tête la suit pendant [keepMs], puis revient aux visages. À appeler sur le fil des mouvements.
      */
-    private fun searchLocal(what: String, labels: Set<String>, keepMs: Long): Boolean {
+    private fun searchLocal(what: String, labels: Set<String>, keepMs: Long, firstDir: Int = 1): Boolean {
         trackName = what
         trackLabels = labels
         trackUntil = System.currentTimeMillis() + 120_000
         follower.forget()
         _state.update { it.copy(tracking = what) }
-        val found = head.searchTarget(follower::seenSince)
+        val found = head.searchTarget(follower::seenSince, firstDir)
         if (found) {
             trackUntil = System.currentTimeMillis() + keepMs
         } else {
@@ -1139,7 +1143,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             log("👂 « $heard » : je t'écoute")
             if (live == null && geminiKey.isNotBlank()) {
                 startedByWake = true
-                thread(isDaemon = true) { Thread.sleep(350); startLive() } // le temps de rendre le micro
+                thread(isDaemon = true) {
+                    Thread.sleep(150) // le temps que la reconnaissance rende le micro
+                    // On écoute encore un instant avec les deux micros : d'où vient la voix ?
+                    val (side, conf) = if (!follower.sees && gimbal.ready) com.joey.app.audio.SoundDirection.listen(900) else (0 to 0.0)
+                    startLive()
+                    // Il ne voit personne : il cherche tout de suite qui l'appelle.
+                    if (!follower.sees && gimbal.ready && flag("camera", true)) {
+                        lastAutoSearch = System.currentTimeMillis()
+                        moveAsync(holdMs = 0) { findCaller(if (conf >= 0.4) side else 0) }
+                    }
+                }
             }
         },
         log = ::log)
@@ -1276,6 +1290,73 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     @Volatile private var lastSpeaker: Boolean? = null
     @Volatile private var lastAutoSearch = 0L
+    @Volatile private var lastSeenPan: Double? = null
+    @Volatile private var lastSeenAt = 0L
+
+    /**
+     * Retrouve la personne qui l'appelle : là où il l'a vue la dernière fois (moins de 15 min), sinon un tour complet en
+     * commençant du côté d'où venait la voix ([side] : -1 gauche, +1 droite, 0 inconnu). Avec les roues, s'approche si
+     * elle est loin. Apprend aussi dans quel sens sont câblés les micros. Bloquant (fil des mouvements).
+     */
+    private fun findCaller(side: Int): String {
+        if (follower.sees) return "je te vois déjà"
+        val startPan = head.pose()?.first ?: 0.0
+        var found = false
+        // 1. Là où il l'a vue la dernière fois.
+        val last = lastSeenPan
+        val cur = head.absPan()
+        if (last != null && cur != null && System.currentTimeMillis() - lastSeenAt < 15 * 60_000L) {
+            val delta = Head.wrap(last - cur)
+            if (kotlin.math.abs(delta) > 10) {
+                log("👀 Je regarde là où je t'ai vu")
+                trackLabels = setOf("person"); trackName = "personne"; trackUntil = System.currentTimeMillis() + 60_000
+                follower.forget()
+                head.look(delta, 5.0)
+                val t = System.currentTimeMillis()
+                Thread.sleep(700)
+                found = follower.seenSince(t)
+            }
+        }
+        // 2. Un tour complet, en commençant du côté de la voix (ou du dernier endroit vu).
+        if (!found) {
+            val micSign = prefs.getInt("mic_side_sign", 1)
+            val dir = when {
+                side != 0 -> side * micSign
+                last != null && cur != null -> if (Head.wrap(last - cur) >= 0) 1 else -1
+                else -> 1
+            }
+            if (side != 0) log("👂 Ta voix venait plutôt de ${if (dir > 0) "ma droite" else "ma gauche"}")
+            found = searchLocal("personne", setOf("person"), keepMs = 2500, firstDir = dir)
+        } else {
+            trackUntil = System.currentTimeMillis() + 2500
+        }
+        if (!found) return "je ne te trouve pas"
+        // Le côté de la voix était-il le bon ? (on apprend le câblage des micros : il peut être inversé)
+        if (side != 0) {
+            Thread.sleep(800)
+            val moved = Head.wrap((head.pose()?.first ?: startPan) - startPan)
+            if (kotlin.math.abs(moved) in 25.0..155.0) {
+                val ok = (if (moved > 0) 1 else -1) == side * prefs.getInt("mic_side_sign", 1)
+                val misses = if (ok) 0 else prefs.getInt("mic_misses", 0) + 1
+                prefs.edit().putInt("mic_misses", if (misses >= 2) 0 else misses).apply()
+                if (misses >= 2) {
+                    prefs.edit().putInt("mic_side_sign", -prefs.getInt("mic_side_sign", 1)).apply()
+                    log("👂 Micros : gauche et droite inversés (corrigé)")
+                }
+            }
+        }
+        // 3. Loin, et avec des roues : il vient.
+        if (roomba != null) {
+            Thread.sleep(600)
+            val p = seenNow().filter { it.label == "person" && it.score >= 0.5 }.maxByOrNull { it.box.h }
+            val faceSmall = (faces.lastSize ?: 0f) in 0.001f..0.06f
+            if ((p != null && p.box.h < 0.45) || faceSmall) {
+                log("🛞 Tu es loin : j'arrive")
+                return "trouvé, et " + comeHere()
+            }
+        }
+        return "trouvé"
+    }
 
     /** On lui parle et il ne voit personne : il cherche du regard, tout seul (au plus toutes les 20 s). */
     private fun maybeSearchSpeaker() {
@@ -1285,9 +1366,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (_state.value.busy || now - follower.seenAt < 8000 || now - lastAutoSearch < 30_000) return
         lastAutoSearch = now
         log("👀 on me parle, je cherche qui")
-        moveAsync(holdMs = 0) {
-            if (searchLocal("personne", setOf("person"), keepMs = 2500)) "trouvé quelqu'un" else "personne en vue"
-        }
+        moveAsync(holdMs = 0) { findCaller(0) }
     }
 
     private fun onTranscript(person: Boolean, text: String) {
@@ -1338,6 +1417,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val what = (args["objet"] as? String)?.trim().orEmpty().ifEmpty { "personne" }
                 val labels = CocoClasses.forTarget(what)
                 log("🔎 je cherche : $what" + (labels?.let { " (détecteur : ${it.joinToString()})" } ?: " (vision Gemini)"))
+                if (labels != null && labels == setOf("person") && !follower.sees) {
+                    var r = ""
+                    moveSync(holdMs = 0, timeoutMs = 90_000) { r = findCaller(0); r }
+                    live?.sendFrameNow()
+                    return mapOf("result" to if (r.startsWith("trouvé") || r.startsWith("je te vois")) "$r (vérifie sur l'image)" else r)
+                }
                 if (labels != null) {
                     val person = "person" in labels
                     val found = AtomicBoolean(false)

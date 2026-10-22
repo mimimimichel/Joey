@@ -120,7 +120,7 @@ class HeadTest {
 
     @Test fun searchGivesUp() {
         val (_, h) = setup()
-        assertEquals(false, h.searchTarget { false })
+        assertEquals(false, h.searchTarget({ false }))
     }
 
     @Test fun lookBehind() {

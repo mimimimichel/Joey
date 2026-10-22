@@ -156,7 +156,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Capteurs du téléphone (posé sur la nacelle) : où regarde vraiment la caméra. */
     val sensors: PhoneSensors = PhoneSensors(app) { flag("camera", true) && flag("front_camera", true) }
     val head: Head = Head(gimbal, rightSign = { if (flag("invert_pan", false)) -1 else 1 }, tiltSign = { viewTiltSign },
-        speedFraction = { headSpeed / 100.0 * (0.65 + 0.35 * temperament.energy()) }, onLog = ::log, phone = sensors,
+        speedFraction = { headSpeed / 100.0 }, onLog = ::log, phone = sensors,
         onPhoneSigns = { p, t -> prefs.edit().putInt("phone_pan_sign", p).putInt("phone_tilt_sign", t).apply() })
     val follower: FaceFollower = FaceFollower(
         gimbal,
@@ -364,6 +364,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val temperament = com.joey.app.life.Temperament()
     private val expressive = com.joey.app.life.Expressive()
     @Volatile private var exprPose = com.joey.app.life.Expressive.Pose(0.0, 0.0, 0f)
+    @Volatile private var exprMood = Mood.NEUTRE
+    @Volatile private var exprMoodSince = 0L
+    @Volatile private var thinkingNow = false
+
+    /** Il réfléchit (on attend sa réponse, il cherche, il calcule) : ça se voit sur son visage. */
+    fun isThinking(): Boolean = thinkingNow
     @Volatile private var lastJoeyTalkAt = 0L
     @Volatile private var lastTrackAimAt = 0L
     @Volatile private var idleBase: Pair<Double, Double>? = null
@@ -2508,13 +2514,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             runCatching {
                 val st = _state.value
                 val now = System.currentTimeMillis()
+                if (st.mood != exprMood) { exprMood = st.mood; exprMoodSince = now }
+                val think = st.busy || st.live == LiveState.CONNECTING ||
+                    (st.live == LiveState.LISTENING && now - lastPersonTalkAt in 600..6000 && lastJoeyTalkAt < lastPersonTalkAt)
+                thinkingNow = think
                 exprPose = expressive.pose(
                     voice = live?.level ?: 0f,
                     speaking = st.live == LiveState.SPEAKING,
                     listening = now - lastPersonTalkAt < 1500,
-                    thinking = st.busy || st.live == LiveState.CONNECTING ||
-                        (st.live == LiveState.LISTENING && now - lastPersonTalkAt in 700..5000 && lastJoeyTalkAt < lastPersonTalkAt),
+                    thinking = think,
                     energy = temperament.energy(),
+                    mood = st.mood, moodSince = exprMoodSince,
                 )
             }
             runCatching { head.aimStep() }

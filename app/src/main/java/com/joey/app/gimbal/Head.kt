@@ -183,13 +183,14 @@ class Head(
         (1500 + 1000 * 1.8 * abs(deg) / speedOf(stick).coerceAtLeast(5.0)).toLong().coerceAtMost(20_000)
 
     /**
-     * Vitesse joystick (sans le sens du joystick) pour un écart donné : à fond tant qu'on est loin, on freine sur la
-     * distance parcourue en ~0,3 s à pleine vitesse (au moins 12°). Sous ~110 la SPG ne bouge presque pas.
+     * Vitesse joystick (sans le sens du joystick) pour un écart donné : il vise d'arriver en ~0,18 s, plafonné à
+     * [max]. Loin : à fond ; près : juste ce qu'il faut pour ne pas dépasser. Les petits mouvements (hochements,
+     * corrections) restent vifs. Sous ~120, la SPG ne bouge presque pas.
      */
     private fun speed(err: Double, max: Int): Int {
         val m = abs(err)
-        val brake = maxOf(12.0, speedOf(max) * 0.3)
-        val s = min(max.toDouble(), 120.0 + (max - 120.0) * m / brake).toInt()
+        val want = m / 0.18 + 4.0
+        val s = min(max, maxOf(120, stickFor(want)))
         return (sign(err) * s).toInt()
     }
 
@@ -318,8 +319,7 @@ class Head(
         val (oPan, oTilt) = runCatching { expression() }.getOrDefault(0.0 to 0.0)
         val ePan = wrap(aimPan + oPan - p.first)
         val eTilt = (aimTilt + oTilt).coerceIn(TILT_MIN, TILT_MAX) - p.second
-        // Petits écarts (respiration, hochement, petite correction) : en douceur, sans à-coups.
-        val max = if (maxOf(abs(ePan), abs(eTilt)) < 6) min(maxStickNow(), stickFor(14.0)) else maxStickNow()
+        val max = maxStickNow()
         val sp = if (abs(ePan) < 1.5) 0 else speed(ePan, max) * panStick()
         val st = if (abs(eTilt) < 1.5) 0 else speed(eTilt, max) * tiltStick()
         link.stick(sp, st)

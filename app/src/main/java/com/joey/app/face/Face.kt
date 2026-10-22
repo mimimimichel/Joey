@@ -1,6 +1,10 @@
 package com.joey.app.face
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -70,7 +74,7 @@ fun Face(
     LaunchedEffect(activity) {
         while (isActive) {
             when (activity) {
-                Activity.REFLECHIT -> { idleX = if (idleX > 0) -0.5f else 0.5f; idleY = -0.6f; delay(600) }
+                Activity.REFLECHIT -> { idleX = if (idleX > 0) -0.7f else 0.7f; idleY = -0.85f; delay(700) }
                 Activity.REPOS -> {
                     delay(Random.nextLong(1500, 4000))
                     idleX = Random.nextFloat() * 0.6f - 0.3f
@@ -93,10 +97,25 @@ fun Face(
     }
     val listen by animateFloatAsState(if (activity == Activity.ECOUTE) 1f else 0f, tween(300), label = "listen")
     val lean by animateFloatAsState(tilt, tween(450), label = "lean")
+    // Réflexion : trois points qui s'allument l'un après l'autre (bien visible).
+    val think by animateFloatAsState(if (activity == Activity.REFLECHIT) 1f else 0f, tween(250), label = "think")
+    val dots = rememberInfiniteTransition(label = "dots")
+    val phase by dots.animateFloat(0f, 3f, infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "phase")
 
     Canvas(modifier) {
         drawRect(Color.Black)
-        rotate(lean) { drawFace(this, mood, activity, voice, listen, gx, gy, blink.value) }
+        rotate(lean) {
+            drawFace(this, mood, activity, voice, listen * (1f - think), gx, gy, blink.value * (1f - 0.35f * think))
+            if (think > 0.01f) {
+                val unit = min(size.width / 2.6f, size.height / 1.6f)
+                val r = unit * 0.075f
+                val y = size.height / 2f + unit * 0.78f
+                for (i in 0..2) {
+                    val on = (1f - kotlin.math.abs(((phase - i + 3f) % 3f) - 0.5f) * 1.3f).coerceIn(0.25f, 1f)
+                    drawCircle(EYE.copy(alpha = think * on), r * (0.8f + 0.35f * on), Offset(size.width / 2f + (i - 1) * r * 3.4f, y))
+                }
+            }
+        }
     }
 }
 

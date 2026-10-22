@@ -89,12 +89,16 @@ class ExpressiveTest {
             val d = x.pose(0f, false, true, false, 0.8).tilt - other.pose(0f, false, false, false, 0.8).tilt
             deepest = minOf(deepest, d); t += 50
         }
-        assertTrue("hoche la tête ($deepest)", deepest < -4)
+        assertTrue("hoche la tête ($deepest)", deepest < -6)
     }
 
     @Test fun tiltsHeadWhenThinking() {
-        assertEquals(11f, x.pose(0f, false, false, true, 0.8).screenTilt)
-        assertEquals(0f, x.pose(0f, false, false, false, 0.8).screenTilt)
+        var p = x.pose(0f, false, false, false, 0.8)
+        repeat(20) { t += 50; p = x.pose(0f, false, false, true, 0.8) }
+        assertTrue("tête penchée (${p.screenTilt})", p.screenTilt > 12f)
+        assertTrue("regarde en l'air (${p.tilt})", p.tilt > 5)
+        repeat(20) { t += 50; p = x.pose(0f, false, false, false, 0.8) }
+        assertEquals(0f, p.screenTilt)
     }
 
     @Test fun movesWhenSpeakingButStaysSmall() {
@@ -105,7 +109,21 @@ class ExpressiveTest {
             maxPan = maxOf(maxPan, abs(p.pan)); maxTilt = maxOf(maxTilt, abs(p.tilt)); t += 50
         }
         assertTrue("bouge ($maxPan, $maxTilt)", maxTilt > 3.5)
-        assertTrue("reste discret", maxPan < 8 && maxTilt < 10)
+        assertTrue("reste raisonnable", maxPan < 12 && maxTilt < 14)
+    }
+}
+
+class MoodPoseTest {
+    @Test fun sadHangsHeadAngryShakes() {
+        var t = 10_000L
+        val x = Expressive({ t }, { 0.5 })
+        var p = x.pose(0f, false, false, false, 0.8, com.joey.app.face.Mood.TRISTE, 10_000L)
+        repeat(20) { t += 50; p = x.pose(0f, false, false, false, 0.8, com.joey.app.face.Mood.TRISTE, 10_000L) }
+        assertTrue("tête basse (${p.tilt})", p.tilt < -10)
+        var lo = 0.0; var hi = 0.0
+        val since = t
+        repeat(16) { t += 50; val q = x.pose(0f, false, false, false, 0.8, com.joey.app.face.Mood.FACHE, since); lo = minOf(lo, q.pan); hi = maxOf(hi, q.pan) }
+        assertTrue("secoue la tête (${lo}..${hi})", hi - lo > 8)
     }
 }
 

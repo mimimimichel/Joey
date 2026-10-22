@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.joey.app.MainViewModel
 import com.joey.app.brain.LiveState
+import com.joey.app.face.Activity
 import com.joey.app.face.Face
 import com.joey.app.gimbal.GimbalState
 import kotlinx.coroutines.delay
@@ -73,11 +74,13 @@ fun JoeyScreen(vm: MainViewModel) {
     var settings by remember { mutableStateOf(false) }
     var gaze by remember { mutableStateOf(0f to 0f) }
     var lean by remember { mutableStateOf(0f) }
+    var thinking by remember { mutableStateOf(false) }
     var pose by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
         while (true) {
             gaze = vm.gaze()
             lean = vm.screenTilt()
+            thinking = vm.isThinking()
             pose = vm.poseText()
             delay(100)
         }
@@ -86,7 +89,7 @@ fun JoeyScreen(vm: MainViewModel) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         Face(
             mood = s.mood,
-            activity = vm.faceActivity(s),
+            activity = vm.faceActivity(s).let { if (thinking && it != Activity.PARLE) Activity.REFLECHIT else it },
             level = vm::voiceLevel,
             gazeX = gaze.first,
             gazeY = gaze.second,

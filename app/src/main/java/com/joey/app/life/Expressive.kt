@@ -30,22 +30,23 @@ class Expressive(private val now: () -> Long = { System.currentTimeMillis() }, p
      * À appeler ~10 à 25 fois par seconde. [voice] : volume de sa voix (0..1) ; [speaking] : il parle ;
      * [listening] : quelqu'un lui parle ; [thinking] : il réfléchit ou cherche ; [energy] : 0 (fatigué) à 1 (en forme).
      */
-    fun pose(voice: Float, speaking: Boolean, listening: Boolean, thinking: Boolean, energy: Double): Pose {
+    fun pose(voice: Float, speaking: Boolean, listening: Boolean, thinking: Boolean, energy: Double,
+             mood: com.joey.app.face.Mood = com.joey.app.face.Mood.NEUTRE, moodSince: Long = 0L): Pose {
         val t = now()
         val dt = if (lastAt == 0L) 0.05 else ((t - lastAt) / 1000.0).coerceIn(0.0, 0.5)
         lastAt = t
         val e = energy.coerceIn(0.0, 1.0)
         // Respiration : lente (4,5 s), un peu plus ample quand il est en forme.
-        var pan = 1.5 * sin(2 * PI * t / 7300.0)
-        var tilt = (2.0 + 1.0 * e) * sin(2 * PI * t / 4500.0)
+        var pan = 2.0 * sin(2 * PI * t / 7300.0)
+        var tilt = (2.5 + 1.5 * e) * sin(2 * PI * t / 4500.0)
         // Il parle : hochements sur l'énergie de la voix (enveloppe rapide - lente) et petite pose différente par phrase.
         val v = if (speaking) voice.toDouble().coerceIn(0.0, 1.0) * 4 else 0.0
         fast += (v - fast) * minOf(1.0, dt / 0.08)
         slow += (v - slow) * minOf(1.0, dt / 0.6)
         if (speaking) {
-            tilt += ((fast - slow) * 10).coerceIn(-2.0, 5.0) * (0.6 + 0.4 * e)
+            tilt += ((fast - slow) * 16).coerceIn(-3.0, 8.0) * (0.7 + 0.3 * e)
             if (t >= nextSwayAt) {
-                swayFrom = currentSway(t); swayTo = (random() * 2 - 1) * 5.0; swayAt = t
+                swayFrom = currentSway(t); swayTo = (random() * 2 - 1) * 8.0; swayAt = t
                 nextSwayAt = t + 2200 + (random() * 2000).toLong()
             }
         } else if (swayTo != 0.0) { // il se tait : retour en douceur à la pose de départ
@@ -59,12 +60,44 @@ class Expressive(private val now: () -> Long = { System.currentTimeMillis() }, p
             nextNodAt = t + 3500 + (random() * 3500).toLong()
         }
         if (!listening) nextNodAt = maxOf(nextNodAt, t + 1500)
-        tilt += nod(t - nodAt) + (if (doubleNod) nod(t - nodAt - 650) else 0.0)
-        return Pose(pan, tilt, if (thinking) 11f else 0f)
+        tilt += nod(t - nodAt) + (if (doubleNod) nod(t - nodAt - 550) else 0.0)
+        var screen = 0f
+        // Il réfléchit : ça doit se voir. Il lève les yeux et la tête sur le côté, et son regard va et vient.
+        if (thinking) {
+            thinkW = minOf(1.0, thinkW + dt / 0.35)
+        } else thinkW = maxOf(0.0, thinkW - dt / 0.35)
+        if (thinkW > 0) {
+            pan += thinkW * (9.0 + 4.0 * sin(2 * PI * t / 2400.0))
+            tilt += thinkW * 9.0
+            screen += (thinkW * 15).toFloat()
+        }
+        // L'attitude du moment (quelques secondes après un changement d'humeur, ou tant qu'elle dure).
+        val since = (t - moodSince).coerceAtLeast(0)
+        val ease = (since / 500.0).coerceIn(0.0, 1.0)
+        when (mood) {
+            com.joey.app.face.Mood.CONTENT, com.joey.app.face.Mood.AMUSE -> {
+                if (since < 900) tilt += 7.0 * abs(sin(2 * PI * since / 450.0)) // petits bonds de joie
+                if (mood == com.joey.app.face.Mood.AMUSE) screen += 8f * ease.toFloat()
+            }
+            com.joey.app.face.Mood.TRISTE -> tilt -= 15.0 * ease
+            com.joey.app.face.Mood.FATIGUE -> { tilt -= 9.0 * ease; pan += 3.0 * sin(2 * PI * t / 9000.0) }
+            com.joey.app.face.Mood.ETONNE -> tilt += if (since < 450) 12.0 * sin(PI * since / 450.0) + 4.0 * ease else 4.0
+            com.joey.app.face.Mood.FACHE -> {
+                if (since < 800) pan += 7.0 * sin(2 * PI * since / 260.0) // « non non non »
+                tilt -= 5.0 * ease
+            }
+            com.joey.app.face.Mood.MEFIANT -> { pan -= 8.0 * ease; screen -= 8f * ease.toFloat() }
+            com.joey.app.face.Mood.ETOURDI -> { pan += 7.0 * sin(2 * PI * t / 900.0); tilt += 5.0 * kotlin.math.cos(2 * PI * t / 900.0) }
+            com.joey.app.face.Mood.DORT -> tilt -= 20.0 * ease
+            else -> {}
+        }
+        return Pose(pan, tilt, screen)
     }
 
-    /** Un hochement : la tête descend de 5° et remonte, en 0,6 s. */
-    private fun nod(ms: Long): Double = if (ms in 0..600) -5.0 * sin(PI * ms / 600.0) else 0.0
+    private var thinkW = 0.0
+
+    /** Un hochement : la tête descend de 7° et remonte, en 0,5 s. */
+    private fun nod(ms: Long): Double = if (ms in 0..500) -7.0 * sin(PI * ms / 500.0) else 0.0
 
     private fun currentSway(t: Long): Double {
         val k = ((t - swayAt) / 700.0).coerceIn(0.0, 1.0)

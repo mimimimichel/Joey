@@ -603,10 +603,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // L'image est droite et non retournée : le bras tendu vers la droite de l'image montre ce qui est à la
                 // droite de Joey. On tourne franchement de ce côté (on ne sait pas à quelle distance est la chose).
                 moveAsync(holdMs = 6000) {
-                    val side = if (g.dx >= 0) 1 else -1
-                    val pan = side * (35.0 + 35.0 * kotlin.math.abs(g.dx))
-                    val tilt = ((head.pose()?.second ?: 0.0) - g.dy * 35.0).coerceIn(-60.0, 45.0)
-                    head.look(pan, tilt)
+                    // Gemini Robotics-ER suit la direction du bras ; sans lui, on tourne franchement du côté montré.
+                    val er = if (geminiKey.isNotBlank()) lookWherePointed() else null
+                    if (er == null) {
+                        val side = if (g.dx >= 0) 1 else -1
+                        val pan = side * (35.0 + 35.0 * kotlin.math.abs(g.dx))
+                        val tilt = ((head.pose()?.second ?: 0.0) - g.dy * 35.0).coerceIn(-60.0, 45.0)
+                        head.look(pan, tilt)
+                    }
                     Thread.sleep(500)
                     live?.sendFrameNow()
                     live?.event("La personne te montre quelque chose du doigt : tu as tourné la tête de ce côté. Regarde la nouvelle " +
@@ -795,27 +799,119 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
 
-    /** Objet inconnu du détecteur : Gemini regarde chaque direction. Trouvé : la tête se centre dessus. */
-    private fun searchGemini(what: String): com.joey.app.brain.Found? {
-        var hit: com.joey.app.brain.Found? = null
+    /** Tourne la tête vers un point de l'image (x, y de 0 à 1) repéré sur la dernière image. */
+    private fun centerOnImagePoint(x: Double, y: Double) {
+        val img = camera.frame(5000)
+        val (dp, dt) = imageToDegrees((x * 2 - 1).toFloat(), (y * 2 - 1).toFloat(), img?.width ?: 4, img?.height ?: 3)
+        head.look(dp, ((head.pose()?.second ?: 0.0) + dt).coerceIn(-70.0, 70.0))
+    }
+
+    /** Gemini Robotics-ER sur l'image de maintenant (pleine résolution). null s'il ne répond pas. */
+    private fun erLocate(what: String, floor: Boolean = false): com.joey.app.brain.GeminiVision.Spot? {
+        val jpeg = camera.zoomJpeg("tout") ?: return null
+        return runCatching { vision.locate(jpeg, what, floor) }.onFailure { log("Robotics-ER : ${it.message}") }.getOrNull()
+    }
+
+    /**
+     * Vérifie avec Gemini Robotics-ER que [what] est bien là où regarde la tête (au centre de l'image).
+     * true / false, ou null si Gemini ne répond pas.
+     */
+    private fun erVerify(what: String): Pair<Boolean, com.joey.app.brain.GeminiVision.Spot?>? {
+        Thread.sleep(500) // image fraîche, tête arrêtée
+        val sp = erLocate(what) ?: return null
+        val ok = sp.found && sp.confidence >= 0.5 && kotlin.math.abs(sp.x - 0.5) < 0.32 && kotlin.math.abs(sp.y - 0.5) < 0.38
+        log(if (ok) "✅ Robotics-ER confirme : $what" else "❌ Robotics-ER ne voit pas « $what » au centre (${sp.description})")
+        return ok to sp
+    }
+
+    /**
+     * Cherche avec Gemini Robotics-ER : arrêts un peu plus serrés que le champ de la caméra, sur deux hauteurs ; à chaque
+     * arrêt il dit si l'objet est là, où, et à quelle distance. Trouvé : la tête se tourne pile dessus.
+     */
+    private fun searchSpatial(what: String): com.joey.app.brain.GeminiVision.Spot? {
+        var hit: com.joey.app.brain.GeminiVision.Spot? = null
         _state.update { it.copy(tracking = what) }
         try {
-            head.scan(listOf(0.0, -60.0, 60.0, -120.0, 120.0, 179.0), listOf(0.0, -30.0)) { _ ->
-                Thread.sleep(650) // image fraîche après le mouvement
-                val jpeg = camera.captureJpegBase64() ?: return@scan false
-                val f = runCatching { vision.find(jpeg, what) }.onFailure { log("Vision Gemini : ${it.message}") }.getOrNull()
-                if (f != null && f.found && f.confidence >= 0.5) { hit = f; true } else false
+            val hf = camera.frame(3000)?.let { camera.fov(it.width, it.height).first } ?: 60.0
+            val step = (hf * 0.85).coerceIn(40.0, 90.0)
+            val n = kotlin.math.ceil(360.0 / step).toInt()
+            val pans = (listOf(0.0) + (1..n / 2).flatMap { listOf(it * step, -it * step) })
+                .map { Head.wrap(it) }.distinctBy { Math.round(it / 10) }
+            head.scan(pans, listOf(0.0, -30.0)) { _ ->
+                Thread.sleep(600) // image nette, tête arrêtée
+                val sp = erLocate(what)
+                if (sp != null && sp.found && sp.confidence >= 0.5) { hit = sp; true } else false
             }
-            hit?.box?.let { b ->
-                val img = camera.frame(5000)
-                val (dp, dt) = imageToDegrees((b.cx * 2 - 1).toFloat(), (b.cy * 2 - 1).toFloat(), img?.width ?: 4, img?.height ?: 3)
-                head.look(dp, (head.pose()?.second ?: 0.0) + dt)
-            }
+            hit?.let { centerOnImagePoint(it.x, it.y) }
         } finally {
             _state.update { it.copy(tracking = null) }
         }
         return hit
     }
+
+    /**
+     * Ce que la personne montre du doigt : Gemini Robotics-ER suit la direction de son bras ; la tête se tourne vers la
+     * chose (pile dessus si elle est dans l'image, sinon du bon côté, puis il la repère). Renvoie ce que c'est, ou null
+     * si Gemini ne répond pas. À appeler sur le fil des mouvements.
+     */
+    private fun lookWherePointed(): String? {
+        val jpeg = camera.zoomJpeg("tout") ?: return null
+        val pt = runCatching { vision.pointedAt(jpeg) }.onFailure { log("Robotics-ER : ${it.message}") }.getOrNull() ?: return null
+        if (!pt.pointing) return "personne ne montre rien sur l'image"
+        log("👉 Robotics-ER : on me montre ${pt.target} (${pt.description})")
+        if (pt.inImage) {
+            centerOnImagePoint(pt.x, pt.y)
+        } else {
+            val ang = (pt.angle ?: 60.0).coerceIn(30.0, 160.0)
+            val tilt = head.pose()?.second ?: 0.0
+            when (pt.direction) {
+                "gauche" -> head.look(-ang, null)
+                "droite" -> head.look(ang, null)
+                "haut" -> head.look(null, (tilt + minOf(ang, 45.0)).coerceAtMost(60.0))
+                "bas" -> head.look(null, (tilt - minOf(ang, 45.0)).coerceAtLeast(-70.0))
+                "derriere_le_robot" -> head.lookDirection("derriere", null)
+                else -> {}
+            }
+            // Nouvelle vue : on repère la chose pour la regarder pile.
+            if (pt.target.isNotBlank() && pt.target != "inconnu") {
+                Thread.sleep(600)
+                erLocate(pt.target)?.takeIf { it.found && it.confidence >= 0.5 }?.let { centerOnImagePoint(it.x, it.y) }
+            }
+        }
+        return "la personne montre ${pt.target} : ${pt.description}"
+    }
+
+    /**
+     * « Va vers le canapé » : Gemini Robotics-ER repère l'endroit au sol devant la chose et sa distance ; Joey s'aligne,
+     * avance par étapes (1 m au plus), regarde à nouveau, et s'arrête à ~50 cm ou sur un obstacle. Bloquant.
+     */
+    private fun goToward(what: String): String {
+        val r = roomba ?: return noWheels
+        follower.pausedUntil = Long.MAX_VALUE // la tête vise la chose, pas les visages
+        var sp = erLocate(what, floor = true)
+        if (sp == null) return "Gemini Robotics-ER ne répond pas"
+        if (!sp.found || sp.confidence < 0.5) {
+            sp = searchSpatial(what) ?: return "je ne vois « $what » nulle part autour de moi"
+        } else {
+            centerOnImagePoint(sp.x, sp.y)
+        }
+        repeat(6) { step ->
+            alignBodyWithHead()
+            Thread.sleep(600)
+            val s2 = erLocate(what, floor = true) ?: return "Gemini Robotics-ER ne répond plus en route"
+            if (!s2.found) return if (step == 0) "je ne vois plus « $what »" else
+                "je suis tout près de « $what » (je ne le vois plus en entier)"
+            centerOnImagePoint(s2.x, s2.y)
+            val d = s2.distance ?: 1.0
+            if (d <= 0.6) return "je suis arrivé devant « $what »" + distanceText(d)
+            alignBodyWithHead()
+            val res = r.drive((d - 0.5).coerceIn(0.2, 1.0))
+            if (res.contains("obstacle") || res.contains("vide") || res.contains("interrompu")) return "je me suis arrêté : $res"
+        }
+        return "je me suis approché de « $what »"
+    }
+
+    private fun distanceText(d: Double?) = d?.let { " (à environ %.1f m)".format(it) } ?: ""
 
     /** Ce que voit le détecteur du téléphone en ce moment. */
     private fun seenNow(): List<Seen> = camera.frame()?.let { objects.detect(it) } ?: emptyList()
@@ -1056,6 +1152,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun comeHere(): String {
         val r = roomba ?: return noWheels
         if (!follower.sees && !searchLocal("personne", setOf("person"), keepMs = 2500)) return "je ne vois personne autour de moi"
+        follower.pausedUntil = 0 // le suivi garde la personne au centre pendant qu'il avance
         repeat(8) { step ->
             Thread.sleep(900) // le suivi centre la personne
             alignBodyWithHead()
@@ -1555,7 +1652,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 log("🔎 je cherche : $what" + (labels?.let { " (détecteur : ${it.joinToString()})" } ?: " (vision Gemini)"))
                 if (labels != null && labels == setOf("person") && !follower.sees) {
                     var r = ""
-                    moveSync(holdMs = 0, timeoutMs = 90_000) { r = findCaller(0); r }
+                    moveSync(holdMs = 0, timeoutMs = 90_000) {
+                        r = findCaller(0)
+                        // Trouvé une silhouette mais pas de visage confirmé : Gemini Robotics-ER vérifie qu'il y a bien quelqu'un.
+                        if (r.startsWith("trouvé") && !follower.sees) {
+                            val v = erVerify("une personne")
+                            if (v?.first == false) r = "fausse alerte : ${v.second?.description}"
+                        }
+                        r
+                    }
                     live?.sendFrameNow()
                     return mapOf("result" to if (r.startsWith("trouvé") || r.startsWith("je te vois")) "$r (vérifie sur l'image)" else r)
                 }
@@ -1568,15 +1673,39 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     // Vérification : une fois la tête centrée, on regarde à nouveau (une fausse détection ne compte pas).
                     var confirmed = false
+                    var erNote = ""
                     if (found.get()) {
                         Thread.sleep(900)
                         val now = seenNow()
                         confirmed = now.any { it.label in labels && it.score >= 0.5 } || (person && follower.sees)
                         if (!confirmed) log("🔎 fausse alerte : plus de « $what » une fois la tête tournée")
+                        // Un objet : Gemini Robotics-ER a le dernier mot (le détecteur du téléphone se trompe parfois).
+                        if (confirmed && !person) {
+                            val v = erVerify(what)
+                            if (v != null) {
+                                confirmed = v.first
+                                erNote = if (v.first) " Vérifié par Gemini Robotics-ER" + distanceText(v.second?.distance) + "." else
+                                    " Gemini Robotics-ER ne le voit pas : ${v.second?.description}"
+                            }
+                        }
+                    }
+                    // Pas trouvé par le détecteur (ou fausse alerte) : Gemini Robotics-ER fait le tour, il voit mieux.
+                    if (!confirmed && !person) {
+                        var sp: com.joey.app.brain.GeminiVision.Spot? = null
+                        log("🔎 je cherche « $what » avec Gemini Robotics-ER")
+                        moveSync(holdMs = 8000, timeoutMs = 100_000) {
+                            sp = searchSpatial(what)
+                            if (sp != null) "trouvé : $what" else "pas trouvé : $what"
+                        }
+                        live?.sendFrameNow()
+                        return sp?.let { mapOf("result" to "trouvé (vérifié par Gemini Robotics-ER) : ta tête est tournée vers « $what »" +
+                            distanceText(it.distance) + ". Regarde l'image pour en dire plus.", "description" to it.description) }
+                            ?: mapOf("result" to "pas de « $what » en faisant le tour (détecteur puis Gemini Robotics-ER, 360°, deux " +
+                                "hauteurs). Peut-être caché, trop loin ou dans le noir. Dis-le honnêtement.")
                     }
                     live?.sendFrameNow()
                     if (confirmed) mapOf("result" to "trouvé (vérifié) : ta tête est tournée vers « $what » et le suit des yeux" +
-                        (if (person) " (puis suit son visage)" else " pendant 15 s") + ". Regarde l'image pour en dire plus.",
+                        (if (person) " (puis suit son visage)" else " pendant 15 s") + ".$erNote Regarde l'image pour en dire plus.",
                         "vu_maintenant" to objects.describe(seenNow()))
                     else if (found.get()) mapOf("result" to "fausse alerte : j'ai cru voir « $what » en tournant, mais une fois la " +
                         "tête tournée il n'y est pas. Dis-le honnêtement (« j'ai cru… ») et propose de chercher encore.",
@@ -1584,15 +1713,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     else mapOf("result" to "pas de « $what » en faisant le tour (360°, deux hauteurs). Peut-être caché, trop loin, " +
                         "ou dans le noir.")
                 } else {
-                    var hit: com.joey.app.brain.Found? = null
-                    moveSync(holdMs = 8000, timeoutMs = 90_000) {
-                        hit = searchGemini(what)
+                    var hit: com.joey.app.brain.GeminiVision.Spot? = null
+                    var check: Pair<Boolean, com.joey.app.brain.GeminiVision.Spot?>? = null
+                    moveSync(holdMs = 8000, timeoutMs = 100_000) {
+                        hit = searchSpatial(what)
+                        if (hit != null) check = erVerify(what)
                         if (hit != null) "trouvé : $what" else "pas trouvé : $what"
                     }
                     live?.sendFrameNow()
-                    hit?.let { mapOf("result" to "trouvé, ta tête est tournée vers « $what »", "description" to it.description) }
-                        ?: mapOf("result" to "pas de « $what » en faisant le tour (360°, deux hauteurs)")
+                    val h = hit
+                    when {
+                        h == null -> mapOf("result" to "pas de « $what » en faisant le tour (Gemini Robotics-ER, 360°, deux hauteurs). " +
+                            "Dis-le honnêtement.")
+                        check?.first == false -> mapOf("result" to "fausse alerte : Gemini Robotics-ER a cru voir « $what », mais une " +
+                            "fois la tête tournée il ne le voit plus (${check?.second?.description}). Dis-le honnêtement.")
+                        else -> mapOf("result" to "trouvé (vérifié par Gemini Robotics-ER) : ta tête est tournée vers « $what »" +
+                            distanceText((check?.second ?: h).distance) + ".", "description" to h.description)
+                    }
                 }
+            }
+            "regarder_ce_que_je_montre" -> {
+                if (!gimbal.ready) return mapOf("result" to noHead)
+                if (!flag("camera", true)) return mapOf("result" to "ta caméra est coupée")
+                var r: String? = null
+                moveSync(holdMs = 8000, timeoutMs = 40_000) { r = lookWherePointed(); r ?: "vision indisponible" }
+                live?.sendFrameNow()
+                mapOf("result" to (r ?: "Gemini Robotics-ER ne répond pas : demande à la personne ce qu'elle montre") +
+                    ". Regarde la nouvelle image pour en parler.")
             }
             "regarder_autour" -> {
                 if (!gimbal.ready) return mapOf("result" to noHead)
@@ -1777,6 +1924,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val r = roomba ?: return mapOf("result" to noWheels)
                 following = false
                 mapOf("result" to r.seekDock())
+            }
+            "aller_vers" -> {
+                if (roomba == null) return mapOf("result" to noWheels)
+                if (!gimbal.ready) return mapOf("result" to noHead)
+                val what = (args["objet"] as? String)?.trim().orEmpty()
+                if (what.isEmpty()) return mapOf("result" to "vers quoi ?")
+                log("🛞 Je vais vers : $what")
+                var res = ""
+                moveSync(holdMs = 3000, timeoutMs = 150_000) { res = goToward(what); res }
+                live?.sendFrameNow()
+                mapOf("result" to res)
             }
             "aller_a" -> {
                 val r = roomba ?: return mapOf("result" to noWheels)

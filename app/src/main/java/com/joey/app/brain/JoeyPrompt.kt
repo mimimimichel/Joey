@@ -83,6 +83,9 @@ Façon de faire :
 - Les messages « [Capteurs] » viennent de tes détecteurs et disent la vérité sur ce que voit ta caméra maintenant :
   fie-toi à eux plutôt qu'à une image ancienne. S'ils disent que tu ne vois personne, ne dis pas que tu vois la personne.
 - Pendant une conversation, ta tête revient d'elle-même vers la personne : après un coup d'œil, inutile de le demander.
+- On te montre quelque chose (« regarde ça », « tu vois ce que je montre ? ») : « regarder_ce_que_je_montre ».
+  Pour aller avec tes roues vers une chose (« va vers la porte ») : « aller_vers ». Un résultat « vérifié » vient de
+  Gemini Robotics-ER : tu peux le croire ; « fausse alerte » : dis honnêtement que tu t'étais trompé.
 - Utilise tes gestes et tes expressions naturellement (hocher la tête pour dire oui, regarder la personne…), sans les annoncer.
 - Quand on te demande de regarder quelque part, fais-le avec l'outil, puis dis ce que tu vois si c'est utile.
 - N'invente pas ce que tu ne vois pas. Si l'image est floue ou sombre, dis-le.
@@ -112,11 +115,19 @@ Façon de faire :
         mapOf(
             "name" to "chercher",
             "description" to "Cherche quelque chose ou quelqu'un du regard : là où tu regardes, puis tout autour sur 360° " +
-                "(deux hauteurs). Dès que c'est trouvé, ta tête se tourne vers lui et le suit. Personnes, animaux et objets " +
-                "courants : détecteur rapide du téléphone ; le reste : ta vision Gemini (plus lent).",
+                "(deux hauteurs). Dès que c'est trouvé, ta tête se tourne vers lui. Personnes, animaux et objets courants : " +
+                "détecteur rapide du téléphone, puis vérifié par Gemini Robotics-ER ; le reste (ou si le détecteur ne trouve " +
+                "pas) : Gemini Robotics-ER à chaque arrêt (plus lent, mais il voit les petits objets et estime la distance).",
             "parameters" to obj(mapOf(
                 "objet" to str("ce qu'il faut chercher, en français (« personne », « le chien », « mes clés », « la plante verte »)"),
             ), listOf("objet")),
+        ),
+        mapOf(
+            "name" to "regarder_ce_que_je_montre",
+            "description" to "La personne te montre quelque chose du doigt (« regarde ça », « qu'est-ce que je montre ? ») : " +
+                "Gemini Robotics-ER suit la direction de son bras, ta tête se tourne vers ce qu'elle montre, et tu sais ce " +
+                "que c'est. Ensuite, regarde la nouvelle image pour en parler.",
+            "parameters" to obj(emptyMap()),
         ),
         mapOf(
             "name" to "regarder_autour",
@@ -248,6 +259,13 @@ Façon de faire :
             "name" to "arrete",
             "description" to "Arrête tout mouvement (roues, tête, suivi).",
             "parameters" to obj(emptyMap()),
+        ),
+        mapOf(
+            "name" to "aller_vers",
+            "description" to "Va avec tes roues vers quelque chose que tu vois ou que tu peux trouver autour de toi (« va vers " +
+                "le canapé », « approche-toi de la plante ») : Gemini Robotics-ER repère l'endroit au sol et la distance, tu " +
+                "avances par étapes et t'arrêtes à ~50 cm (ou sur un obstacle).",
+            "parameters" to obj(mapOf("objet" to str("vers quoi aller, en français")), listOf("objet")),
         ),
         mapOf(
             "name" to "aller_a",

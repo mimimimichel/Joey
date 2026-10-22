@@ -152,6 +152,105 @@ class GeminiVision(private val apiKey: () -> String) {
         throw IOException("Gemini indisponible (${last?.message})")
     }
 
+    // ---- Gemini Robotics-ER : comprendre l'espace -------------------------------------------------
+    /** Robotics-ER refusé (quota…) : on passe aux modèles Flash jusqu'à cette heure. */
+    @Volatile private var erDownUntil = 0L
+
+    /** Robotics-ER d'abord (sauf s'il vient d'être refusé), puis les modèles Flash. */
+    private fun <T> spatial(block: (model: String, key: String) -> T): T {
+        val key = apiKey()
+        if (key.isBlank()) throw IllegalStateException("clé Gemini manquante")
+        var last: Exception? = null
+        val models = if (System.currentTimeMillis() < erDownUntil) MODELS.drop(1) else MODELS
+        for (model in models) {
+            try {
+                return block(model, key)
+            } catch (e: ModelUnavailable) {
+                if (model == MODELS[0]) erDownUntil = System.currentTimeMillis() + 5 * 60_000L
+                Log.w(TAG, "$model indisponible : ${e.message}")
+                last = e
+            }
+        }
+        throw IOException("vision Gemini indisponible (${last?.message})")
+    }
+
+    /** Un objet repéré : où dans l'image (x, y de 0 à 1), son cadre, sa distance estimée, et ce qu'on voit. */
+    class Spot(val found: Boolean, val confidence: Double, val x: Double, val y: Double, val box: Box?,
+               val distance: Double?, val description: String, val model: String)
+
+    /**
+     * Repère [target] sur l'image : point au centre de l'objet (ou, si [floor], là où il touche le sol, pour y aller
+     * avec les roues), cadre, distance estimée depuis la caméra. found = false s'il n'est pas vraiment visible.
+     */
+    fun locate(jpegBase64: String, target: String, floor: Boolean = false): Spot = spatial { model, key ->
+        val schema = JSONObject("""
+        {"type":"object","properties":{
+          "found":{"type":"boolean","description":"true seulement si l'objet est vraiment visible sur l'image"},
+          "confidence":{"type":"number","description":"0 à 1"},
+          "point":{"type":"array","items":{"type":"integer"},"description":"[y, x] entre 0 et 1000"},
+          "box_2d":{"type":"array","items":{"type":"integer"},"description":"[ymin, xmin, ymax, xmax] entre 0 et 1000"},
+          "distance_m":{"type":"number","description":"distance estimée entre la caméra et l'objet, en mètres"},
+          "description":{"type":"string","description":"une phrase en français : l'objet et où il est, ou ce qu'on voit à la place"}
+        },"required":["found","confidence","description"]}
+        """.trimIndent())
+        val where = if (floor) "Le point doit être sur le sol, juste devant l'objet (là où un robot à roues irait pour l'atteindre)."
+            else "Le point doit être au centre de l'objet."
+        val prompt = "Image de la caméra d'un petit robot de maison (hauteur ~40 cm). Objet cherché : « $target ».\n" +
+            "Regarde toute l'image, y compris les bords et les petits objets. S'il est visible, found = true, pointe-le, " +
+            "encadre-le et estime sa distance. $where Sinon found = false et dis ce que tu vois. N'invente rien : " +
+            "en cas de doute, confidence basse."
+        val j = generateWithImage(model, key, jpegBase64, prompt, schema)
+        val pt = j.optJSONArray("point")
+        val bx = j.optJSONArray("box_2d")
+        val box = if (bx != null && bx.length() == 4) {
+            val y0 = bx.optDouble(0) / 1000; val x0 = bx.optDouble(1) / 1000
+            val y1 = bx.optDouble(2) / 1000; val x1 = bx.optDouble(3) / 1000
+            Box(((x0 + x1) / 2).coerceIn(0.0, 1.0), ((y0 + y1) / 2).coerceIn(0.0, 1.0), kotlin.math.abs(x1 - x0), kotlin.math.abs(y1 - y0))
+        } else null
+        val (x, y) = when {
+            pt != null && pt.length() == 2 -> (pt.optDouble(1) / 1000).coerceIn(0.0, 1.0) to (pt.optDouble(0) / 1000).coerceIn(0.0, 1.0)
+            box != null -> box.cx to (if (floor) (box.cy + box.h / 2).coerceAtMost(1.0) else box.cy)
+            else -> 0.5 to 0.5
+        }
+        val found = j.optBoolean("found") && (pt != null || box != null)
+        Spot(found, j.optDouble("confidence", 0.0), x, y, box,
+            j.optDouble("distance_m", Double.NaN).takeIf { !it.isNaN() && it > 0 && it < 30 }, j.optString("description"), model)
+    }
+
+    /** Ce qu'une personne montre du doigt. */
+    class Pointing(val pointing: Boolean, val target: String, val inImage: Boolean, val x: Double, val y: Double,
+                   val direction: String, val angle: Double?, val description: String)
+
+    /**
+     * Une personne montre quelque chose du doigt sur l'image : quoi, et où. Si l'objet est dans l'image, on a son point ;
+     * sinon la direction à prendre, vue du robot (gauche, droite, haut, bas, derrière lui), et l'angle estimé.
+     */
+    fun pointedAt(jpegBase64: String): Pointing = spatial { model, key ->
+        val schema = JSONObject("""
+        {"type":"object","properties":{
+          "montre":{"type":"boolean","description":"true si une personne montre clairement quelque chose (doigt ou bras tendu)"},
+          "objet":{"type":"string","description":"ce qu'elle montre, nom court en français (« la lampe », « la porte »), ou « inconnu »"},
+          "dans_image":{"type":"boolean","description":"true si ce qu'elle montre est visible sur l'image"},
+          "point":{"type":"array","items":{"type":"integer"},"description":"[y, x] de ce qu'elle montre, entre 0 et 1000, s'il est dans l'image"},
+          "direction":{"type":"string","enum":["gauche","droite","haut","bas","derriere_le_robot","devant"],"description":"si ce n'est pas dans l'image : de quel côté le robot doit tourner la tête pour le voir (gauche/droite DU ROBOT, c'est-à-dire de l'image)"},
+          "angle_deg":{"type":"number","description":"si ce n'est pas dans l'image : de combien de degrés il faudrait tourner, à peu près"},
+          "description":{"type":"string","description":"une phrase : ce que la personne montre"}
+        },"required":["montre","objet","dans_image","description"]}
+        """.trimIndent())
+        val prompt = "Image de la caméra d'un petit robot de maison. La personne sur l'image montre peut-être quelque chose du " +
+            "doigt ou du bras. Suis la direction de son bras et de son doigt (de l'épaule vers la main, et au-delà) et dis ce " +
+            "qu'elle montre. Si c'est visible sur l'image, pointe-le. Sinon, dis de quel côté le robot doit tourner la tête : " +
+            "la gauche du robot est la gauche de l'image. N'invente rien."
+        val j = generateWithImage(model, key, jpegBase64, prompt, schema)
+        val pt = j.optJSONArray("point")
+        val inImage = j.optBoolean("dans_image") && pt != null && pt.length() == 2
+        Pointing(j.optBoolean("montre"), j.optString("objet", "inconnu"), inImage,
+            if (inImage) (pt!!.optDouble(1) / 1000).coerceIn(0.0, 1.0) else 0.5,
+            if (inImage) (pt!!.optDouble(0) / 1000).coerceIn(0.0, 1.0) else 0.5,
+            j.optString("direction", ""), j.optDouble("angle_deg", Double.NaN).takeIf { !it.isNaN() },
+            j.optString("description"))
+    }
+
     /** Question sur une image (en bonne résolution) : réponse courte en français. */
     fun ask(jpegBase64: String, question: String): String {
         val schema = JSONObject("{\"type\":\"object\",\"properties\":{\"reponse\":{\"type\":\"string\"}},\"required\":[\"reponse\"]}")

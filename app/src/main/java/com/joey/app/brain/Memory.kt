@@ -15,9 +15,21 @@ import java.util.Locale
  */
 class Memory(private val file: File) {
     /** [auto] : extrait automatiquement d'une conversation (sinon : retenu par Joey lui-même). */
-    class Note(val text: String, val time: Long, val auto: Boolean = false)
+    /** [id] : identifiant stable (pour partager la mémoire entre les téléphones). */
+    class Note(val text: String, val time: Long, val auto: Boolean = false, val id: String = makeId(text, time))
+
+    companion object {
+        fun makeId(text: String, time: Long): String =
+            java.security.MessageDigest.getInstance("SHA-1").digest("$time|$text".toByteArray()).joinToString("") { "%02x".format(it) }.take(20)
+    }
 
     private val notes = ArrayList<Note>()
+    /** Partage : souvenirs à envoyer, et souvenirs effacés (pour les effacer aussi sur l'autre téléphone). */
+    private val dirty = LinkedHashSet<String>()
+    private val deleted = LinkedHashSet<String>()
+    private val syncFile = File(file.path + ".partage")
+    /** Appelé quand la mémoire change (pour partager bientôt). */
+    @Volatile var onChange: (() -> Unit)? = null
 
     init {
         runCatching {
@@ -25,10 +37,50 @@ class Memory(private val file: File) {
                 val a = JSONArray(file.readText())
                 for (i in 0 until a.length()) {
                     val o = a.getJSONObject(i)
-                    notes.add(Note(o.getString("text"), o.getLong("time"), o.optBoolean("auto", false)))
+                    val t = o.getString("text"); val tm = o.getLong("time")
+                    notes.add(Note(t, tm, o.optBoolean("auto", false), o.optString("id").ifEmpty { makeId(t, tm) }))
                 }
             }
         }
+        runCatching {
+            if (syncFile.exists()) {
+                val o = JSONObject(syncFile.readText())
+                o.optJSONArray("dirty")?.let { a -> for (i in 0 until a.length()) dirty.add(a.getString(i)) }
+                o.optJSONArray("deleted")?.let { a -> for (i in 0 until a.length()) deleted.add(a.getString(i)) }
+            } else notes.forEach { dirty.add(it.id) } // première fois : tout est à partager
+        }
+    }
+
+    private fun saveSync() {
+        runCatching { syncFile.writeText(JSONObject().put("dirty", JSONArray(dirty.toList())).put("deleted", JSONArray(deleted.toList().takeLast(3000))).toString()) }
+    }
+
+    private fun gone(n: Note) { deleted.add(n.id); dirty.remove(n.id) }
+
+    /** À envoyer : souvenirs nouveaux ou modifiés, et souvenirs effacés (id). */
+    fun pending(): List<Note> = synchronized(notes) { notes.filter { it.id in dirty } }
+
+    /** Envoyés avec succès. */
+    fun markSent(ids: Collection<String>, tombstones: Collection<String>) = synchronized(notes) {
+        dirty.removeAll(ids.toSet()); sentTombstones.addAll(tombstones); saveSync()
+    }
+    private val sentTombstones = HashSet<String>()
+    fun unsentTombstones(): List<String> = synchronized(notes) { deleted.filter { it !in sentTombstones } }
+
+    /** Souvenirs venus de l'autre téléphone. Renvoie le nombre de changements. */
+    fun mergeRemote(rows: List<Triple<Note, Boolean, String>>): Int = synchronized(notes) {
+        var n = 0
+        for ((note, removed, _) in rows) {
+            if (removed) {
+                if (notes.removeAll { it.id == note.id }) n++
+                deleted.add(note.id); sentTombstones.add(note.id)
+            } else if (notes.none { it.id == note.id } && note.id !in deleted && notes.none { similar(it.text, note.text) }) {
+                notes.add(note); n++
+            }
+        }
+        if (n > 0) { notes.sortBy { it.time }; save(silent = true) }
+        saveSync()
+        n
     }
 
     val size: Int get() = synchronized(notes) { notes.size }
@@ -41,14 +93,16 @@ class Memory(private val file: File) {
         if (t.isEmpty()) return false
         synchronized(notes) {
             if (notes.any { similar(it.text, t) }) return false
-            notes.add(Note(t, System.currentTimeMillis(), auto))
+            val note = Note(t, System.currentTimeMillis(), auto)
+            notes.add(note)
+            dirty.add(note.id)
             while (notes.size > 1000) notes.removeAt(0)
             save()
         }
         return true
     }
 
-    fun remove(note: Note) = synchronized(notes) { notes.remove(note); save() }
+    fun remove(note: Note) = synchronized(notes) { if (notes.remove(note)) gone(note); save() }
 
     /**
      * Ménage (proposé par Gemini, appliqué ici) : retire les souvenirs [remove] (numéros dans [all]) et remplace chaque
@@ -57,34 +111,39 @@ class Memory(private val file: File) {
      */
     fun applyCleanup(snapshot: List<Note>, remove: Set<Int>, merges: List<Pair<Set<Int>, String>>): Pair<Int, Int> = synchronized(notes) {
         runCatching { if (file.exists()) file.copyTo(File(file.parentFile, file.name + ".avant-menage"), overwrite = true) }
-        val gone = HashSet<Note>()
-        remove.mapNotNull { snapshot.getOrNull(it) }.forEach { gone.add(it) }
+        val out = HashSet<Note>()
+        remove.mapNotNull { snapshot.getOrNull(it) }.forEach { out.add(it) }
         var merged = 0
         for ((group, text) in merges) {
             val members = group.mapNotNull { snapshot.getOrNull(it) }
             if (members.size < 2 || text.isBlank()) continue
-            gone.addAll(members)
-            notes.add(Note(text.trim().take(500), members.maxOf { it.time }, members.all { it.auto }))
+            out.addAll(members)
+            val m = Note(text.trim().take(500), members.maxOf { it.time }, members.all { it.auto })
+            notes.add(m); dirty.add(m.id)
             merged++
         }
-        notes.removeAll { n -> gone.any { it === n } }
+        out.forEach { gone(it) }
+        notes.removeAll { n -> out.any { it === n } }
         save()
-        gone.size to merged
+        out.size to merged
     }
 
     /** Oublie les souvenirs qui parlent de [what]. Renvoie ceux effacés. */
     fun forget(what: String): List<String> = synchronized(notes) {
         val hits = search(what, 20)
+        hits.forEach { gone(it) }
         notes.removeAll { n -> hits.any { it === n } }
         save()
         hits.map { it.text }
     }
 
-    fun clear() = synchronized(notes) { notes.clear(); save() }
+    fun clear() = synchronized(notes) { notes.forEach { gone(it) }; notes.clear(); save() }
 
-    private fun save() {
+    private fun save(silent: Boolean = false) {
         val a = JSONArray()
-        notes.forEach { a.put(JSONObject().put("text", it.text).put("time", it.time).put("auto", it.auto)) }
+        notes.forEach { a.put(JSONObject().put("text", it.text).put("time", it.time).put("auto", it.auto).put("id", it.id)) }
+        saveSync()
+        if (!silent) runCatching { onChange?.invoke() }
         runCatching {
             val tmp = File(file.path + ".tmp")
             tmp.writeText(a.toString())

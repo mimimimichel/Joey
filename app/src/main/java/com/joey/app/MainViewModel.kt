@@ -111,6 +111,46 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     val memory = Memory(File(app.filesDir, "memoire.json"))
     private val people = com.joey.app.brain.People(File(app.filesDir, "personnes.json"))
+
+    /** Code du foyer : celui des réglages, sinon celui de la compilation (le même sur tous les téléphones). */
+    private fun foyerCode(): String {
+        val saved = prefs.getString("foyer_code", null) ?: ""
+        if (saved.isNotBlank()) return saved
+        // Gardé sur le téléphone dès la première fois : les versions compilées ailleurs (le PC) le gardent.
+        if (BuildConfig.JOEY_FOYER.isNotBlank()) prefs.edit().putString("foyer_code", BuildConfig.JOEY_FOYER).apply()
+        return BuildConfig.JOEY_FOYER
+    }
+
+    /** Souvenirs et visages partagés entre les téléphones de la maison (Supabase, protégé par le code du foyer). */
+    private val shared by lazy {
+        com.joey.app.brain.SharedMemory(
+            url = BuildConfig.SUPABASE_URL, key = BuildConfig.SUPABASE_KEY, foyer = ::foyerCode,
+            device = (prefs.getString("device_id", null) ?: "?") + "-" + android.os.Build.MODEL,
+            memory = memory, people = people,
+            lastSync = { prefs.getString("shared_last_sync", "") ?: "" },
+            setLastSync = { prefs.edit().putString("shared_last_sync", it).apply() },
+            log = ::log,
+        )
+    }
+    @Volatile private var syncWantedAt = 0L
+    @Volatile private var lastSyncAt = 0L
+    @Volatile var syncStatus = ""
+        private set
+
+    /** Partage maintenant (sur un fil à part). */
+    fun syncShared(manual: Boolean = false) = thread(name = "partage", isDaemon = true) {
+        if (cleared || android.os.Build.FINGERPRINT.contains("robolectric", ignoreCase = true)) return@thread
+        if (!shared.configured) { syncStatus = "pas de code du foyer"; return@thread }
+        lastSyncAt = System.currentTimeMillis(); syncWantedAt = 0
+        val r = runCatching { shared.sync() }.getOrElse { "échec : ${it.message}" }
+        syncStatus = r + " (" + timeFmt.format(Date()) + ")"
+        if (manual || (r != "à jour" && !r.startsWith("échec"))) log("🔄 Mémoire partagée : $r")
+        if (r.startsWith("échec")) journal.write("erreur", "mémoire partagée : $r")
+        refreshSettings()
+    }
+
+    fun setFoyerCode(code: String) { prefs.edit().putString("foyer_code", code.trim()).putString("shared_last_sync", "").apply(); syncShared(true) }
+    fun foyerCodeForUi(): String = foyerCode()
     private val faceId = com.joey.app.senses.FaceId(app)
     val voices = com.joey.app.brain.Voices(File(app.filesDir, "voix"))
     val home = com.joey.app.brain.HomeAssistant({ prefs.getString("ha_url", "") ?: "" }, { prefs.getString("ha_token", "") ?: "" })
@@ -890,6 +930,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val active = live != null || s.busy || questFollowing || s.tracking != null
             if (active || follower.sees) lastLifeAt = now
             runCatching { journalPose(now) }
+            if ((syncWantedAt in 1..now) || now - lastSyncAt > 5 * 60_000L) { lastSyncAt = now; syncWantedAt = 0; syncShared() }
             runCatching {
                 val idle = live == null && !s.busy && now - follower.seenAt > 5 * 60_000L && now - motionAt > 5 * 60_000L &&
                     !flag("watch", false) && !questFollowing
@@ -2766,6 +2807,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             log("⛔ Quota Gemini atteint pour $model, jusqu'à " +
                 java.text.SimpleDateFormat("HH:mm", java.util.Locale.FRENCH).format(Date(until)))
         }
+        // Mémoire partagée : 15 s après un changement, toutes les 5 min, et au démarrage.
+        memory.onChange = { if (syncWantedAt == 0L) syncWantedAt = System.currentTimeMillis() + 15_000 }
+        people.onChange = { if (syncWantedAt == 0L) syncWantedAt = System.currentTimeMillis() + 15_000 }
+        syncWantedAt = System.currentTimeMillis() + 5000
         camera.deviceOrientation = { sensors.deviceOrientation }
         // En suivant quelqu'un, les petits mouvements expressifs sont atténués (la tête reste calme sur la personne).
         head.expression = {

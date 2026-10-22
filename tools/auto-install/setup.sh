@@ -32,6 +32,8 @@ if [ ! -f "$HOME/.config/joey/env" ]; then
 GEMINI_API_KEY=
 SUPABASE_URL=
 SUPABASE_KEY=
+# Code du foyer (mémoire partagée entre les téléphones) : facultatif, les téléphones le gardent déjà
+JOEY_FOYER=
 # Facultatif : adresse fixe du téléphone (ip:port, débogage sans fil) et sujet ntfy pour être prévenu
 JOEY_PHONE=
 NTFY_TOPIC=

@@ -12,6 +12,29 @@ class People(private val file: File) {
     class Person(val name: String, val prints: MutableList<FloatArray>)
 
     private val people = ArrayList<Person>()
+    /** Partage : visages changés à envoyer, et prénoms oubliés. */
+    private val dirty = LinkedHashSet<String>()
+    private val forgotten = LinkedHashSet<String>()
+    @Volatile var onChange: (() -> Unit)? = null
+
+    /** À envoyer : (prénom, empreintes) changés, et prénoms oubliés. */
+    fun pending(): Pair<List<Pair<String, List<FloatArray>>>, List<String>> = synchronized(people) {
+        people.filter { it.name.lowercase() in dirty }.map { it.name to it.prints.toList() } to forgotten.toList()
+    }
+
+    fun markSent() = synchronized(people) { dirty.clear(); forgotten.clear() }
+
+    /** Visages venus de l'autre téléphone : empreintes réunies (sans doublons, 40 au plus), ou prénom oublié. */
+    fun mergeRemote(name: String, prints: List<FloatArray>, removed: Boolean): Boolean = synchronized(people) {
+        val n = name.trim().replaceFirstChar { it.uppercase() }
+        if (removed) return@synchronized people.removeAll { it.name.equals(n, ignoreCase = true) }.also { if (it) save(silent = true) }
+        val p = people.firstOrNull { it.name.equals(n, ignoreCase = true) } ?: Person(n, ArrayList()).also { people.add(it) }
+        var added = 0
+        for (v in prints) if (p.prints.none { dot(it, v) > 0.995f }) { p.prints.add(v); added++ }
+        while (p.prints.size > 40) p.prints.removeAt(0)
+        if (added > 0) { dirty.add(n.lowercase()); save(silent = true) }
+        added > 0
+    }
 
     init {
         runCatching {
@@ -26,6 +49,7 @@ class People(private val file: File) {
                         list.add(FloatArray(v.length()) { v.getDouble(it).toFloat() })
                     }
                     people.add(Person(o.getString("name"), list))
+                    dirty.add(o.getString("name").lowercase()) // envoyé une fois à chaque démarrage (petit)
                 }
             }
         }
@@ -39,16 +63,19 @@ class People(private val file: File) {
         val p = people.firstOrNull { it.name.equals(n, ignoreCase = true) } ?: Person(n, ArrayList()).also { people.add(it) }
         p.prints.addAll(prints)
         while (p.prints.size > 40) p.prints.removeAt(0)
+        dirty.add(n.lowercase()); forgotten.remove(n.lowercase())
         save()
     }
 
     fun forget(name: String): Boolean = synchronized(people) {
         val r = people.removeAll { it.name.equals(name.trim(), ignoreCase = true) }
+        if (r) { forgotten.add(name.trim().lowercase()); dirty.remove(name.trim().lowercase()) }
         save()
         r
     }
 
-    private fun save() {
+    private fun save(silent: Boolean = false) {
+        if (!silent) runCatching { onChange?.invoke() }
         val a = JSONArray()
         people.forEach { p ->
             val ps = JSONArray()

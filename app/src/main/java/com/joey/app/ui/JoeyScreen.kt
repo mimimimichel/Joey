@@ -369,6 +369,15 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 }, modifier = Modifier.fillMaxWidth()) { Text("📥 Enregistrer le journal (Téléchargements)") }
                 saved?.let { Text(it, fontSize = 12.sp, color = Color.Gray) }
                 Toggle("Envoyer le journal à Claude (pour l'améliorer)", vm.flagValue("upload_journal", true)) { vm.setFlagValue("upload_journal", it) }
+                // Mémoire partagée entre les téléphones (même code sur chacun).
+                var foyer by remember { mutableStateOf(vm.foyerCodeForUi()) }
+                OutlinedTextField(value = foyer, onValueChange = { foyer = it.trim() }, singleLine = true,
+                    label = { Text("Code du foyer (mémoire partagée)") }, visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth())
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { vm.setFoyerCode(foyer) }) { Text("Partager maintenant") }
+                    Text(vm.syncStatus, fontSize = 12.sp, color = Color.Gray)
+                }
                 Toggle("Voix de robot", robot) { robot = it }
                 Toggle("Joey voit (caméra)", camera) { camera = it }
                 Toggle("Caméra avant (côté écran)", front) { front = it }

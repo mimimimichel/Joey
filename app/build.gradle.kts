@@ -18,11 +18,13 @@ android {
         applicationId = "com.joey.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 39
-        versionName = "0.39"
+        versionCode = 40
+        versionName = "0.40"
         buildConfigField("String", "GEMINI_KEY", "\"" + geminiKey + "\"")
         // Journal envoyé à Supabase (projet « joey ») : injecté à la compilation, comme la clé Gemini.
         buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("supabaseUrl") as String? ?: System.getenv("SUPABASE_URL") ?: "") + "\"")
+        // Code du foyer (mémoire partagée entre les téléphones) : injecté, jamais dans le dépôt.
+        buildConfigField("String", "JOEY_FOYER", "\"" + (project.findProperty("joeyFoyer") as String? ?: System.getenv("JOEY_FOYER") ?: "") + "\"")
         buildConfigField("String", "SUPABASE_KEY", "\"" + (project.findProperty("supabaseKey") as String? ?: System.getenv("SUPABASE_KEY") ?: "") + "\"")
         // Seulement les processeurs ARM 64 bits (S10, S8+ et presque tous depuis 2017) : APK bien plus léger.
         // -PallAbis=true pour tout inclure.

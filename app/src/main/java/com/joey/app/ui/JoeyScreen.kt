@@ -134,6 +134,7 @@ fun JoeyScreen(vm: MainViewModel) {
                     GimbalState.OFF -> "🦒 Nacelle déconnectée"
                 }) { headPanel = true }
                 if (s.watch) Chip("🛡 Garde")
+                s.roomba?.let { Chip("🛞 $it") }
                 if (s.headsetFollow) Chip("🥽 Suit le casque")
                 else if (s.tracking != null) Chip("🔎 ${s.tracking}")
                 else if (s.followFace && s.gimbal == GimbalState.READY) Chip(when {
@@ -226,6 +227,14 @@ private fun HeadPanel(vm: MainViewModel, s: com.joey.app.UiState, pose: String, 
             }
             FilledTonalButton(onClick = vm::sweep, modifier = Modifier.fillMaxWidth()) { Text("Regarder autour") }
             FilledTonalButton(onClick = vm::calibrateHead, modifier = Modifier.fillMaxWidth()) { Text("Mesurer la tête (vitesse et sens)") }
+            if (s.roomba == null) {
+                Button(onClick = { vm.connectRoomba() }, modifier = Modifier.fillMaxWidth()) { Text("🛞 Brancher le Roomba (roues)") }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("🛞 Roomba ${s.roomba}", color = ACCENT, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    TextButton(onClick = vm::disconnectRoomba) { Text("Débrancher") }
+                }
+            }
             if (s.headsetUrl == null) {
                 Button(onClick = { vm.setHeadset(true) }, modifier = Modifier.fillMaxWidth()) { Text("🥽 Vue dans le casque (Quest)") }
             } else {

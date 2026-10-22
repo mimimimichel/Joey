@@ -59,6 +59,13 @@ class MainActivity : ComponentActivity() {
         if (bt) vm.connectGimbal() else vm.log("Permission Bluetooth refusée : la tête ne pourra pas bouger.")
         if (!granted(Manifest.permission.RECORD_AUDIO)) vm.log("Permission micro refusée : Joey ne t'entendra pas.")
         vm.updateWake()
+        vm.connectRoomba(quiet = true)
+    }
+
+    /** Carte USB-série du Roomba branchée pendant que Joey tourne. */
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED) vm.connectRoomba()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

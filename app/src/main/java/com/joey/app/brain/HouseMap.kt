@@ -65,13 +65,14 @@ class HouseMap(private val file: File) {
     fun place(name: String): Place? = synchronized(places) { places.firstOrNull { norm(it.name) == norm(name) } }
 
     /** Enregistre (ou remplace) le relevé d'un lieu. */
-    fun put(name: String, kind: String, description: String, items: List<Item>) = synchronized(places) {
+    fun put(name: String, kind: String, description: String, items: List<Item>, x: Double? = null, y: Double? = null) = synchronized(places) {
         val p = places.firstOrNull { norm(it.name) == norm(name) }
         if (p == null) {
-            places.add(Place(name.trim(), description, kind, items.toMutableList(), System.currentTimeMillis()))
+            places.add(Place(name.trim(), description, kind, items.toMutableList(), System.currentTimeMillis(), x, y))
         } else {
             p.items.clear(); p.items.addAll(items)
             p.description = description; p.kind = kind; p.updatedAt = System.currentTimeMillis()
+            if (x != null && y != null) { p.x = x; p.y = y }
         }
         save()
     }

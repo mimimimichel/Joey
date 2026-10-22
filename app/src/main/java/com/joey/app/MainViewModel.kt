@@ -61,6 +61,8 @@ data class UiState(
     /** Mode garde (journal + alertes), et sujet ntfy pour les alertes sur le téléphone de Michael. */
     val watch: Boolean = false,
     val ntfyTopic: String = "",
+    /** Roues (Roomba) : état affiché, ou null s'il n'est pas branché. */
+    val roomba: String? = null,
     val idleLife: Boolean = true,
     /** Vitesse de la tête, en % de la vitesse max mesurée. */
     val headSpeed: Int = 100,
@@ -620,6 +622,114 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun danceUi() = dance(20)
 
+    // ---- les roues : le Roomba ------------------------------------------------------------------
+    @Volatile var roomba: com.joey.app.robot.RoombaRobot? = null
+        private set
+    @Volatile private var roombaConnecting = false
+    @Volatile private var following = false
+
+    /** Branche le Roomba par la carte USB-série (en arrière-plan). [quiet] : pas de message si rien n'est branché. */
+    fun connectRoomba(quiet: Boolean = false) {
+        if (roomba != null || roombaConnecting) return
+        roombaConnecting = true
+        thread(name = "roomba", isDaemon = true) {
+            try {
+                val link = com.joey.app.robot.UsbSerial.open(getApplication())
+                val r = com.joey.app.robot.RoombaRobot(link, ::log)
+                r.connect()
+                roomba = r
+                log("🛞 Roomba branché : j'ai des roues !")
+                refreshRoomba()
+            } catch (e: Exception) {
+                if (!quiet) { log("Roomba : ${e.message}"); message("Roomba : ${e.message}") }
+            } finally {
+                roombaConnecting = false
+            }
+        }
+    }
+
+    fun disconnectRoomba() {
+        following = false
+        roomba?.disconnect()
+        roomba = null
+        refreshRoomba()
+    }
+
+    private fun refreshRoomba() {
+        val r = roomba
+        _state.update { it.copy(roomba = r?.let { x ->
+            (if (x.charging) "⚡ " else "") + "🔋" + (x.battery?.let { b -> "$b%" } ?: "?") + (if (x.onBase) " · sur sa base" else "")
+        }) }
+    }
+
+    private val noWheels = "tes roues (le Roomba) ne sont pas branchées : tu ne peux pas te déplacer pour l'instant"
+
+    /** Tourne le corps vers où regarde la tête ; la tête revient droit devant (le suivi recentre ensuite). */
+    private fun alignBodyWithHead(): Double {
+        val r = roomba ?: return 0.0
+        val pan = head.pose()?.first ?: return 0.0
+        if (kotlin.math.abs(pan) < 8) return 0.0
+        r.turn(pan)
+        head.look(-pan, null)
+        return pan
+    }
+
+    /** « Viens ici » : trouve la personne, se tourne vers elle, s'approche jusqu'à ~1 m. Bloquant. */
+    private fun comeHere(): String {
+        val r = roomba ?: return noWheels
+        if (!follower.sees && !searchLocal("personne", setOf("person"), keepMs = 2500)) return "je ne vois personne autour de moi"
+        repeat(8) { step ->
+            Thread.sleep(900) // le suivi centre la personne
+            alignBodyWithHead()
+            Thread.sleep(500)
+            val seen = seenNow().filter { it.label == "person" && it.score >= 0.5 }.maxByOrNull { it.box.h }
+            val faceBig = follower.sees && (faces.lastSize ?: 0f) >= 0.12f
+            if (faceBig || (seen != null && seen.box.h >= 0.85)) return "je suis arrivé près de toi"
+            if (seen == null && !follower.sees) return "je t'ai perdu de vue en route"
+            // Distance estimée d'après la taille de la silhouette (1,7 m) ; on s'arrête à ~1 m.
+            val d = seen?.let { 0.9 / it.box.h.coerceAtLeast(0.15) } ?: 1.5
+            val res = r.drive((d - 1.0).coerceIn(0.15, 0.6))
+            if (res.contains("obstacle") || res.contains("vide") || res.contains("interrompu")) return "je me suis arrêté : $res"
+            if (step == 7) return "je me suis approché autant que j'ai pu"
+        }
+        return "je suis là"
+    }
+
+    /** « Suis-moi » : la tête suit la personne, le corps suit la tête et garde ~1,5 m. */
+    private fun followMe(minutes: Double) {
+        val r = roomba ?: return
+        following = true
+        trackName = "personne"
+        trackLabels = setOf("person")
+        trackUntil = System.currentTimeMillis() + (minutes * 60_000).toLong()
+        follower.pausedUntil = 0
+        _state.update { it.copy(tracking = "je te suis") }
+        thread(name = "suivre", isDaemon = true) {
+            var lostAt = 0L
+            try {
+                while (following && System.currentTimeMillis() < trackUntil && roomba === r) {
+                    Thread.sleep(150)
+                    val pan = head.pose()?.first ?: 0.0
+                    val p = seenNow().filter { it.label == "person" && it.score >= 0.5 }.maxByOrNull { it.box.h }
+                    if (p == null && !follower.sees) {
+                        if (lostAt == 0L) lostAt = System.currentTimeMillis()
+                        r.velocity(0.0, 0.0, 300)
+                        if (System.currentTimeMillis() - lostAt > 8000) { log("🛞 Je t'ai perdu"); break }
+                        continue
+                    }
+                    lostAt = 0L
+                    val h = p?.box?.h ?: 0.6
+                    val fwd = ((0.6 - h) * 0.8).coerceIn(-0.08, r.maxSpeed)
+                    r.velocity(fwd, (pan * 1.5).coerceIn(-60.0, 60.0), 400)
+                }
+            } finally {
+                r.velocity(0.0, 0.0, 100)
+                following = false
+                trackUntil = 0
+            }
+        }
+    }
+
     // ---- carte de la maison (Gemini Robotics-ER) -------------------------------------------------
     /**
      * Relève le lieu où Joey se trouve : tour du regard en 6 arrêts (60°), à chaque arrêt Robotics-ER pointe les éléments
@@ -665,7 +775,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     kotlin.math.abs(Head.wrap(k.heading - it.heading)) < 25) }) kept.add(it)
         }
         val kind = kinds.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key ?: "pièce"
-        houseMap.put(name, kind, descs.joinToString(" ").take(700), kept)
+        houseMap.put(name, kind, descs.joinToString(" ").take(700), kept, roomba?.x, roomba?.y)
         currentPlace = houseMap.place(name)?.name ?: name
         log("🗺 $name relevé : ${kept.size} éléments ($kind)")
         return "lieu « $name » relevé ($kind) : ${kept.size} éléments, dont " + kept.take(12).joinToString(", ") { it.name } +
@@ -1045,9 +1155,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val r = if (geste != "aucun" && gimbal.ready) {
                     moveAsync(holdMs = 1500) {
                         when (geste) {
-                            "oui" -> head.nod()
-                            "non" -> head.shake()
-                            "hesiter" -> head.hesitate()
+                            "oui" -> { roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.YES); head.nod() }
+                            "non" -> { roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.NO); head.shake() }
+                            "hesiter" -> { roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.HESITATE); head.hesitate() }
                             else -> ""
                         }
                     }
@@ -1103,6 +1213,54 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val fmt = SimpleDateFormat("EEE d HH:mm", Locale.FRENCH)
                 mapOf("journal" to if (ev.isEmpty()) "rien de noté" else ev.joinToString("\n") { fmt.format(Date(it.time)) + " — " + it.text })
             }
+            "avancer" -> {
+                val r = roomba ?: return mapOf("result" to noWheels)
+                val m = ((args["metres"] as? Number)?.toDouble() ?: 0.5).coerceIn(-2.0, 3.0)
+                log("🛞 avancer ${"%.2f".format(m)} m")
+                mapOf("result" to busyLearn { r.drive(m) })
+            }
+            "tourner_corps" -> {
+                val r = roomba ?: return mapOf("result" to noWheels)
+                val d = ((args["degres"] as? Number)?.toDouble() ?: 90.0).coerceIn(-360.0, 360.0)
+                mapOf("result" to busyLearn { r.turn(d) })
+            }
+            "viens_ici" -> {
+                if (roomba == null) return mapOf("result" to noWheels)
+                log("🛞 J'arrive")
+                var res = ""
+                moveSync(holdMs = 0, timeoutMs = 90_000) { res = comeHere(); res }
+                mapOf("result" to res)
+            }
+            "suis_moi" -> {
+                if (roomba == null) return mapOf("result" to noWheels)
+                followMe(((args["minutes"] as? Number)?.toDouble() ?: 3.0).coerceIn(0.5, 15.0))
+                mapOf("result" to "tu suis la personne (dis-lui de marcher doucement) ; « arrete » pour t'arrêter")
+            }
+            "arrete" -> {
+                following = false
+                roomba?.stop()
+                motionJob?.cancel(true)
+                head.stop()
+                mapOf("result" to "arrêté")
+            }
+            "rentrer_base" -> {
+                val r = roomba ?: return mapOf("result" to noWheels)
+                following = false
+                mapOf("result" to r.seekDock())
+            }
+            "aller_a" -> {
+                val r = roomba ?: return mapOf("result" to noWheels)
+                val lieu = args["lieu"] as? String ?: ""
+                val p = houseMap.place(lieu) ?: return mapOf("result" to "« $lieu » n'est pas sur ta carte")
+                val px = p.x; val py = p.y
+                if (px == null || py == null) return mapOf("result" to "je ne connais pas la position de « $lieu » (relevé fait sans les roues) : " +
+                    "il faudra le relever à nouveau en y étant, avec les roues branchées")
+                log("🛞 Je vais : ${p.name}")
+                var res = ""
+                moveSync(holdMs = 1000, timeoutMs = 120_000) { res = r.goTo(px, py); res }
+                if (!res.contains("obstacle") && !res.contains("interrompu")) currentPlace = p.name
+                mapOf("result" to res)
+            }
             "cartographier" -> {
                 if (!gimbal.ready) return mapOf("result" to noHead)
                 if (!flag("camera", true)) return mapOf("result" to "ta caméra est coupée")
@@ -1144,7 +1302,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "nacelle" to if (gimbal.ready) "connectée" else "non connectée",
                     "tete" to (pose?.let { "%.0f° %s, inclinée à %.0f°".format(kotlin.math.abs(it.first), if (it.first >= 0) "à droite" else "à gauche", it.second) } ?: "position inconnue"),
                     "batterie_nacelle_pourcent" to gimbal.battery.takeIf { it >= 0 },
-                    "roues" to "pas encore branchées (Roomba)",
+                    "roues" to (roomba?.let { r -> "branchées, batterie ${r.battery ?: "?"} %" + (if (r.onBase) ", sur ta base" else "") +
+                        (if (r.charging) ", en charge" else "") + (r.safetyNote?.let { n -> ", dernier arrêt de sécurité : $n" } ?: "") }
+                        ?: "pas branchées (Roomba)"),
                     "souvenirs" to memory.size,
                     "visage_vu" to follower.sees,
                     "personne_reconnue" to (seeing() ?: "personne de connu en vue"),
@@ -1160,6 +1320,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun setMood(m: Mood) {
         _state.update { it.copy(mood = m) }
+        roomba?.let { r ->
+            when (m) {
+                Mood.CONTENT, Mood.AMUSE -> { r.sing(com.joey.app.robot.RoombaRobot.Tune.HAPPY); r.lights(0) }
+                Mood.TRISTE -> { r.sing(com.joey.app.robot.RoombaRobot.Tune.SAD); r.lights(60, 120) }
+                Mood.ETONNE -> { r.sing(com.joey.app.robot.RoombaRobot.Tune.SURPRISED); r.lights(128, 255, spot = true) }
+                Mood.FACHE -> { r.sing(com.joey.app.robot.RoombaRobot.Tune.ANGRY); r.lights(255) }
+                Mood.FATIGUE, Mood.DORT -> { r.sing(com.joey.app.robot.RoombaRobot.Tune.SLEEPY); r.lights(0, 30) }
+                Mood.MEFIANT -> { r.sing(com.joey.app.robot.RoombaRobot.Tune.HESITATE); r.lights(180) }
+                else -> r.lights(0, 120)
+            }
+        }
         val at = System.currentTimeMillis() + 9000
         moodResetAt = at
         // L'expression s'efface toute seule après quelques secondes.

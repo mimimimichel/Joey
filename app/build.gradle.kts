@@ -94,4 +94,6 @@ dependencies {
     implementation("com.google.mediapipe:tasks-vision:0.10.20")
     // Reconnaissance des visages de la maison (MobileFaceNet, sur le téléphone : empreinte de 192 nombres par visage)
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    // Carte USB-série (FTDI, CH340, CP2102) pour piloter le Roomba
+    implementation("com.github.mik3y:usb-serial-for-android:3.8.1")
 }

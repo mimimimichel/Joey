@@ -53,8 +53,10 @@ Ton corps (pour l'instant) :
 - Tu sens l'orientation de ta tête avec les capteurs du téléphone (gyroscope, accéléromètre, boussole : outil « etat »).
 - Quelqu'un peut regarder par tes yeux avec un casque de réalité virtuelle (Quest) : ta tête suit alors son regard.
   Tu peux t'en amuser (« je te prête mes yeux »).
-- Bientôt tu auras des roues : un aspirateur Roomba. Pas encore branché : tu ne peux pas te déplacer.
-  Tu peux en parler avec un brin d'impatience.
+- Tes roues : un aspirateur Roomba (outils « avancer », « tourner_corps », « viens_ici », « suis_moi », « arrete »,
+  « aller_a », « rentrer_base »). S'il n'est pas branché, l'outil te le dit : parles-en avec un brin d'impatience.
+  Prudence : tu roules lentement, tu t'arrêtes au moindre obstacle, et jamais vers le chien.
+- Tu as aussi la voix du Roomba : de petites mélodies (comme R2-D2) qui accompagnent tes émotions toutes seules.
 
 Façon de faire :
 - Accorde tes paroles à tes mouvements : avant de regarder ou de chercher, dis au plus quelques mots (« je regarde »,
@@ -142,6 +144,41 @@ Façon de faire :
                 "question" to str("ce que tu veux savoir"),
                 "zone" to str("où regarder dans l'image", listOf("tout", "centre", "gauche", "droite", "haut", "bas")),
             ), listOf("question")),
+        ),
+        mapOf(
+            "name" to "avancer",
+            "description" to "Avance (ou recule si négatif) tout droit, en mètres. S'arrête au pare-chocs.",
+            "parameters" to obj(mapOf("metres" to num("distance en mètres (-2 à 3)")), listOf("metres")),
+        ),
+        mapOf(
+            "name" to "tourner_corps",
+            "description" to "Tourne tout ton corps (les roues) sur place : degrés, + = droite, - = gauche.",
+            "parameters" to obj(mapOf("degres" to num("angle en degrés")), listOf("degres")),
+        ),
+        mapOf(
+            "name" to "viens_ici",
+            "description" to "Va vers la personne qui t'appelle (tu la cherches, tu te tournes vers elle, tu t'approches à ~1 m).",
+            "parameters" to obj(emptyMap()),
+        ),
+        mapOf(
+            "name" to "suis_moi",
+            "description" to "Suis la personne en roulant (ta tête la suit, ton corps suit ta tête, à ~1,5 m).",
+            "parameters" to obj(mapOf("minutes" to num("durée max (défaut 3)"))),
+        ),
+        mapOf(
+            "name" to "arrete",
+            "description" to "Arrête tout mouvement (roues, tête, suivi).",
+            "parameters" to obj(emptyMap()),
+        ),
+        mapOf(
+            "name" to "aller_a",
+            "description" to "Va dans un lieu de ta carte (relevé avec les roues branchées).",
+            "parameters" to obj(mapOf("lieu" to str("nom du lieu")), listOf("lieu")),
+        ),
+        mapOf(
+            "name" to "rentrer_base",
+            "description" to "Rentre à ta base de charge (le Roomba la cherche tout seul).",
+            "parameters" to obj(emptyMap()),
         ),
         mapOf(
             "name" to "cartographier",

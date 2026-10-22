@@ -25,11 +25,15 @@ class FaceSense {
         )
     }
 
+    /** Taille du dernier visage trouvé (part de la largeur). */
+    @Volatile var lastSize: Float? = null
+        private set
+
     fun find(upright: Bitmap): SeenFace? {
         val faces = runCatching {
             Tasks.await(detector.process(InputImage.fromBitmap(upright, 0)), 500, TimeUnit.MILLISECONDS)
         }.getOrNull() ?: return null
-        val f = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() } ?: return null
+        val f = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() } ?: run { lastSize = null; return null }
         val b = f.boundingBox
         val w = upright.width.toFloat()
         val h = upright.height.toFloat()
@@ -38,7 +42,7 @@ class FaceSense {
             y = (b.exactCenterY() / h) * 2f - 1f,
             size = b.width() / w,
             box = android.graphics.Rect(b),
-        )
+        ).also { lastSize = it.size }
     }
 
     fun close() = runCatching { detector.close() }

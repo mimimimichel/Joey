@@ -24,7 +24,7 @@ import kotlinx.coroutines.isActive
 import kotlin.math.min
 import kotlin.random.Random
 
-enum class Mood { NEUTRE, CONTENT, TRISTE, ETONNE, FACHE, FATIGUE, AMUSE, MEFIANT, DORT }
+enum class Mood { NEUTRE, CONTENT, TRISTE, ETONNE, FACHE, FATIGUE, AMUSE, MEFIANT, DORT, ETOURDI }
 
 /** Ce que fait Joey en ce moment (change l'animation des yeux). */
 enum class Activity { REPOS, ECOUTE, PARLE, REFLECHIT }
@@ -132,6 +132,22 @@ private fun DrawScope.drawEye(cx: Float, cy: Float, w: Float, h: Float, side: In
     val top = cy - hh / 2f
     if (mood == Mood.DORT) {
         drawLine(color, Offset(left, cy), Offset(left + w, cy), strokeWidth = w * 0.08f)
+        return
+    }
+    if (mood == Mood.ETOURDI) {
+        // Yeux en spirale (on l'a secoué)
+        val p = Path()
+        val turns = 3
+        val steps = 90
+        for (i in 0..steps) {
+            val t = i.toFloat() / steps
+            val a = t * turns * 2 * Math.PI * side
+            val r = t * w * 0.45f
+            val x = cx + (r * kotlin.math.cos(a)).toFloat()
+            val y = cy + (r * kotlin.math.sin(a)).toFloat()
+            if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
+        }
+        drawPath(p, color, style = Stroke(width = w * 0.07f))
         return
     }
     if (mood == Mood.CONTENT || mood == Mood.AMUSE) {

@@ -62,7 +62,30 @@ class PhoneSensors(context: Context, private val frontCamera: () -> Boolean) : O
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
+    /** Appelé quand on secoue le téléphone (plusieurs à-coups forts en 1 s). */
+    @Volatile var onShake: (() -> Unit)? = null
+    private val accel: Sensor? = sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+    private val jolts = ArrayDeque<Long>()
+    private var lastShake = 0L
+    private val shakeListener = object : SensorEventListener {
+        override fun onSensorChanged(ev: SensorEvent) {
+            val a = kotlin.math.sqrt(ev.values[0] * ev.values[0] + ev.values[1] * ev.values[1] + ev.values[2] * ev.values[2])
+            // La nacelle bouge doucement (< 5 m/s²) ; une main qui secoue dépasse largement 15.
+            if (a < 15f) return
+            val now = System.currentTimeMillis()
+            jolts.addLast(now)
+            while (jolts.isNotEmpty() && now - jolts.first() > 1000) jolts.removeFirst()
+            if (jolts.size >= 4 && now - lastShake > 4000) {
+                lastShake = now
+                jolts.clear()
+                onShake?.invoke()
+            }
+        }
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
     fun start() {
+        accel?.let { sm.registerListener(shakeListener, it, SensorManager.SENSOR_DELAY_GAME) }
         game?.let { sm.registerListener(gameListener, it, SensorManager.SENSOR_DELAY_GAME) }
         if (compassSensor != null && compassSensor != game) sm.registerListener(compassListener, compassSensor, SensorManager.SENSOR_DELAY_UI)
     }
@@ -70,6 +93,7 @@ class PhoneSensors(context: Context, private val frontCamera: () -> Boolean) : O
     fun stop() {
         sm.unregisterListener(gameListener)
         sm.unregisterListener(compassListener)
+        sm.unregisterListener(shakeListener)
     }
 
     override fun read(): Pair<Double, Double>? =

@@ -63,6 +63,11 @@ data class UiState(
     val ntfyTopic: String = "",
     /** Roues (Roomba) : état affiché, ou null s'il n'est pas branché. */
     val roomba: String? = null,
+    /** Mode nuit (écran assombri, il s'endort plus vite). */
+    val night: Boolean = false,
+    val phoneBattery: Int = -1,
+    /** Grand texte au milieu du visage (pierre-feuille-ciseaux, compte de cache-cache…). */
+    val bigText: String? = null,
     val idleLife: Boolean = true,
     /** Vitesse de la tête, en % de la vitesse max mesurée. */
     val headSpeed: Int = 100,
@@ -185,6 +190,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun message(text: String?) = _state.update { it.copy(message = text) }
 
+    fun flagValue(name: String, def: Boolean) = flag(name, def)
+    fun setFlagValue(name: String, v: Boolean) { setFlag(name, v); refreshSettings() }
+
     // ---- réglages ---------------------------------------------------------------------------
     fun saveSettings(key: String, robotVoice: Boolean, camera: Boolean, front: Boolean, invertPan: Boolean, bargeIn: Boolean, subtitles: Boolean, followFace: Boolean, speed: Int,
                      wakeWord: Boolean = flag("wake_word", true), idleLife: Boolean = flag("idle_life", true)) {
@@ -253,6 +261,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val sure = f?.takeIf { faceStreak >= 2 }
             follower.onFace(sure?.x, sure?.y)
             if (sure != null) recognize(bmp, sure)
+            if (sure != null || rpsWaiting) readBody(bmp)
         }
         val sees = follower.sees
         if (sees != _state.value.seesFace) _state.update { it.copy(seesFace = sees) }
@@ -345,6 +354,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         while (true) {
             Thread.sleep(300)
             val now = System.currentTimeMillis()
+            runCatching { clockTasks(now) }
             val s = _state.value
             // Conversation lancée par « Joey » : 45 s sans rien dire de part et d'autre -> il retourne à ses rêveries.
             if (live != null && startedByWake && s.live == LiveState.LISTENING && !s.busy &&
@@ -367,7 +377,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (active || asleep) continue
             // Endormissement : 10 min sans personne ni mouvement.
-            if (!flag("watch", false) && now - lastLifeAt > 10 * 60_000L && now - motionAt > 10 * 60_000L) {
+            val sleepAfter = if (_state.value.night) 2 * 60_000L else 10 * 60_000L
+            if (!flag("watch", false) && now - lastLifeAt > sleepAfter && now - motionAt > sleepAfter) {
                 asleep = true
                 log("😴 Je m'endors")
                 moodResetAt = 0
@@ -389,7 +400,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             // Ennui : de temps en temps, il regarde ailleurs, puis revient.
             val guarding = flag("watch", false)
-            if (now > nextBoredom && (guarding || now - lastLifeAt > 60_000)) {
+            if (now > nextBoredom && (guarding || (now - lastLifeAt > 60_000 && !_state.value.night))) {
                 // En garde : une ronde du regard toutes les ~1 min 30 ; sinon un coup d'œil toutes les 2-4 min.
                 nextBoredom = now + if (guarding) 90_000L else 120_000 + (Math.random() * 120_000).toLong()
                 if (guarding) {
@@ -406,6 +417,111 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+    }
+
+    // ---- gestes : pouce, V, coucou, doigt pointé, et la main pour pierre-feuille-ciseaux ------------
+    private val gestures = com.joey.app.senses.GestureWatcher(app)
+    private val body = com.joey.app.senses.BodyLanguage()
+    @Volatile private var lastBodyAt = 0L
+    @Volatile private var rpsWaiting = false
+
+    private fun readBody(bmp: android.graphics.Bitmap) {
+        val now = System.currentTimeMillis()
+        if (!flag("gestures", true) || now - lastBodyAt < if (rpsWaiting) 120 else 300) return
+        lastBodyAt = now
+        val small = android.graphics.Bitmap.createScaledBitmap(bmp, 480, 480 * bmp.height / bmp.width, true)
+        val (hand, pose) = gestures.analyze(small)
+        when (val g = body.update(now, hand, pose)) {
+            null -> {}
+            com.joey.app.senses.Body.ThumbUp -> { log("👍"); setMood(Mood.CONTENT); live?.event("La personne te fait un pouce levé 👍.", reply = true) }
+            com.joey.app.senses.Body.ThumbDown -> { log("👎"); setMood(Mood.TRISTE); live?.event("La personne te fait un pouce vers le bas 👎.", reply = true) }
+            com.joey.app.senses.Body.Victory -> { log("✌"); live?.event("La personne fait le V avec ses doigts ✌ (veut-elle une photo ?).", reply = true) }
+            com.joey.app.senses.Body.Wave -> {
+                log("👋 Coucou")
+                setMood(Mood.CONTENT)
+                speakUp("La personne te fait coucou de la main 👋 : réponds-lui, brièvement.")
+            }
+            is com.joey.app.senses.Body.Point -> {
+                if (!gimbal.ready || _state.value.busy) return
+                log("👉 On me montre quelque chose")
+                // Image non retournée : à droite de l'image = à la droite de Joey ; on tourne avec les sens appris du suivi.
+                moveAsync(holdMs = 6000) {
+                    head.turnStick(g.dx * 50.0 * follower.panSign, -g.dy * 30.0 * follower.tiltSign)
+                    Thread.sleep(500)
+                    live?.sendFrameNow()
+                    live?.event("La personne te montre quelque chose du doigt : tu as tourné la tête de ce côté. Regarde la nouvelle " +
+                        "image et dis ce que c'est (ou demande ce qu'elle veut te montrer).", reply = true)
+                    "regardé où on me montre"
+                }
+            }
+        }
+    }
+
+    // ---- toucher et secousses ----------------------------------------------------------------------
+    fun touched() {
+        setMood(Mood.ETONNE)
+        roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.R2D2)
+    }
+
+    fun tickled() {
+        setMood(Mood.AMUSE)
+        roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.HAPPY)
+        if (gimbal.ready && !_state.value.busy) moveAsync(holdMs = 1000) { head.shake() }
+        live?.event("On te chatouille (double tape sur ton écran) : réagis en une phrase.", reply = true)
+    }
+
+    fun petted() {
+        setMood(Mood.CONTENT)
+        roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.SLEEPY)
+        live?.event("On te caresse l'écran : tu ronronnes à ta façon de robot, en une phrase.", reply = true)
+    }
+
+    private fun shaken() {
+        log("😵 On me secoue")
+        moodResetAt = 0
+        _state.update { it.copy(mood = Mood.ETOURDI) }
+        roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.SURPRISED)
+        live?.event("On vient de te secouer : tu as le tournis, dis-le avec humour.", reply = true)
+        thread(isDaemon = true) { Thread.sleep(5000); if (_state.value.mood == Mood.ETOURDI) _state.update { it.copy(mood = Mood.NEUTRE) } }
+    }
+
+    // ---- jeux --------------------------------------------------------------------------------------
+    /** Pierre-feuille-ciseaux : Joey choisit, affiche son choix, lit la main de la personne. Bloquant (~4 s). */
+    private fun playRps(): Map<String, Any?> {
+        val mine = listOf("pierre", "feuille", "ciseaux").random()
+        rpsWaiting = true
+        try {
+            val t0 = System.currentTimeMillis()
+            // On attend une main nette (tenue au moins un instant), au plus 4 s.
+            var theirs: String? = null
+            while (System.currentTimeMillis() - t0 < 4000) {
+                Thread.sleep(100)
+                if (body.lastHandAt > t0 + 300) com.joey.app.senses.BodyLanguage.rps(body.lastHand)?.let { theirs = it }
+                if (theirs != null) break
+            }
+            val emoji = mapOf("pierre" to "✊", "feuille" to "✋", "ciseaux" to "✌")
+            _state.update { it.copy(bigText = emoji[mine]) }
+            thread(isDaemon = true) { Thread.sleep(2500); _state.update { it.copy(bigText = null) } }
+            val t = theirs ?: return mapOf("toi" to mine, "personne" to "pas vu sa main (qu'elle la montre bien à la caméra)")
+            val win = mapOf("pierre" to "ciseaux", "ciseaux" to "feuille", "feuille" to "pierre")
+            val res = when { t == mine -> "égalité"; win[mine] == t -> "tu gagnes"; else -> "la personne gagne" }
+            log("✊✋✌ moi $mine, toi $t : $res")
+            return mapOf("toi" to mine, "personne" to t, "resultat" to res)
+        } finally {
+            rpsWaiting = false
+        }
+    }
+
+    /** Cache-cache : il ferme les yeux et compte (affiché), puis cherche. */
+    private fun hideAndSeekCount(seconds: Int): String {
+        moodResetAt = 0
+        _state.update { it.copy(mood = Mood.DORT) }
+        for (i in seconds downTo 1) {
+            _state.update { it.copy(bigText = "$i") }
+            Thread.sleep(1000)
+        }
+        _state.update { it.copy(bigText = null, mood = Mood.NEUTRE) }
+        return "tu as fini de compter : annonce « J'arrive ! » puis cherche (outil chercher, objet « personne »)"
     }
 
     // ---- reconnaissance des gens de la maison (sur le téléphone) ------------------------------------
@@ -622,6 +738,109 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun danceUi() = dance(20)
 
+    // ---- rappels, batteries, nuit, journal du jour : ce qui dépend de l'heure ---------------------------
+    val reminders = com.joey.app.brain.Reminders(File(app.filesDir, "rappels.json"))
+    /** Message à dire dès que la conversation démarre (rappel qui l'a réveillé…). */
+    @Volatile private var pendingEvent: String? = null
+    @Volatile private var lastClockMinute = 0L
+    private val warned = HashSet<String>()
+    @Volatile private var convStarts = 0
+    @Volatile private var photosToday = 0
+
+    /** Fait dire quelque chose à Joey : dans la conversation, ou en la démarrant exprès. */
+    private fun speakUp(text: String) {
+        val l = live
+        if (l != null) { l.event(text, reply = true); return }
+        if (geminiKey.isBlank()) return
+        pendingEvent = text
+        startedByWake = true // la conversation s'arrêtera seule après le silence
+        thread(isDaemon = true) { Thread.sleep(300); startLive() }
+    }
+
+    private fun clockTasks(now: Long) {
+        // Rappels : chaque seconde environ.
+        for (r in reminders.due()) {
+            log("⏰ Rappel : ${r.text}")
+            setMood(Mood.ETONNE)
+            speakUp("[Rappel programmé] C'est l'heure : « ${r.text} ». Dis-le à la personne maintenant, clairement, à ta façon.")
+            watch.notify("⏰ Rappel : ${r.text}", null)
+        }
+        // Le reste : une fois par minute.
+        val minute = now / 60_000
+        if (minute == lastClockMinute) return
+        lastClockMinute = minute
+        refreshRoomba()
+        val cal = java.util.Calendar.getInstance()
+        val h = cal.get(java.util.Calendar.HOUR_OF_DAY)
+        val night = flag("night_mode", true) && (h >= 23 || h < 7)
+        val phone = phoneBattery()
+        if (night != _state.value.night || phone != _state.value.phoneBattery) _state.update { it.copy(night = night, phoneBattery = phone) }
+        // Batteries faibles : on prévient une fois.
+        fun warn(key: String, low: Boolean, text: String) {
+            if (low && warned.add(key)) { log("🔋 $text"); if (live != null) live?.event("[Batterie] $text Dis-le brièvement.", reply = true) else watch.notify("🔋 $text", null) }
+            if (!low) warned.remove(key)
+        }
+        warn("phone", phone in 0..19 && !phoneCharging(), "La batterie de mon téléphone est à $phone % : branche-moi.")
+        warn("gimbal", gimbal.battery in 0..14, "La batterie de ma nacelle (mon cou) est à ${gimbal.battery} %.")
+        val r = roomba
+        val rb = r?.battery ?: -1
+        warn("roomba", rb in 0..14 && r?.charging == false, "La batterie de mes roues est à $rb %, je rentre à ma base.")
+        if (r != null && rb in 0..14 && !r.charging && !r.onBase && !following && !_state.value.busy && warned.contains("roomba") &&
+            warned.add("roomba_dock")) {
+            log("🛞 " + r.seekDock())
+        }
+        if (rb > 30) warned.remove("roomba_dock")
+        // Journal du jour : le soir à 21 h 30, une fois.
+        val today = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.FRENCH).format(Date(now))
+        if (h == 21 && cal.get(java.util.Calendar.MINUTE) >= 30 && prefs.getString("diary_done", "") != today && flag("diary", true)) {
+            prefs.edit().putString("diary_done", today).apply()
+            thread(isDaemon = true) { runCatching { writeDiary(send = true) } }
+        }
+        if (cal.get(java.util.Calendar.HOUR_OF_DAY) == 0 && cal.get(java.util.Calendar.MINUTE) == 0) { photosToday = 0; convStarts = 0 }
+    }
+
+    private fun batteryIntent() = getApplication<Application>().registerReceiver(null,
+        android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+
+    fun phoneBattery(): Int = runCatching {
+        val i = batteryIntent()!!
+        val level = i.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
+        val scale = i.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100)
+        if (level < 0) -1 else level * 100 / scale
+    }.getOrDefault(-1)
+
+    private fun phoneCharging(): Boolean = runCatching {
+        batteryIntent()!!.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) != 0
+    }.getOrDefault(false)
+
+    /** Le journal de la journée, écrit par Joey (Gemini) d'après ce qu'il a noté ; envoyé sur le téléphone si [send]. */
+    fun writeDiary(send: Boolean): String {
+        val start = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0)
+        }.timeInMillis
+        val events = watch.recent(60).filter { it.time >= start }.reversed()
+        val mems = memory.all().filter { it.time >= start }
+        val fmt = SimpleDateFormat("HH:mm", Locale.FRENCH)
+        val facts = buildString {
+            append("Conversations aujourd'hui : $convStarts. Photos prises : $photosToday.\n")
+            if (greetedAt.isNotEmpty()) append("Gens reconnus : ${greetedAt.keys.joinToString()}.\n")
+            if (events.isNotEmpty()) append("Ce que j'ai remarqué :\n" + events.joinToString("\n") { "- " + fmt.format(Date(it.time)) + " " + it.text } + "\n")
+            if (mems.isNotEmpty()) append("Ce que j'ai appris :\n" + mems.joinToString("\n") { "- " + it.text } + "\n")
+            if (currentPlace != null) append("Je suis dans : $currentPlace.\n")
+        }
+        val schema = org.json.JSONObject("{\"type\":\"object\",\"properties\":{\"journal\":{\"type\":\"string\"}},\"required\":[\"journal\"]}")
+        val text = runCatching {
+            vision.json("Tu es Joey, petit robot de maison pince-sans-rire (inspiré de Beneath a Steel Sky). Écris ton journal de la " +
+                "journée en 4 à 7 phrases, à la première personne, avec humour et tendresse, d'après ces notes (n'invente rien " +
+                "d'important ; si la journée a été calme, dis-le avec style) :\n\n$facts", schema).optString("journal")
+        }.getOrElse { "Journal impossible aujourd'hui (${it.message})." }
+        val dir = File(getApplication<Application>().filesDir, "journal").apply { mkdirs() }
+        runCatching { File(dir, java.text.SimpleDateFormat("yyyy-MM-dd", Locale.FRENCH).format(Date()) + ".txt").writeText(text) }
+        log("📔 Journal du jour écrit")
+        if (send) watch.notify("📔 Journal de Joey : $text", events.lastOrNull { it.hasPhoto }?.let { watch.photo(it.id) })
+        return text
+    }
+
     // ---- les roues : le Roomba ------------------------------------------------------------------
     @Volatile var roomba: com.joey.app.robot.RoombaRobot? = null
         private set
@@ -818,6 +1037,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val done = java.util.concurrent.CountDownLatch(1)
         var r = "photo ratée"
         camera.takePhoto { msg -> r = msg; done.countDown() }
+        photosToday++
         done.await(8, TimeUnit.SECONDS)
         log("📸 $r")
         return r
@@ -926,6 +1146,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun startLive() {
+        convStarts++
         wake.stop()
         lastTalkAt = System.currentTimeMillis()
         greeted = false
@@ -966,6 +1187,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             greeted = true
             val who = seeing()
             who?.let { greetedAt[it] = System.currentTimeMillis() }
+            val pending = pendingEvent
+            pendingEvent = null
+            if (pending != null) { live?.event(pending, reply = true); return }
             live?.event((if (startedByWake) "On vient de t'appeler par ton nom (« Joey »). Réponds présent, brièvement. "
                 else "La conversation commence (la personne vient d'appuyer sur ton bouton). ") +
                 (if (who != null) "Tu reconnais $who (reconnaissance du visage). " else "") +
@@ -1213,6 +1437,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val fmt = SimpleDateFormat("EEE d HH:mm", Locale.FRENCH)
                 mapOf("journal" to if (ev.isEmpty()) "rien de noté" else ev.joinToString("\n") { fmt.format(Date(it.time)) + " — " + it.text })
             }
+            "rappel" -> {
+                val text = args["message"] as? String ?: ""
+                val r = reminders.add(text, (args["dans_minutes"] as? Number)?.toDouble(), args["heure"] as? String, args["chaque_jour"] == true)
+                    ?: return mapOf("result" to "heure illisible : donne « dans_minutes » ou « heure » (HH:MM)")
+                val fmt = SimpleDateFormat("EEEE HH:mm", Locale.FRENCH)
+                log("⏰ Rappel noté pour ${fmt.format(Date(r.at))} : $text")
+                mapOf("result" to "rappel noté pour ${fmt.format(Date(r.at))}" + if (r.daily) " (chaque jour)" else "")
+            }
+            "rappels" -> {
+                val fmt = SimpleDateFormat("EEE d HH:mm", Locale.FRENCH)
+                val all = reminders.all()
+                mapOf("rappels" to if (all.isEmpty()) "aucun" else all.joinToString("\n") { fmt.format(Date(it.at)) + " — " + it.text + if (it.daily) " (chaque jour)" else "" })
+            }
+            "annuler_rappel" -> {
+                val gone = reminders.cancel(args["sujet"] as? String ?: "")
+                mapOf("result" to if (gone.isEmpty()) "aucun rappel ne correspond" else "annulé : " + gone.joinToString(" ; "))
+            }
+            "journal_du_jour" -> mapOf("journal" to writeDiary(send = false))
+            "pierre_feuille_ciseaux" -> mapOf("result" to playRps())
+            "cache_cache_compter" -> {
+                val n = ((args["secondes"] as? Number)?.toInt() ?: 20).coerceIn(5, 60)
+                mapOf("result" to busyLearn { hideAndSeekCount(n) })
+            }
             "avancer" -> {
                 val r = roomba ?: return mapOf("result" to noWheels)
                 val m = ((args["metres"] as? Number)?.toDouble() ?: 0.5).coerceIn(-2.0, 3.0)
@@ -1308,6 +1555,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "souvenirs" to memory.size,
                     "visage_vu" to follower.sees,
                     "personne_reconnue" to (seeing() ?: "personne de connu en vue"),
+                    "batterie_telephone" to phoneBattery(),
+                    "heure" to SimpleDateFormat("EEEE d MMMM, HH:mm", Locale.FRENCH).format(Date()),
+                    "mode_nuit" to _state.value.night,
                     "gens_de_la_maison_connus" to people.names().ifEmpty { listOf("aucun") }.joinToString(),
                     "boussole" to (sensors.compassText() ?: "indisponible"),
                     "orientation_par" to if (head.usesPhone) "capteurs du téléphone" else "angles de la nacelle",
@@ -1368,6 +1618,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // Doit rester en dernier (juste avant onCleared) : tout ce qui est au-dessus est prêt (sinon plantage au lancement).
     init {
+        sensors.onShake = { shaken() }
         sensors.start()
         head.setPhoneSigns(prefs.getInt("phone_pan_sign", 0), prefs.getInt("phone_tilt_sign", 0))
         thread(name = "visee-casque", isDaemon = true) { aimLoop() }

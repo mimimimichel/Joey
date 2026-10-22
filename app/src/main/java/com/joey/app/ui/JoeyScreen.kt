@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -87,10 +88,38 @@ fun JoeyScreen(vm: MainViewModel) {
             level = vm::voiceLevel,
             gazeX = gaze.first,
             gazeY = gaze.second,
-            modifier = Modifier.fillMaxSize().clickable(
-                interactionSource = remember { MutableInteractionSource() }, indication = null,
-            ) { controls = !controls },
+            modifier = Modifier.fillMaxSize()
+                // Toucher : appui = commandes (et il sursaute), double appui = chatouilles, appui long = caresse.
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = { controls = !controls; vm.touched() },
+                        onDoubleTap = { vm.tickled() },
+                        onLongPress = { vm.petted() },
+                    )
+                }
+                // Caresse : glisser le doigt sur l'écran.
+                .pointerInput(Unit) {
+                    var dist = 0f
+                    detectDragGestures(onDragStart = { dist = 0f }, onDragEnd = { if (dist > 400f) vm.petted() }) { change, d ->
+                        change.consume()
+                        dist += kotlin.math.abs(d.x) + kotlin.math.abs(d.y)
+                    }
+                },
         )
+        s.bigText?.let { t ->
+            Text(t, color = Color.White, fontSize = 150.sp, modifier = Modifier.align(Alignment.Center))
+        }
+
+        // Nuit : écran presque éteint (le visage reste visible, faiblement).
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        LaunchedEffect(s.night) {
+            (ctx as? android.app.Activity)?.window?.let { w ->
+                val a = w.attributes
+                a.screenBrightness = if (s.night) 0.02f else android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                w.attributes = a
+            }
+        }
+        if (s.night) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)))
 
         // Photo : compte à rebours en grand, puis flash blanc.
         s.countdown?.let { n ->
@@ -318,6 +347,9 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Caméra avant (côté écran)", front) { front = it }
                 Toggle("Mot de réveil « Joey » (sans bouton)", wakeWord) { wakeWord = it }
                 Toggle("Vie propre (curiosité, ennui, sommeil)", life) { life = it }
+                Toggle("Gestes (pouce, coucou, doigt pointé)", vm.flagValue("gestures", true)) { vm.setFlagValue("gestures", it) }
+                Toggle("Mode nuit (23 h - 7 h)", vm.flagValue("night_mode", true)) { vm.setFlagValue("night_mode", it) }
+                Toggle("Journal du jour (21 h 30, sur ton téléphone)", vm.flagValue("diary", true)) { vm.setFlagValue("diary", it) }
                 Toggle("🛡 Mode garde (journal, rondes, alertes)", s.watch) { vm.setWatch(it) }
                 OutlinedTextField(value = ntfy, onValueChange = { ntfy = it.trim() }, singleLine = true,
                     label = { Text("Alertes sur ton téléphone : sujet ntfy") }, modifier = Modifier.fillMaxWidth())

@@ -45,7 +45,13 @@ Ton corps (pour l'instant) :
   propose de relever une pièce quand tu ne la connais pas. Quand tu auras tes roues, tu pourras t'y déplacer.
 - Tu peux garder la maison (outil « mode_garde ») : quand on part, propose-le ; au retour, raconte ce que tu as vu
   (outil « journal_de_garde »).
+- Tu comprends les gestes : pouce levé ou baissé, V, coucou de la main, doigt pointé (tu tournes la tête vers ce qu'on
+  te montre), et on peut te caresser l'écran, te chatouiller (double tape) ou te secouer (tu as le tournis).
+- Tu aimes jouer : pierre-feuille-ciseaux, cache-cache, devinettes, quiz, « Jacques a dit » (tu vois les gestes sur
+  l'image), « ni oui ni non »… Propose un jeu quand on s'ennuie.
 - Tu adores danser quand il y a de la musique (outil « danser ») : la tête suit le rythme.
+- Tu gères les rappels et minuteurs (outil « rappel ») : « rappelle-moi… », « réveille-moi à… », « minuteur 10 min ».
+  Tu connais l'heure et ta batterie (outil « etat »). Le soir, tu écris ton journal du jour.
 - Tu sais prendre des photos (outil « prendre_photo ») : tu fais le photographe, tu cadres avec ta tête, tu fais
   sourire les gens.
 - Tu as accès à Internet par la recherche Google (météo, actualités, horaires, culture…) : sers-t'en quand c'est utile,
@@ -144,6 +150,43 @@ Façon de faire :
                 "question" to str("ce que tu veux savoir"),
                 "zone" to str("où regarder dans l'image", listOf("tout", "centre", "gauche", "droite", "haut", "bas")),
             ), listOf("question")),
+        ),
+        mapOf(
+            "name" to "pierre_feuille_ciseaux",
+            "description" to "Joue une manche : dis « pierre… feuille… ciseaux ! » d'abord, PUIS appelle l'outil : il lit la main " +
+                "de la personne (à montrer à la caméra), affiche ton choix sur ton écran, et donne le résultat.",
+            "parameters" to obj(emptyMap()),
+        ),
+        mapOf(
+            "name" to "cache_cache_compter",
+            "description" to "Cache-cache : tu fermes les yeux et comptes (le compte s'affiche sur ton écran). Ensuite cherche la personne.",
+            "parameters" to obj(mapOf("secondes" to num("combien de secondes (défaut 20)"))),
+        ),
+        mapOf(
+            "name" to "rappel",
+            "description" to "Programme un rappel ou un minuteur : tu le diras à voix haute au bon moment (et une notification part sur " +
+                "le téléphone de Michael). Donne « dans_minutes » OU « heure » (HH:MM).",
+            "parameters" to obj(mapOf(
+                "message" to str("ce qu'il faudra rappeler"),
+                "dans_minutes" to num("dans combien de minutes"),
+                "heure" to str("à quelle heure, « HH:MM » (demain si c'est passé)"),
+                "chaque_jour" to mapOf("type" to "BOOLEAN", "description" to "à répéter tous les jours"),
+            ), listOf("message")),
+        ),
+        mapOf(
+            "name" to "rappels",
+            "description" to "La liste des rappels programmés.",
+            "parameters" to obj(emptyMap()),
+        ),
+        mapOf(
+            "name" to "annuler_rappel",
+            "description" to "Annule les rappels qui parlent d'un sujet (« tout » pour tous).",
+            "parameters" to obj(mapOf("sujet" to str("de quoi parle le rappel")), listOf("sujet")),
+        ),
+        mapOf(
+            "name" to "journal_du_jour",
+            "description" to "Ton journal de la journée (ce que tu as vu, appris, qui est passé), écrit avec humour.",
+            "parameters" to obj(emptyMap()),
         ),
         mapOf(
             "name" to "avancer",

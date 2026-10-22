@@ -288,9 +288,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             faceStreak = if (f != null) faceStreak + 1 else 0
             val sure = f?.takeIf { faceStreak >= 2 }
             follower.onFace(sure?.x, sure?.y)
-            angleTrack(sure?.x, sure?.y, framePose, frameAbs, bmp.width, bmp.height, person = true)
+            if (sure != null) { targetFaceX = sure.x; targetFaceY = sure.y; targetFaceAt = System.currentTimeMillis() }
+            // Elle bouge les mains : un coup d'œil à ses mains (en gardant le visage dans l'image si possible).
+            val handAim = handAttention.aimPoint(sure?.x, sure?.y)
+            if (handAim != null) angleTrack(handAim.first, handAim.second, framePose, frameAbs, bmp.width, bmp.height, person = false)
+            else angleTrack(sure?.x, sure?.y, framePose, frameAbs, bmp.width, bmp.height, person = true)
             if (sure != null) recognize(bmp, sure)
-            if (sure != null || rpsWaiting) readBody(bmp)
+            if (sure != null || rpsWaiting || handAttention.active) readBody(bmp)
         }
         val sees = follower.sees
         if (sees != _state.value.seesFace) _state.update { it.copy(seesFace = sees) }
@@ -607,18 +611,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val gestures = com.joey.app.senses.GestureWatcher(app)
     private val body = com.joey.app.senses.BodyLanguage()
     @Volatile private var lastBodyAt = 0L
+    // Attention aux mains : coup d'œil quand la personne regardée bouge les mains, puis retour au visage.
+    private val handAttention = com.joey.app.senses.HandAttention().apply {
+        onStart = {
+            log("👐 Je regarde tes mains")
+            // Gemini voit ce qu'il y a dans les mains (s'il en parle, c'est d'après une image fraîche).
+            thread(isDaemon = true) { Thread.sleep(700); live?.sendFrameNow() }
+        }
+    }
+    @Volatile private var targetFaceX = 0f
+    @Volatile private var targetFaceY = 0f
+    @Volatile private var targetFaceAt = 0L
     @Volatile private var bodyCostMs = 0L
     @Volatile private var rpsWaiting = false
 
     private fun readBody(bmp: android.graphics.Bitmap) {
         val now = System.currentTimeMillis()
         // Téléphone lent (S8+…) : on espace l'analyse pour que le suivi du visage reste fluide (≤ ~25 % du temps).
-        val every = maxOf(if (rpsWaiting) 120L else 300L, bodyCostMs * 4)
+        val every = maxOf(if (rpsWaiting || handAttention.active) 150L else 300L, bodyCostMs * 4)
         if (!flag("gestures", true) || now - lastBodyAt < every) return
         lastBodyAt = now
         val small = android.graphics.Bitmap.createScaledBitmap(bmp, 480, 480 * bmp.height / bmp.width, true)
         val (hand, pose) = gestures.analyze(small)
         bodyCostMs = (bodyCostMs * 3 + (System.currentTimeMillis() - now)) / 4
+        val recentFace = now - targetFaceAt < 1000
+        if (flag("watch_hands", true) && !_state.value.busy)
+            handAttention.update(pose, if (recentFace) targetFaceX else null, if (recentFace) targetFaceY else null)
         when (val g = body.update(now, hand, pose)) {
             null -> {}
             com.joey.app.senses.Body.ThumbUp -> { log("👍"); setMood(Mood.CONTENT); live?.event("La personne te fait un pouce levé 👍.", reply = true) }
@@ -1016,6 +1034,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         follower.pause(120_000)
         head.stopAim()
         aimTarget = null
+        handAttention.stop()
         _state.update { it.copy(busy = true) }
         return motionGen.incrementAndGet()
     }

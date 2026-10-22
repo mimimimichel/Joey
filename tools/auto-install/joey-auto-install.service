@@ -1,0 +1,13 @@
+[Unit]
+Description=Joey : installation automatique des nouvelles versions sur le téléphone
+After=network-online.target
+
+[Service]
+Environment=ANDROID_HOME=@SDK@
+Environment=JOEY_REPO=@REPO@
+ExecStart=/bin/bash @SCRIPT@
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

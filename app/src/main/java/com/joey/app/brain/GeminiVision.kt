@@ -111,6 +111,47 @@ class GeminiVision(private val apiKey: () -> String) {
         throw IOException("vision Gemini indisponible (${last?.message})")
     }
 
+    /** Qui parle dans [clip] (WAV), parmi les voix de référence ? (prénom ou « inconnu », certitude 0..1). */
+    fun whoSpeaks(refs: List<Pair<String, ByteArray>>, clip: ByteArray): Pair<String, Double> {
+        val key = apiKey()
+        val schema = JSONObject("{\"type\":\"object\",\"properties\":{\"nom\":{\"type\":\"string\"},\"certitude\":{\"type\":\"number\"}},\"required\":[\"nom\",\"certitude\"]}")
+        val parts = JSONArray().put(JSONObject().put("text", "Voici les voix de référence des gens d'une maison."))
+        for ((name, wav) in refs) {
+            parts.put(JSONObject().put("text", "Voix de $name :"))
+            parts.put(JSONObject().put("inlineData", JSONObject().put("mimeType", "audio/wav").put("data", android.util.Base64.encodeToString(wav, android.util.Base64.NO_WRAP))))
+        }
+        parts.put(JSONObject().put("text", "Extrait à identifier :"))
+        parts.put(JSONObject().put("inlineData", JSONObject().put("mimeType", "audio/wav").put("data", android.util.Base64.encodeToString(clip, android.util.Base64.NO_WRAP))))
+        parts.put(JSONObject().put("text", "Qui parle dans l'extrait ? Compare le timbre, la hauteur et la façon de parler (pas ce qui est dit). " +
+            "Réponds par le prénom exact, ou « inconnu » si aucune voix ne correspond vraiment, avec ta certitude (0 à 1)."))
+        var last: Exception? = null
+        for (model in MODELS.drop(1)) {
+            try {
+                val gen = JSONObject().put("responseMimeType", "application/json").put("responseJsonSchema", schema).put("temperature", 0.1)
+                if (model.startsWith("gemini-3")) gen.put("thinkingConfig", JSONObject().put("thinkingLevel", "LOW"))
+                val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts))).put("generationConfig", gen)
+                val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key").openConnection() as HttpURLConnection
+                try {
+                    conn.requestMethod = "POST"; conn.connectTimeout = 10_000; conn.readTimeout = 40_000; conn.doOutput = true
+                    conn.setRequestProperty("content-type", "application/json")
+                    conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                    val code = conn.responseCode
+                    val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
+                    if (code !in 200..299) throw IOException("$model : erreur $code")
+                    val p = JSONObject(text).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+                    val answer = buildString { if (p != null) for (i in 0 until p.length()) { val x = p.optJSONObject(i) ?: continue; if (!x.optBoolean("thought")) append(x.optString("text")) } }
+                    val j = JSONObject(answer.substring(answer.indexOf('{'), answer.lastIndexOf('}') + 1))
+                    return j.optString("nom", "inconnu") to j.optDouble("certitude", 0.0)
+                } finally {
+                    conn.disconnect()
+                }
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw IOException("Gemini indisponible (${last?.message})")
+    }
+
     /** Question sur une image (en bonne résolution) : réponse courte en français. */
     fun ask(jpegBase64: String, question: String): String {
         val schema = JSONObject("{\"type\":\"object\",\"properties\":{\"reponse\":{\"type\":\"string\"}},\"required\":[\"reponse\"]}")

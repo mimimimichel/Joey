@@ -329,6 +329,8 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
     var confirmForget by remember { mutableStateOf(false) }
     var showMemories by remember { mutableStateOf(false) }
     var newPerson by remember { mutableStateOf("") }
+    var haUrl by remember { mutableStateOf(s.haUrl) }
+    var haToken by remember { mutableStateOf(s.haToken) }
     var showMap by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = close,
@@ -372,6 +374,14 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Text("Souvenirs : ${s.memories} (gardés sur le téléphone)", fontSize = 13.sp)
                 TextButton(onClick = { showMemories = true }) { Text("Voir ses souvenirs") }
                 TextButton(onClick = { showMap = true }) { Text("🗺 Voir sa carte de la maison") }
+                if (s.voices.isNotEmpty()) Text("🎙 Voix apprises : ${s.voices.joinToString()}", fontSize = 13.sp)
+                Text("🏠 Maison connectée (Home Assistant)", fontSize = 13.sp)
+                OutlinedTextField(value = haUrl, onValueChange = { haUrl = it.trim() }, singleLine = true,
+                    label = { Text("Adresse (http://homeassistant.local:8123)") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = haToken, onValueChange = { haToken = it.trim() }, singleLine = true,
+                    label = { Text("Jeton d'accès longue durée") }, visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth())
+                TextButton(onClick = { vm.setHomeAssistant(haUrl, haToken) }) { Text("Relier Home Assistant") }
                 Text("Gens de la maison (visages reconnus, gardés sur le téléphone)", fontSize = 13.sp)
                 s.people.forEach { who ->
                     Row(verticalAlignment = Alignment.CenterVertically) {

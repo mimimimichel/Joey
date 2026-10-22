@@ -81,6 +81,9 @@ data class UiState(
     val memories: Int = 0,
     /** Gens de la maison que Joey reconnaît, et qui il voit en ce moment. */
     val people: List<String> = emptyList(),
+    val voices: List<String> = emptyList(),
+    val haUrl: String = "",
+    val haToken: String = "",
     val seeing: String? = null,
     /** Compte à rebours de la photo affiché sur le visage (null : pas de photo), et flash. */
     val countdown: Int? = null,
@@ -107,6 +110,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val memory = Memory(File(app.filesDir, "memoire.json"))
     private val people = com.joey.app.brain.People(File(app.filesDir, "personnes.json"))
     private val faceId = com.joey.app.senses.FaceId(app)
+    val voices = com.joey.app.brain.Voices(File(app.filesDir, "voix"))
+    val home = com.joey.app.brain.HomeAssistant({ prefs.getString("ha_url", "") ?: "" }, { prefs.getString("ha_token", "") ?: "" })
+
+    fun setHomeAssistant(url: String, token: String) {
+        prefs.edit().putString("ha_url", url.trim()).putString("ha_token", token.trim()).apply()
+        refreshSettings()
+        if (url.isNotBlank() && token.isNotBlank()) thread(isDaemon = true) {
+            val r = runCatching { "Home Assistant relié : ${home.entities().size} appareils" }.getOrElse { "Home Assistant : ${it.message}" }
+            log("🏠 $r"); message(r)
+        }
+    }
     val houseMap = com.joey.app.brain.HouseMap(File(app.filesDir, "carte.json"))
     @Volatile private var currentPlace: String? = null
     val watch = com.joey.app.remote.Watch(File(app.filesDir, "garde"), { prefs.getString("ntfy_topic", null) }, ::log)
@@ -178,6 +192,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             headSpeed = headSpeed,
             memories = memory.size,
             people = people.names(),
+            voices = voices.names(),
+            haUrl = prefs.getString("ha_url", "") ?: "",
+            haToken = prefs.getString("ha_token", "") ?: "",
             usesPhoneSensors = head.usesPhone,
         )
     }
@@ -701,9 +718,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var beats = 0
     private val beatDetector = com.joey.app.audio.BeatDetector()
 
+    @Volatile private var dancing = false
+
     fun dance(seconds: Int) {
         setMood(Mood.CONTENT)
-        live?.onMicPcm = { pcm, n -> beatDetector.feed(pcm, n) { beats++ } }
+        dancing = true
         moveAsync(holdMs = 1500) {
             head.setHomeHere()
             val end = System.currentTimeMillis() + seconds * 1000L
@@ -730,7 +749,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 head.aim(0.0, 0.0)
                 Thread.sleep(800)
             } finally {
-                live?.onMicPcm = null
+                dancing = false
             }
             "danse finie"
         }
@@ -1168,6 +1187,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             micOptional = headsetAudioClients > 0,
         )
         live = l
+        l.onMicPcm = { pcm, n ->
+            voices.feed(pcm, n)
+            if (dancing) beatDetector.feed(pcm, n) { beats++ }
+        }
         l.start()
         routeLiveAudio()
     }
@@ -1456,6 +1479,45 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             "journal_du_jour" -> mapOf("journal" to writeDiary(send = false))
             "pierre_feuille_ciseaux" -> mapOf("result" to playRps())
+            "apprendre_voix" -> {
+                val who = (args["prenom"] as? String)?.trim().orEmpty()
+                if (who.isEmpty()) return mapOf("result" to "il me faut un prénom")
+                log("🎙 J'écoute la voix de $who…")
+                val ok = busyLearn { voices.learn(who) }
+                refreshSettings()
+                mapOf("result" to if (ok) "voix de $who apprise" else "pas assez entendu sa voix : qu'elle parle 6 secondes sans s'arrêter, et recommence")
+            }
+            "qui_parle" -> {
+                val refs = voices.references()
+                if (refs.isEmpty()) return mapOf("result" to "tu ne connais encore aucune voix (outil apprendre_voix)")
+                val clip = voices.recentSpeech() ?: return mapOf("result" to "pas assez entendu de parole récemment")
+                val (name, cert) = runCatching { vision.whoSpeaks(refs, clip) }.getOrElse { return mapOf("result" to "écoute impossible : ${it.message}") }
+                log("🎙 Voix : $name (${(cert * 100).toInt()} %)")
+                // La comparaison de voix par Gemini est approximative : en dessous de 0,7, on ne conclut pas.
+                if (cert < 0.7 || name.equals("inconnu", true)) mapOf("voix" to "pas sûr (peut-être $name)", "certitude" to cert,
+                    "conseil" to "ne prétends pas savoir qui parle ; demande-le gentiment si c'est important")
+                else mapOf("voix" to name, "certitude" to cert, "conseil" to "reconnaissance approximative : reste prudent")
+            }
+            "oublier_voix" -> {
+                voices.forget(args["prenom"] as? String ?: "")
+                refreshSettings()
+                mapOf("result" to "voix oubliée")
+            }
+            "maison_appareils" -> {
+                if (!home.configured) return mapOf("result" to "Home Assistant n'est pas relié (réglages ⚙)")
+                val list = runCatching { home.entities() }.getOrElse { return mapOf("result" to "${it.message}") }
+                val filtre = (args["filtre"] as? String)?.lowercase().orEmpty()
+                mapOf("appareils" to list.filter { filtre.isEmpty() || it.name.lowercase().contains(filtre) || it.domain.contains(filtre) }
+                    .take(60).joinToString("\n") { "${it.name} (${it.id}) : ${it.state}" })
+            }
+            "maison_commande" -> {
+                if (!home.configured) return mapOf("result" to "Home Assistant n'est pas relié (réglages ⚙)")
+                val r = runCatching {
+                    home.command(args["appareil"] as? String ?: "", args["action"] as? String ?: "basculer", (args["valeur"] as? Number)?.toDouble())
+                }.getOrElse { "échec : ${it.message}" }
+                log("🏠 $r")
+                mapOf("result" to r)
+            }
             "cache_cache_compter" -> {
                 val n = ((args["secondes"] as? Number)?.toInt() ?: 20).coerceIn(5, 60)
                 mapOf("result" to busyLearn { hideAndSeekCount(n) })

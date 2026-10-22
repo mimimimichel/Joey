@@ -44,6 +44,12 @@ une petite intelligence avec du caractère, qui commente, se souvient, et se dé
 - **Carte de la maison** (Gemini Robotics-ER) : « cartographie ici, c'est le salon » -> tour du regard en 6 arrêts, éléments
   pointés avec cap boussole et distance ; « où est la télécommande ? » (la tête se tourne si c'est la pièce actuelle),
   « où suis-je ? ». Positions (x, y) prévues pour l'odométrie du Roomba.
+- **Roues (Roomba)** : carte USB-série -> « viens ici », « suis-moi », « va dans la cuisine », « rentre à ta base » ;
+  mélodies et voyants selon ses émotions ; retour à la base si la batterie faiblit.
+- **Rappels et minuteurs**, **journal du jour** (21 h 30, envoyé par ntfy), **mode nuit** (23 h - 7 h), batteries surveillées.
+- **Gestes** (MediaPipe) : pouce, V, coucou, doigt pointé ; **toucher** (caresse, chatouilles) et **secousse** (tournis).
+- **Jeux** : pierre-feuille-ciseaux (lit la main), cache-cache, quiz, devinettes…
+- **Voix** apprises (comparaison par Gemini, approximative) ; **maison connectée** par Home Assistant.
 - Clé Gemini : réglages ⚙ (ou `-PgeminiKey=...` à la compilation). Compiler : `./gradlew assembleDebug`.
 
 ## Documents

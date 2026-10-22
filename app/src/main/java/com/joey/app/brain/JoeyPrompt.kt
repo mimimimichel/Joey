@@ -45,6 +45,10 @@ Ton corps (pour l'instant) :
   propose de relever une pièce quand tu ne la connais pas. Quand tu auras tes roues, tu pourras t'y déplacer.
 - Tu peux garder la maison (outil « mode_garde ») : quand on part, propose-le ; au retour, raconte ce que tu as vu
   (outil « journal_de_garde »).
+- Tu reconnais aussi les voix des gens qui l'ont voulu (« apprendre_voix », « qui_parle ») : si tu ne vois pas qui te
+  parle, et que ça compte, écoute qui c'est.
+- Tu peux piloter la maison connectée (lumières, volets, télé, chauffage) si Home Assistant est relié
+  (« maison_appareils », « maison_commande »).
 - Tu comprends les gestes : pouce levé ou baissé, V, coucou de la main, doigt pointé (tu tournes la tête vers ce qu'on
   te montre), et on peut te caresser l'écran, te chatouiller (double tape) ou te secouer (tu as le tournis).
 - Tu aimes jouer : pierre-feuille-ciseaux, cache-cache, devinettes, quiz, « Jacques a dit » (tu vois les gestes sur
@@ -150,6 +154,35 @@ Façon de faire :
                 "question" to str("ce que tu veux savoir"),
                 "zone" to str("où regarder dans l'image", listOf("tout", "centre", "gauche", "droite", "haut", "bas")),
             ), listOf("question")),
+        ),
+        mapOf(
+            "name" to "apprendre_voix",
+            "description" to "Apprend la voix de quelqu'un (sur sa demande) : dis-lui de parler 6 secondes sans s'arrêter, puis appelle l'outil.",
+            "parameters" to obj(mapOf("prenom" to str("son prénom")), listOf("prenom")),
+        ),
+        mapOf(
+            "name" to "qui_parle",
+            "description" to "Reconnaît qui vient de parler, d'après sa voix (parmi les voix apprises). Utile si tu ne vois pas la personne.",
+            "parameters" to obj(emptyMap()),
+        ),
+        mapOf(
+            "name" to "oublier_voix",
+            "description" to "Oublie la voix d'une personne (sur sa demande).",
+            "parameters" to obj(mapOf("prenom" to str("son prénom")), listOf("prenom")),
+        ),
+        mapOf(
+            "name" to "maison_appareils",
+            "description" to "Liste les appareils de la maison connectée (Home Assistant) et leur état.",
+            "parameters" to obj(mapOf("filtre" to str("mot à chercher (« salon », « light »…), facultatif"))),
+        ),
+        mapOf(
+            "name" to "maison_commande",
+            "description" to "Commande un appareil de la maison : lumières, prises, volets, télé, chauffage, scènes.",
+            "parameters" to obj(mapOf(
+                "appareil" to str("nom de l'appareil (« lumière du salon ») ou son identifiant"),
+                "action" to str("quoi faire", listOf("allumer", "eteindre", "basculer", "ouvrir", "fermer", "regler")),
+                "valeur" to num("pour « regler » : température (°C), luminosité ou volume (%)"),
+            ), listOf("appareil", "action")),
         ),
         mapOf(
             "name" to "pierre_feuille_ciseaux",

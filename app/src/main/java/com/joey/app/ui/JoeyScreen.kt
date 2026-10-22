@@ -350,22 +350,13 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text("Gratuite sur aistudio.google.com (« Get API key »).", fontSize = 12.sp, color = Color.Gray)
-                val ctx = androidx.compose.ui.platform.LocalContext.current
+                var saved by remember { mutableStateOf<String?>(null) }
                 androidx.compose.material3.Button(onClick = {
-                    // Conversations + ce qu'il a fait, des 3 derniers jours : à partager (Drive, mail…) pour l'améliorer.
-                    kotlin.concurrent.thread {
-                        val f = runCatching { vm.exportJournal() }.getOrNull() ?: return@thread
-                        val uri = androidx.core.content.FileProvider.getUriForFile(ctx, ctx.packageName + ".files", f)
-                        val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(android.content.Intent.EXTRA_STREAM, uri)
-                            putExtra(android.content.Intent.EXTRA_SUBJECT, f.name)
-                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-                        ctx.startActivity(android.content.Intent.createChooser(send, "Exporter le journal de Joey")
-                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-                    }
-                }, modifier = Modifier.fillMaxWidth()) { Text("📤 Exporter le journal (conversations + actions)") }
+                    // Conversations + ce qu'il a fait, des 3 derniers jours, dans les Téléchargements du téléphone.
+                    saved = "Enregistrement…"
+                    kotlin.concurrent.thread { saved = vm.saveJournalToDownloads() }
+                }, modifier = Modifier.fillMaxWidth()) { Text("📥 Enregistrer le journal (Téléchargements)") }
+                saved?.let { Text(it, fontSize = 12.sp, color = Color.Gray) }
                 Toggle("Voix de robot", robot) { robot = it }
                 Toggle("Joey voit (caméra)", camera) { camera = it }
                 Toggle("Caméra avant (côté écran)", front) { front = it }
@@ -373,6 +364,8 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Vie propre (curiosité, ennui, sommeil)", life) { life = it }
                 Toggle("Gestes (pouce, coucou, doigt pointé)", vm.flagValue("gestures", true)) { vm.setFlagValue("gestures", it) }
                 Toggle("Mode nuit (23 h - 7 h)", vm.flagValue("night_mode", true)) { vm.setFlagValue("night_mode", it) }
+                Toggle("Langage du corps (hochements, respiration)", vm.flagValue("body_language", true)) { vm.setFlagValue("body_language", it) }
+                Toggle("Il parle de lui-même (salue, remarque)", vm.flagValue("initiatives", true)) { vm.setFlagValue("initiatives", it) }
                 Toggle("Journal du jour (21 h 30, sur ton téléphone)", vm.flagValue("diary", true)) { vm.setFlagValue("diary", it) }
                 Toggle("🛡 Mode garde (journal, rondes, alertes)", s.watch) { vm.setWatch(it) }
                 OutlinedTextField(value = ntfy, onValueChange = { ntfy = it.trim() }, singleLine = true,

@@ -46,7 +46,7 @@ class Expressive(private val now: () -> Long = { System.currentTimeMillis() }, p
         if (speaking) {
             tilt += ((fast - slow) * 16).coerceIn(-3.0, 8.0) * (0.7 + 0.3 * e)
             if (t >= nextSwayAt) {
-                swayFrom = currentSway(t); swayTo = (random() * 2 - 1) * 8.0; swayAt = t
+                swayFrom = currentSway(t); swayTo = (random() * 2 - 1) * 5.0; swayAt = t
                 nextSwayAt = t + 2200 + (random() * 2000).toLong()
             }
         } else if (swayTo != 0.0) { // il se tait : retour en douceur à la pose de départ
@@ -67,8 +67,8 @@ class Expressive(private val now: () -> Long = { System.currentTimeMillis() }, p
             thinkW = minOf(1.0, thinkW + dt / 0.35)
         } else thinkW = maxOf(0.0, thinkW - dt / 0.35)
         if (thinkW > 0) {
-            pan += thinkW * (9.0 + 4.0 * sin(2 * PI * t / 2400.0))
-            tilt += thinkW * 9.0
+            pan += thinkW * (5.0 + 2.0 * sin(2 * PI * t / 2400.0))
+            tilt += thinkW * 5.0
             screen += (thinkW * 15).toFloat()
         }
         // L'attitude du moment (quelques secondes après un changement d'humeur, ou tant qu'elle dure).

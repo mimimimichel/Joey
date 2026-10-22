@@ -386,6 +386,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return journal.export(out, days = 3, header = header)
     }
 
+    /**
+     * Enregistre le journal dans les Téléchargements du téléphone. Renvoie le nom du fichier, ou un message d'erreur.
+     * Bloquant.
+     */
+    fun saveJournalToDownloads(): String {
+        val f = exportJournal()
+        val ctx = getApplication<Application>()
+        return runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Downloads.DISPLAY_NAME, f.name)
+                    put(android.provider.MediaStore.Downloads.MIME_TYPE, "text/plain")
+                    put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val uri = ctx.contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: error("Téléchargements inaccessibles")
+                ctx.contentResolver.openOutputStream(uri)?.use { out -> f.inputStream().use { it.copyTo(out) } }
+                values.clear(); values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+                ctx.contentResolver.update(uri, values, null, null)
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                dir.mkdirs()
+                f.copyTo(File(dir, f.name), overwrite = true)
+            }
+            log("📥 Journal enregistré dans Téléchargements : ${f.name}")
+            "Enregistré dans Téléchargements : ${f.name}"
+        }.getOrElse { "Impossible d'enregistrer : ${it.message}" }
+    }
+
     // ---- vie : humeur, langage du corps, réactions, initiatives ------------------------------------
     private val temperament = com.joey.app.life.Temperament()
     private val expressive = com.joey.app.life.Expressive()
@@ -414,7 +444,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val free = gimbal.ready && !s.busy && now >= follower.pausedUntil && !dancing && !questFollowing && !calibrating &&
             trackLabels == null && now - lastTrackAimAt > 1500 && follower.enabled
         if (!free) { idleBase = null; return }
-        val base = idleBase ?: head.pose()?.also { idleBase = it } ?: return
+        // La pose de repos, SANS les petits mouvements expressifs du moment (sinon, à chaque reprise, il les ajoutait
+        // à la pose et la tête montait petit à petit vers le plafond).
+        val base = idleBase ?: head.pose()?.let { p ->
+            Pair(Head.wrap(p.first - exprPose.pan), (p.second - exprPose.tilt).coerceIn(-35.0, 35.0))
+        }?.also { idleBase = it } ?: return
         head.aim(base.first, base.second)
     }
 
@@ -476,8 +510,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (p != null) { head.look(null, (p.second + 9).coerceAtMost(60.0), timeoutMs = 600); head.look(null, p.second, timeoutMs = 800) }
             "sursaut"
         }
-        live?.event("Un bruit fort et soudain vient de retentir près de toi : sursaute (« Oh ! ») et demande ce que c'est, " +
-            "en quelques mots.", reply = true)
+        // Il sursaute (visage, tête, roues) sans en parler.
     }
 
     /** On le soulève, on le repose, on le pousse, il tombe. */
@@ -500,7 +533,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (e == com.joey.app.life.BodyMotion.Event.LIFTED || e == com.joey.app.life.BodyMotion.Event.FALLING) r?.stop()
         temperament.feel(if (e == com.joey.app.life.BodyMotion.Event.PUT_DOWN) 0.02 else -0.03)
         setMood(mood, sound = e != com.joey.app.life.BodyMotion.Event.PUT_DOWN)
-        if (flag("react_motion", true)) speakUp(text)
+        // Il ne parle que pour ce qui compte vraiment (soulevé, chute) ; le reste se voit sur son visage.
+        val big = e == com.joey.app.life.BodyMotion.Event.LIFTED || e == com.joey.app.life.BodyMotion.Event.FALLING
+        if (flag("react_motion", true) && big) remark(text, minGapMs = 20_000)
     }
 
     // ---- le Roomba exprime aussi -------------------------------------------------------------------
@@ -583,7 +618,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (change != null) {
                 lastNoveltyRemark = System.currentTimeMillis()
                 log("🧐 Ça a changé : $change")
-                speakUp("[Initiative] Tu remarques un changement dans la pièce depuis la dernière fois : $change. Fais-en une " +
+                remark("[Initiative] Tu remarques un changement dans la pièce depuis la dernière fois : $change. Fais-en une " +
                     "remarque curieuse ou amusée, en une phrase (pose une question si tu veux).")
             }
         }
@@ -872,9 +907,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             handAttention.update(pose, if (recentFace) targetFaceX else null, if (recentFace) targetFaceY else null)
         when (val g = body.update(now, hand, pose)) {
             null -> {}
-            com.joey.app.senses.Body.ThumbUp -> { log("👍"); temperament.feel(0.1); roombaGesture(RoombaGesture.HAPPY); setMood(Mood.CONTENT); live?.event("La personne te fait un pouce levé 👍.", reply = true) }
-            com.joey.app.senses.Body.ThumbDown -> { log("👎"); temperament.feel(-0.08); setMood(Mood.TRISTE); live?.event("La personne te fait un pouce vers le bas 👎.", reply = true) }
-            com.joey.app.senses.Body.Victory -> { log("✌"); live?.event("La personne fait le V avec ses doigts ✌ (veut-elle une photo ?).", reply = true) }
+            com.joey.app.senses.Body.ThumbUp -> { log("👍"); temperament.feel(0.1); roombaGesture(RoombaGesture.HAPPY); setMood(Mood.CONTENT); }
+            com.joey.app.senses.Body.ThumbDown -> { log("👎"); temperament.feel(-0.08); setMood(Mood.TRISTE); }
+            com.joey.app.senses.Body.Victory -> { log("✌"); setMood(Mood.CONTENT, sound = false) }
             com.joey.app.senses.Body.Wave -> {
                 log("👋 Coucou")
                 setMood(Mood.CONTENT)
@@ -916,13 +951,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         setMood(Mood.AMUSE)
         roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.HAPPY)
         if (gimbal.ready && !_state.value.busy) moveAsync(holdMs = 1000) { head.shake() }
-        live?.event("On te chatouille (double tape sur ton écran) : réagis en une phrase.", reply = true)
+        remark("On te chatouille (double tape sur ton écran) : réagis en trois mots au plus.", minGapMs = 30_000)
     }
 
     fun petted() {
         setMood(Mood.CONTENT)
         roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.SLEEPY)
-        live?.event("On te caresse l'écran : tu ronronnes à ta façon de robot, en une phrase.", reply = true)
+        remark("On te caresse l'écran : un petit ronronnement de robot, en trois mots au plus.", minGapMs = 30_000)
     }
 
     private fun shaken() {
@@ -931,7 +966,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         moodResetAt = 0
         _state.update { it.copy(mood = Mood.ETOURDI) }
         roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.SURPRISED)
-        live?.event("On vient de te secouer : tu as le tournis, dis-le avec humour.", reply = true)
+        remark("On vient de te secouer : tu as le tournis, en quelques mots.", minGapMs = 20_000)
         thread(isDaemon = true) { Thread.sleep(5000); if (_state.value.mood == Mood.ETOURDI) _state.update { it.copy(mood = Mood.NEUTRE) } }
     }
 
@@ -1339,6 +1374,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var photosToday = 0
 
     /** Fait dire quelque chose à Joey : dans la conversation, ou en la démarrant exprès. */
+    @Volatile private var lastRemarkAt = 0L
+
+    /**
+     * Remarque spontanée (pas demandée) : seulement en conversation, quand personne ne parle, et pas plus d'une toutes
+     * les [minGapMs]. Sinon on ne dit rien (il réagit déjà avec son visage et sa tête).
+     */
+    private fun remark(text: String, minGapMs: Long = 45_000) {
+        val l = live ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastRemarkAt < minGapMs || now - lastPersonTalkAt < 4000 || _state.value.live != LiveState.LISTENING) return
+        lastRemarkAt = now
+        l.event(text, reply = true)
+    }
+
     private fun speakUp(text: String) {
         val l = live
         if (l != null) { l.event(text, reply = true); return }
@@ -2025,8 +2074,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             deliverLater(name, args, r)
         }
         return mapOf("result" to "C'est lancé (ça prend quelques secondes). Le résultat t'arrivera tout seul dans un message de " +
-            "l'application. En attendant, dis en quelques mots ce que tu fais (« je regarde autour… ») et continue de parler " +
-            "normalement si on te parle. Ne dis pas que c'est trouvé ou fait avant d'avoir reçu le résultat.")
+            "l'application. En attendant, ne commente pas (au plus « je regarde »), réponds normalement si on te parle, et ne " +
+            "dis pas que c'est trouvé ou fait avant d'avoir reçu le résultat.")
     }
 
     /** Donne à Gemini le résultat d'un outil long, quand personne ne parle (sans couper la parole). */
@@ -2579,14 +2628,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val think = st.busy || st.live == LiveState.CONNECTING ||
                     (st.live == LiveState.LISTENING && now - lastPersonTalkAt in 600..6000 && lastJoeyTalkAt < lastPersonTalkAt)
                 thinkingNow = think
+                val thinkPose = st.live == LiveState.CONNECTING ||
+                    (st.live == LiveState.LISTENING && now - lastPersonTalkAt in 600..6000 && lastJoeyTalkAt < lastPersonTalkAt)
                 exprPose = expressive.pose(
                     voice = live?.level ?: 0f,
                     speaking = st.live == LiveState.SPEAKING,
                     listening = now - lastPersonTalkAt < 1500,
-                    thinking = think,
+                    thinking = thinkPose && !st.busy,
                     energy = temperament.energy(),
                     mood = st.mood, moodSince = exprMoodSince,
-                )
+                ).let { if (flag("body_language", true)) it else com.joey.app.life.Expressive.Pose(0.0, 0.0, 0f) }
             }
             runCatching { head.aimStep() }
         }

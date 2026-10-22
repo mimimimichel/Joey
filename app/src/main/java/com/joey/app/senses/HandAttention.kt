@@ -15,6 +15,9 @@ class HandAttention(private val now: () -> Long = { System.currentTimeMillis() }
         const val NOSE = 0
         const val L_WRIST = 15; const val R_WRIST = 16
         const val L_INDEX = 19; const val R_INDEX = 20
+        const val L_SHOULDER = 11; const val R_SHOULDER = 12; const val L_ELBOW = 13; const val R_ELBOW = 14
+        /** Même chose pour une main déduite du bras (hors de l'image). */
+        const val MOVE_GUESSED = 0.10f
         /** Déplacement de la main (part de l'image) en 0,7 s pour dire qu'elle bouge vraiment. */
         const val MOVE = 0.07f
         const val HOLD_MS = 1200L   // il reste sur les mains tant qu'elles bougent, plus ce temps
@@ -39,11 +42,26 @@ class HandAttention(private val now: () -> Long = { System.currentTimeMillis() }
 
     private fun visible(p: List<FloatArray>, i: Int) = p.size > i && (p[i].size < 3 || p[i][2] > 0.5f)
 
-    /** Position d'une main : entre le poignet et le bout de l'index (si on le voit). */
-    private fun hand(p: List<FloatArray>, wrist: Int, index: Int): Pair<Float, Float>? {
-        if (!visible(p, wrist)) return null
-        return if (visible(p, index)) ((p[wrist][0] + p[index][0]) / 2) to ((p[wrist][1] + p[index][1]) / 2)
-        else p[wrist][0] to p[wrist][1]
+    private fun dist(p: List<FloatArray>, a: Int, b: Int) = hypot(p[a][0] - p[b][0], p[a][1] - p[b][1])
+
+    /**
+     * Position d'une main (et si elle est vue ou déduite) : entre le poignet et le bout de l'index si on les voit.
+     * Hors de l'image (souvent : la caméra est centrée sur le visage, les mains sont plus bas), on la déduit du bras :
+     * le poignet estimé par MediaPipe s'il est cohérent avec la longueur du bras, sinon le bras prolongé
+     * (épaule -> coude, l'avant-bras est à peu près aussi long).
+     */
+    private fun hand(p: List<FloatArray>, shoulder: Int, elbow: Int, wrist: Int, index: Int): Pair<Pair<Float, Float>, Boolean>? {
+        if (visible(p, wrist)) {
+            val pos = if (visible(p, index)) ((p[wrist][0] + p[index][0]) / 2) to ((p[wrist][1] + p[index][1]) / 2)
+            else p[wrist][0] to p[wrist][1]
+            return pos to true
+        }
+        if (!visible(p, elbow) || !visible(p, shoulder)) return null
+        val arm = dist(p, shoulder, elbow).coerceAtLeast(0.02f)
+        val guessed = p.size > wrist && p[wrist].size >= 2 && dist(p, elbow, wrist) in (arm * 0.5f)..(arm * 1.5f)
+        val pos = if (guessed) p[wrist][0] to p[wrist][1]
+        else (p[elbow][0] + (p[elbow][0] - p[shoulder][0])) to (p[elbow][1] + (p[elbow][1] - p[shoulder][1]))
+        return pos to false
     }
 
     /**
@@ -63,18 +81,18 @@ class HandAttention(private val now: () -> Long = { System.currentTimeMillis() }
         val nose = if (visible(pose, NOSE)) pose[NOSE][0] to pose[NOSE][1] else 0f to 0f
         var bestMove = 0f
         var best: Pair<Float, Float>? = null
-        for ((k, ids) in listOf(L_WRIST to L_INDEX, R_WRIST to R_INDEX).withIndex()) {
+        for ((k, ids) in listOf(intArrayOf(L_SHOULDER, L_ELBOW, L_WRIST, L_INDEX), intArrayOf(R_SHOULDER, R_ELBOW, R_WRIST, R_INDEX)).withIndex()) {
             val h = history[k]
-            val pos = hand(pose, ids.first, ids.second)
-            if (pos == null) { h.clear(); continue }
+            val found = hand(pose, ids[0], ids[1], ids[2], ids[3])
+            if (found == null) { h.clear(); continue }
+            val (pos, seen) = found
             // Position par rapport au nez : quand c'est la tête de Joey qui tourne, tout bouge ensemble et ça ne compte pas.
             val rx = pos.first - nose.first
             val ry = pos.second - nose.second
             h.addLast(Triple(t, rx, ry))
             while (h.isNotEmpty() && t - h.first().first > 700) h.removeFirst()
-            // Une main au repos en bas de l'image (sur les genoux) ne compte pas.
-            if (pos.second > 0.92f) continue
-            val moved = h.maxOf { hypot(it.second - rx, it.third - ry) }
+            // Déduite du bras : plus imprécise, il faut qu'elle bouge un peu plus pour y croire.
+            val moved = h.maxOf { hypot(it.second - rx, it.third - ry) } * (if (seen) 1f else MOVE / MOVE_GUESSED)
             if (moved > bestMove) { bestMove = moved; best = pos }
         }
         val moving = bestMove > MOVE && best != null
@@ -101,7 +119,8 @@ class HandAttention(private val now: () -> Long = { System.currentTimeMillis() }
         if (active && (t > until || t - startAt > MAX_MS)) { active = false; endedAt = t }
         if (!active) return null
         if (faceX == null || faceY == null) return handX to handY
-        // Les deux tiennent dans l'image : on vise entre les deux (plus près des mains) ; sinon les mains.
+        // Les deux tiennent dans l'image : on vise entre les deux (plus près des mains) ; sinon les mains (même hors de
+        // l'image : la tête descend vers elles).
         return if (abs(handX - faceX) < 1.3f && abs(handY - faceY) < 1.3f)
             (faceX * 0.4f + handX * 0.6f) to (faceY * 0.4f + handY * 0.6f)
         else handX to handY

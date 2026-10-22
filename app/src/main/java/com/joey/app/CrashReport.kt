@@ -37,6 +37,10 @@ object CrashReport {
         }
     }
 
+    /** Les dernières étapes notées (sans rien effacer), ou null. */
+    fun lastSteps(ctx: Context): String? = runCatching { File(ctx.filesDir, "dernieres_etapes.txt").readText() }.getOrNull()
+        ?.lines()?.takeLast(8)?.joinToString(" | ")
+
     /** Le rapport du dernier plantage (puis l'efface), ou null. */
     fun take(ctx: Context): String? {
         val f = file(ctx)

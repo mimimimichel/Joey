@@ -31,6 +31,23 @@ class HandAttentionTest {
         assertNull(h.aimPoint(0f, -0.4f))
     }
 
+    /** Mains hors de l'image (sous le cadre) : on les suit grâce aux bras (épaule -> coude). */
+    @Test fun handsBelowTheFrameFollowedByTheArm() {
+        fun arm(ex: Float, ey: Float) = List(33) { floatArrayOf(0f, 0f, 0f) }.toMutableList().apply {
+            this[0] = floatArrayOf(0.5f, 0.3f, 1f)
+            this[12] = floatArrayOf(0.62f, 0.62f, 1f) // épaule droite
+            this[14] = floatArrayOf(ex, ey, 0.9f)      // coude, au bord bas de l'image
+            this[16] = floatArrayOf(0f, 0f, 0.1f)      // poignet : invisible
+        }
+        repeat(3) { h.update(arm(0.66f, 0.95f), 0f, -0.4f); t += 300 }
+        h.update(arm(0.78f, 0.9f), 0f, -0.4f); t += 300  // il lève et écarte le bras
+        h.update(arm(0.66f, 0.95f), 0f, -0.4f); t += 300
+        h.update(arm(0.8f, 0.88f), 0f, -0.4f); t += 300
+        assertTrue("regarde les mains déduites", h.active)
+        val p = h.aimPoint(0f, -0.4f)!!
+        assertTrue("plus bas que le visage (${p.second})", p.second > 0.3f)
+    }
+
     @Test fun headTurningIsNotHandsMoving() {
         for (i in 0 until 8) step(pose(0.7f, 0.6f, shift = i * 0.05f)) // tout glisse ensemble
         assertFalse(h.active)

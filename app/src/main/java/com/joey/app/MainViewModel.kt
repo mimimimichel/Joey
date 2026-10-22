@@ -200,7 +200,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.FRENCH)
+    /** Journal de bord sur le téléphone (exportable) : conversations, actions, mesures. */
+    private val journal = com.joey.app.brain.Journal(File(app.filesDir, "journal"))
+
     fun log(text: String) {
+        journal.write("log", text)
         val line = "${timeFmt.format(Date())} $text"
         _state.update { it.copy(log = (it.log + line).takeLast(200)) }
     }
@@ -358,6 +362,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return if (known) "tu ne vois pas $w (cherche-la avec « chercher », ou demande-lui de se montrer)"
         else "tu ne connais pas encore le visage de $w et tu ne vois qu'une personne : demande-lui de se mettre devant toi " +
             "(tu peux apprendre son visage avec « apprendre_visage »)"
+    }
+
+    // ---- export du journal -----------------------------------------------------------------------
+    /** Prépare le journal des 3 derniers jours (avec l'état de Joey en tête) pour le partager. Bloquant. */
+    fun exportJournal(): File {
+        flushTurn()
+        val ctx = getApplication<Application>()
+        val safeFlags = prefs.all.filter { (k, v) -> v is Boolean || k in setOf("head_speed_pct", "speed_table", "phone_pan_sign",
+            "phone_tilt_sign", "follow_pan_sign", "follow_tilt_sign", "mic_side_sign") }
+        val header = buildString {
+            appendLine("Journal de Joey ${BuildConfig.VERSION_NAME} — exporté le ${Date()}")
+            appendLine("Téléphone : ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}")
+            appendLine("Nacelle : ${_state.value.gimbal} ; capteurs du téléphone pour la tête : ${head.usesPhone} ; vitesse max mesurée : %.0f°/s".format(head.bestSpeed))
+            appendLine("Caméra : ${camera.cameraChoice}")
+            appendLine("Roomba : ${if (roomba != null) "branché" else "non"} ; personnes connues : ${people.names().size} ; souvenirs : ${memory.all().size}")
+            appendLine("Humeur : ${temperament.describe()}")
+            appendLine("Réglages : $safeFlags")
+            CrashReport.lastSteps(ctx)?.let { appendLine("Dernières étapes : $it") }
+        }
+        val out = File(ctx.cacheDir, "export/joey_journal_${java.text.SimpleDateFormat("yyyyMMdd_HHmm", java.util.Locale.FRENCH).format(Date())}.txt")
+        File(ctx.cacheDir, "export").listFiles()?.forEach { it.delete() }
+        return journal.export(out, days = 3, header = header)
     }
 
     // ---- vie : humeur, langage du corps, réactions, initiatives ------------------------------------
@@ -835,7 +861,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun readBody(bmp: android.graphics.Bitmap) {
         val now = System.currentTimeMillis()
         // Téléphone lent (S8+…) : on espace l'analyse pour que le suivi du visage reste fluide (≤ ~25 % du temps).
-        val every = maxOf(if (rpsWaiting || handAttention.active) 150L else 300L, bodyCostMs * 4)
+        val every = maxOf(if (rpsWaiting || handAttention.active) 150L else 220L, bodyCostMs * 3)
         if (!flag("gestures", true) || now - lastBodyAt < every) return
         lastBodyAt = now
         val small = android.graphics.Bitmap.createScaledBitmap(bmp, 480, 480 * bmp.height / bmp.width, true)
@@ -1736,7 +1762,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             tools = GeminiLive.toJson(JoeyPrompt.TOOLS) as JSONArray,
             onTool = ::onTool,
             onTranscript = ::onTranscript,
-            onTurnEnd = { lastSpeaker = null },
+            onTurnEnd = { lastSpeaker = null; flushTurn() },
             onState = ::onLiveState,
             onError = { e -> log(e); message(e) },
             bargeIn = flag("barge_in", true),
@@ -1768,6 +1794,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(live = LiveState.OFF, mood = Mood.NEUTRE) }
     }
 
+    @Volatile private var lastLatencyMark = 0L
+    @Volatile private var lastJournalState: LiveState? = null
+
     private fun onLiveState(s: LiveState) {
         _state.update { it.copy(live = s) }
         if (s == LiveState.LISTENING && !greeted) {
@@ -1783,8 +1812,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 "Ton humeur en ce moment : ${temperament.describe()}. " +
                 "Salue en une phrase courte, à ta façon.", reply = true)
         }
-        if (s == LiveState.SPEAKING) lastTalkAt = System.currentTimeMillis()
+        if (s == LiveState.SPEAKING) {
+            val now = System.currentTimeMillis()
+            if (lastPersonTalkAt > lastLatencyMark && now - lastPersonTalkAt < 30_000) {
+                lastLatencyMark = lastPersonTalkAt
+                journal.write("mesure", "réponse ${now - lastPersonTalkAt} ms après tes derniers mots")
+            }
+            lastTalkAt = now
+        }
+        if (s != lastJournalState) { journal.write("etat", "conversation : $s"); lastJournalState = s }
         if (s == LiveState.OFF) {
+            flushTurn()
             live = null
             extractMemories()
             updateWake()
@@ -1920,7 +1958,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         moveAsync(holdMs = 0) { findCaller(0) }
     }
 
+    private val turnText = StringBuilder()
+    @Volatile private var turnPerson: Boolean? = null
+
+    /** Écrit la réplique en cours dans le journal (quand l'autre prend la parole ou que le tour se termine). */
+    private fun flushTurn() = synchronized(turnText) {
+        val who = turnPerson ?: return@synchronized
+        val t = turnText.toString().trim()
+        if (t.isNotEmpty()) journal.write(if (who) "toi" else "joey", t)
+        turnText.setLength(0)
+        turnPerson = null
+    }
+
     private fun onTranscript(person: Boolean, text: String) {
+        synchronized(turnText) {
+            if (turnPerson != null && turnPerson != person) flushTurn()
+            turnPerson = person
+            turnText.append(text)
+        }
         lastTalkAt = System.currentTimeMillis()
         if (person) lastPersonTalkAt = lastTalkAt else lastJoeyTalkAt = lastTalkAt
         if (person) maybeSearchSpeaker()
@@ -1955,12 +2010,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val toolPool = Executors.newCachedThreadPool()
 
     private fun onTool(name: String, args: Map<String, Any?>): Map<String, Any?> {
-        if (name !in longTools) return runTool(name, args)
+        flushTurn()
+        val t0 = System.currentTimeMillis()
+        journal.write("outil", "$name ${args}")
+        if (name !in longTools) return runTool(name, args).also {
+            journal.write("outil", "$name -> $it (${System.currentTimeMillis() - t0} ms)")
+        }
         val job = toolPool.submit<Map<String, Any?>> { runTool(name, args) }
         // Réponse rapide (refus, déjà vu…) : on la donne tout de suite.
         runCatching { return job.get(1500, TimeUnit.MILLISECONDS) }
         thread(name = "resultat-$name", isDaemon = true) {
             val r = runCatching { job.get() }.getOrElse { mapOf("result" to "interrompu") }
+            journal.write("outil", "$name -> $r (${System.currentTimeMillis() - t0} ms, en arrière-plan)")
             deliverLater(name, args, r)
         }
         return mapOf("result" to "C'est lancé (ça prend quelques secondes). Le résultat t'arrivera tout seul dans un message de " +

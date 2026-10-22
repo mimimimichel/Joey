@@ -128,7 +128,15 @@ class Camera : Eyes {
                         img.close()
                     }
                 }
-                val selector = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+                // La caméra la plus grand angle de ce côté (certains téléphones en ont deux à l'avant).
+                val facing = if (front) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+                val candidates = runCatching { p.availableCameraInfos.filter { it.lensFacing == facing } }.getOrDefault(emptyList())
+                val widest = candidates.maxByOrNull { fovOf(it)?.first ?: 0.0 }
+                val selector = if (widest != null && candidates.size > 1)
+                    CameraSelector.Builder().addCameraFilter { list -> list.filter { it == widest }.ifEmpty { list } }.build()
+                else if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+                cameraChoice = "${candidates.size} caméra(s) de ce côté" +
+                    (widest?.let { w -> fovOf(w)?.let { " ; la plus large : %.0f° x %.0f°".format(it.first, it.second) } } ?: "")
                 this.front = front
                 val capture = androidx.camera.core.ImageCapture.Builder()
                     .setCaptureMode(androidx.camera.core.ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
@@ -153,21 +161,35 @@ class Camera : Eyes {
     private var appContext: android.content.Context? = null
 
     /** Prend une vraie photo (pleine définition) et l'enregistre dans la galerie (Images/Joey). [done] : message. */
-    /** Champ de vision réel de l'objectif (focale et taille du capteur). */
+    /** Quelle caméra a été choisie (pour le journal). */
+    @Volatile var cameraChoice = ""
+        private set
+
+    /** Champ de vision (grand côté, petit côté en 4:3) d'une caméra, d'après sa focale et la taille du capteur. */
     @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+    private fun fovOf(info: androidx.camera.core.CameraInfo): Pair<Double, Double>? = runCatching {
+        val c = androidx.camera.camera2.interop.Camera2CameraInfo.from(info)
+        val f = c.getCameraCharacteristic(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            ?.minOrNull() ?: return@runCatching null
+        val size = c.getCameraCharacteristic(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return@runCatching null
+        val long = maxOf(size.width, size.height).toDouble()
+        val short = minOf(minOf(size.width, size.height).toDouble(), long * 3 / 4)
+        Math.toDegrees(2 * kotlin.math.atan(long / (2 * f))) to Math.toDegrees(2 * kotlin.math.atan(short / (2 * f)))
+    }.getOrNull()
+
+    /** Champ de vision réel, et zoom arrière au maximum si l'objectif le permet (grand angle). */
     private fun readFov(cam: androidx.camera.core.Camera) {
         runCatching {
-            val info = androidx.camera.camera2.interop.Camera2CameraInfo.from(cam.cameraInfo)
-            val f = info.getCameraCharacteristic(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                ?.firstOrNull() ?: return
-            val size = info.getCameraCharacteristic(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return
-            val long = maxOf(size.width, size.height).toDouble()
-            // L'analyse est en 4:3 : tout le grand côté, et 3/4 de lui pour le petit.
-            val short = minOf(minOf(size.width, size.height).toDouble(), long * 3 / 4)
-            val fl = Math.toDegrees(2 * kotlin.math.atan(long / (2 * f)))
-            val fs = Math.toDegrees(2 * kotlin.math.atan(short / (2 * f)))
-            if (fl in 30.0..130.0 && fs in 20.0..110.0) { fovLong = fl; fovShort = fs }
-            Log.i("Camera", "champ de vision %.0f° x %.0f°".format(fovLong, fovShort))
+            val minZoom = cam.cameraInfo.zoomState.value?.minZoomRatio ?: 1f
+            if (minZoom < 0.99f) cam.cameraControl.setZoomRatio(minZoom)
+            val (fl, fs) = fovOf(cam.cameraInfo) ?: return
+            // Zoom arrière : le champ s'élargit d'autant.
+            val k = (1.0 / minZoom.coerceAtMost(1f)).coerceAtLeast(1.0)
+            val wl = Math.toDegrees(2 * kotlin.math.atan(kotlin.math.tan(Math.toRadians(fl / 2)) * k))
+            val ws = Math.toDegrees(2 * kotlin.math.atan(kotlin.math.tan(Math.toRadians(fs / 2)) * k))
+            if (wl in 30.0..140.0 && ws in 20.0..120.0) { fovLong = wl; fovShort = ws }
+            cameraChoice += " ; utilisée : %.0f° x %.0f°%s".format(fovLong, fovShort, if (minZoom < 0.99f) " (zoom %.2f)".format(minZoom) else "")
+            Log.i("Camera", cameraChoice)
         }
     }
 

@@ -25,3 +25,16 @@ class NativeGuardTest {
         assertEquals(0, File(ctx.filesDir, "garde_natif").listFiles()!!.size)
     }
 }
+
+/** Après un plantage, l'écran du rapport s'affiche seul (Joey ne démarre pas tant qu'on n'a pas appuyé). */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
+class CrashScreenTest {
+    @Test fun showsReportBeforeStarting() {
+        val app = org.robolectric.RuntimeEnvironment.getApplication() as JoeyApp
+        app.lastCrash = "Joey 0.x — test\njava.lang.IllegalStateException: boum"
+        val a = org.robolectric.Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        org.junit.Assert.assertFalse(a.isFinishing)
+        org.junit.Assert.assertNull(app.lastCrash)
+    }
+}

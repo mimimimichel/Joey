@@ -26,6 +26,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -75,15 +79,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Avant tout : un plantage natif au lancement précédent ? (l'étape fautive sera sautée cette fois)
-        val stepsBefore = runCatching { java.io.File(filesDir, "dernieres_etapes.txt").readText() }.getOrNull().orEmpty()
-        NativeGuard.init(this)
-        val nativeCrash = if (NativeGuard.justBanned.isEmpty()) null else
-            "Joey ${BuildConfig.VERSION_NAME} — Android ${Build.VERSION.RELEASE} (${Build.MANUFACTURER} ${Build.MODEL})\n" +
-                "Plantage natif pendant : ${NativeGuard.justBanned.joinToString()}. Cette étape est désactivée, " +
-                "Joey démarre sans.\n\nDernières étapes :\n$stepsBefore"
-        val lastCrash = CrashReport.take(this) ?: nativeCrash
-        CrashReport.install(this)
+        // Le rapport du plantage précédent (lu par JoeyApp avant tout le reste).
+        val app = application as? JoeyApp
+        val lastCrash = app?.lastCrash
+        app?.lastCrash = null
+        if (app == null) CrashReport.install(this)
         CrashReport.mark("lancement")
         enableEdgeToEdge()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) // le visage reste allumé
@@ -92,27 +92,53 @@ class MainActivity : ComponentActivity() {
             hide(WindowInsetsCompat.Type.systemBars())
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
+        // Il a planté la dernière fois : on montre le rapport SEUL, avant de démarrer quoi que ce soit
+        // (sinon il replante avant de pouvoir l'afficher).
+        if (lastCrash != null) {
+            setContent {
+                MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF4FC3F7))) {
+                    CrashScreen(lastCrash) { startJoey() }
+                }
+            }
+            return
+        }
+        startJoey()
+    }
+
+    private var started = false
+
+    private fun startJoey() {
+        if (started) return
+        started = true
+        CrashReport.mark("démarrage de Joey")
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF4FC3F7))) {
                 JoeyScreen(vm)
-                var crash by remember { mutableStateOf(lastCrash) }
-                crash?.let { report ->
-                    val clipboard = LocalClipboardManager.current
-                    AlertDialog(
-                        onDismissRequest = { crash = null },
-                        title = { Text("Joey a planté la dernière fois") },
-                        text = {
-                            Text("Copie ce rapport et envoie-le pour corriger le problème :\n\n$report",
-                                fontSize = 11.sp, modifier = Modifier.verticalScroll(rememberScrollState()))
-                        },
-                        confirmButton = {
-                            TextButton(onClick = { clipboard.setText(AnnotatedString(report)); crash = null }) { Text("Copier") }
-                        },
-                        dismissButton = { TextButton(onClick = { crash = null }) { Text("Fermer") } },
-                    )
-                }
             }
         }
         if (needed.all(::granted)) afterPermissions() else ask.launch(needed)
+    }
+
+}
+
+@androidx.compose.runtime.Composable
+private fun CrashScreen(report: String, onContinue: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+    androidx.compose.foundation.layout.Column(
+        Modifier.fillMaxSize().background(Color.Black).padding(24.dp),
+    ) {
+        Text("Joey a planté la dernière fois", color = Color.White, fontSize = 20.sp)
+        Text("Appuie sur « Copier » et envoie le texte pour qu'on corrige.", color = Color.LightGray, fontSize = 14.sp,
+            modifier = Modifier.padding(vertical = 8.dp))
+        androidx.compose.foundation.layout.Row {
+            androidx.compose.material3.Button(onClick = { clipboard.setText(AnnotatedString(report)); copied = true }) {
+                Text(if (copied) "Copié ✓" else "Copier")
+            }
+            androidx.compose.foundation.layout.Spacer(Modifier.padding(8.dp))
+            TextButton(onClick = onContinue) { Text("Lancer Joey quand même") }
+        }
+        Text(report, color = Color(0xFFB0BEC5), fontSize = 11.sp,
+            modifier = Modifier.padding(top = 12.dp).verticalScroll(rememberScrollState()))
     }
 }

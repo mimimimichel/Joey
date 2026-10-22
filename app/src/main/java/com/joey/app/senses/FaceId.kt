@@ -32,7 +32,8 @@ class FaceId(private val context: Context) {
             val fd = context.assets.openFd(MODEL)
             val buf: MappedByteBuffer = FileInputStream(fd.fileDescriptor).channel
                 .map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
-            Interpreter(buf, Interpreter.Options().setNumThreads(2))
+            com.joey.app.NativeGuard.attempt("visages_id") { Interpreter(buf, Interpreter.Options().setNumThreads(2)) }
+                ?: error("a déjà fait planter Joey")
         }.onFailure { Log.e("FaceId", "modèle", it); failed = true }.getOrNull().also { interpreter = it }
     }
 

@@ -33,8 +33,8 @@ class ObjectSense(private val context: Context, private val log: (String) -> Uni
     private fun detector(): ObjectDetector? {
         detector?.let { return it }
         if (failed) return null
-        detector = runCatching { create(Delegate.GPU) }.onFailure { Log.w("ObjectSense", "GPU indisponible", it) }.getOrNull()
-            ?: runCatching { create(Delegate.CPU) }.onFailure {
+        detector = runCatching { com.joey.app.NativeGuard.attempt("objets_gpu") { create(Delegate.GPU) } }.onFailure { Log.w("ObjectSense", "GPU indisponible", it) }.getOrNull()
+            ?: runCatching { com.joey.app.NativeGuard.attempt("objets_cpu") { create(Delegate.CPU) } ?: error("a déjà fait planter Joey") }.onFailure {
                 Log.e("ObjectSense", "détecteur indisponible", it)
                 log("Détecteur d'objets indisponible : ${it.message}")
                 failed = true

@@ -16,17 +16,20 @@ class GestureWatcher(private val context: Context) {
     private var pose: PoseLandmarker? = null
     private var failed = false
 
-    private fun <T> make(build: (Delegate) -> T): T? =
-        runCatching { build(Delegate.GPU) }.recoverCatching { build(Delegate.CPU) }.onFailure { Log.e("Gestes", "modèle indisponible", it) }.getOrNull()
+    // Sur le processeur : la carte graphique sert déjà au détecteur d'objets (plusieurs modèles GPU à la fois peuvent
+    // faire planter certains téléphones, sans rapport).
+    private fun <T> make(key: String, build: (Delegate) -> T): T? =
+        runCatching { com.joey.app.NativeGuard.attempt(key) { build(Delegate.CPU) } }
+            .onFailure { Log.e("Gestes", "modèle indisponible", it) }.getOrNull()
 
     private fun ready(): Boolean {
         if (failed) return false
-        if (hands == null) hands = make { d ->
+        if (hands == null) hands = make("gestes_mains") { d ->
             GestureRecognizer.createFromOptions(context, GestureRecognizer.GestureRecognizerOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath("gesture_recognizer.task").setDelegate(d).build())
                 .setRunningMode(RunningMode.IMAGE).setNumHands(2).build())
         }
-        if (pose == null) pose = make { d ->
+        if (pose == null) pose = make("gestes_corps") { d ->
             PoseLandmarker.createFromOptions(context, PoseLandmarker.PoseLandmarkerOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath("pose_landmarker_lite.task").setDelegate(d).build())
                 .setRunningMode(RunningMode.IMAGE).setNumPoses(1).build())

@@ -53,13 +53,18 @@ class MainActivity : ComponentActivity() {
     private val ask = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { afterPermissions() }
 
     private fun afterPermissions() {
+        CrashReport.mark("permissions ok")
         if (granted(Manifest.permission.CAMERA)) vm.startCamera(this)
+        CrashReport.mark("caméra lancée")
         val bt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) granted(Manifest.permission.BLUETOOTH_CONNECT) &&
             granted(Manifest.permission.BLUETOOTH_SCAN) else granted(Manifest.permission.ACCESS_FINE_LOCATION)
         if (bt) vm.connectGimbal() else vm.log("Permission Bluetooth refusée : la tête ne pourra pas bouger.")
         if (!granted(Manifest.permission.RECORD_AUDIO)) vm.log("Permission micro refusée : Joey ne t'entendra pas.")
+        CrashReport.mark("nacelle lancée")
         vm.updateWake()
+        CrashReport.mark("mot de réveil lancé")
         vm.connectRoomba(quiet = true)
+        CrashReport.mark("démarrage fini")
     }
 
     /** Carte USB-série du Roomba branchée pendant que Joey tourne. */
@@ -70,7 +75,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val lastCrash = CrashReport.take(this)
+        // Avant tout : un plantage natif au lancement précédent ? (l'étape fautive sera sautée cette fois)
+        val stepsBefore = runCatching { java.io.File(filesDir, "dernieres_etapes.txt").readText() }.getOrNull().orEmpty()
+        NativeGuard.init(this)
+        val nativeCrash = if (NativeGuard.justBanned.isEmpty()) null else
+            "Joey ${BuildConfig.VERSION_NAME} — Android ${Build.VERSION.RELEASE} (${Build.MANUFACTURER} ${Build.MODEL})\n" +
+                "Plantage natif pendant : ${NativeGuard.justBanned.joinToString()}. Cette étape est désactivée, " +
+                "Joey démarre sans.\n\nDernières étapes :\n$stepsBefore"
+        val lastCrash = CrashReport.take(this) ?: nativeCrash
         CrashReport.install(this)
         CrashReport.mark("lancement")
         enableEdgeToEdge()

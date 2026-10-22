@@ -107,7 +107,7 @@ fun Face(
         rotate(lean) {
             drawFace(this, mood, activity, voice, listen * (1f - think), gx, gy, blink.value * (1f - 0.35f * think))
             if (think > 0.01f) {
-                val unit = min(size.width / 2.6f, size.height / 1.6f)
+                val unit = min(size.width / 2.3f, size.height / 1.45f)
                 val r = unit * 0.075f
                 val y = size.height / 2f + unit * 0.78f
                 for (i in 0..2) {
@@ -123,7 +123,7 @@ private fun drawFace(scope: DrawScope, mood: Mood, activity: Activity, voice: Fl
     run {
         val w = size.width
         val h = size.height
-        val unit = min(w / 2.6f, h / 1.6f)
+        val unit = min(w / 2.3f, h / 1.45f)
         val eyeW = unit * 0.62f
         val eyeH = unit * (if (mood == Mood.ETONNE) 1.05f else 0.9f) * (1f + 0.12f * voice)
         val gap = unit * 0.5f

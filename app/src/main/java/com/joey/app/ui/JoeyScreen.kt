@@ -69,7 +69,9 @@ private val ACCENT = Color(0xFF4FC3F7)
 @Composable
 fun JoeyScreen(vm: MainViewModel) {
     val s by vm.state.collectAsState()
-    var controls by remember { mutableStateOf(true) }
+    // Commandes cachées par défaut : tout l'écran est au visage. Un appui les montre, elles se cachent seules après 6 s.
+    var controls by remember { mutableStateOf(false) }
+    var controlsAt by remember { mutableStateOf(0L) }
     var headPanel by remember { mutableStateOf(false) }
     var settings by remember { mutableStateOf(false) }
     var gaze by remember { mutableStateOf(0f to 0f) }
@@ -98,7 +100,7 @@ fun JoeyScreen(vm: MainViewModel) {
                 // Toucher : appui = commandes (et il sursaute), double appui = chatouilles, appui long = caresse.
                 .pointerInput(Unit) {
                     detectTapGestures(
-                        onTap = { controls = !controls; vm.touched() },
+                        onTap = { controls = !controls; controlsAt = System.currentTimeMillis(); vm.touched() },
                         onDoubleTap = { vm.tickled() },
                         onLongPress = { vm.petted() },
                     )
@@ -160,46 +162,50 @@ fun JoeyScreen(vm: MainViewModel) {
             }
         }
 
+        LaunchedEffect(controls, controlsAt, headPanel, settings) {
+            if (controls && !headPanel && !settings) { delay(6000); controls = false }
+        }
+        // Seul signe permanent, et seulement si quelque chose ne va pas : la nacelle (le cou) n'est pas connectée.
+        if (!controls && s.gimbal == GimbalState.OFF) {
+            Text("🦒", fontSize = 16.sp, color = Color.White.copy(alpha = 0.35f),
+                modifier = Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(10.dp).clickable { headPanel = true })
+        }
+
         if (controls) {
-            // Barre d'état
+            // Barre d'état (discrète)
             Row(
-                Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(12.dp).fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(8.dp).fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Chip(when (s.gimbal) {
-                    GimbalState.READY -> "🦒 Nacelle prête" + (if (s.battery >= 0) " · 🔋${s.battery}%" else "")
-                    GimbalState.SEARCHING -> "🦒 Recherche…"
-                    GimbalState.CONNECTING -> "🦒 Connexion…"
-                    GimbalState.OFF -> "🦒 Nacelle déconnectée"
+                    GimbalState.READY -> "🦒" + (if (s.battery >= 0) " ${s.battery}%" else "")
+                    GimbalState.SEARCHING -> "🦒 …"
+                    GimbalState.CONNECTING -> "🦒 …"
+                    GimbalState.OFF -> "🦒 ✕"
                 }) { headPanel = true }
                 if (s.watch) Chip("🛡 Garde")
                 s.roomba?.let { Chip("🛞 $it") }
                 if (s.headsetFollow) Chip("🥽 Suit le casque")
                 else if (s.tracking != null) Chip("🔎 ${s.tracking}")
-                else if (s.followFace && s.gimbal == GimbalState.READY) Chip(when {
-                    s.seeing != null && s.seesFace -> "👤 ${s.seeing}"
-                    s.seesFace -> "👤 Je te vois"
-                    else -> "👤 Personne"
-                })
                 Chip(when (s.live) {
-                    LiveState.OFF -> if (s.wakeWord) "💤 Dis « Joey »" else "💤 En veille"
-                    LiveState.CONNECTING -> "… Réveil"
-                    LiveState.LISTENING -> "👂 J'écoute"
-                    LiveState.SPEAKING -> "🗨 Je parle"
+                    LiveState.OFF -> if (s.wakeWord) "💤 « Joey »" else "💤"
+                    LiveState.CONNECTING -> "…"
+                    LiveState.LISTENING -> "👂"
+                    LiveState.SPEAKING -> "🗨"
                 })
                 Spacer(Modifier.weight(1f))
-                RoundButton("⚙") { settings = true }
+                RoundButton("⚙", size = 36) { settings = true }
             }
             // Boutons du bas
             Row(
-                Modifier.align(Alignment.BottomEnd).safeDrawingPadding().padding(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                Modifier.align(Alignment.BottomEnd).safeDrawingPadding().padding(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                RoundButton("🦒", size = 56) { headPanel = !headPanel }
-                RoundButton(if (s.live == LiveState.OFF) "🎤" else "■", size = 72,
-                    color = if (s.live == LiveState.OFF) ACCENT else Color(0xFFE57373)) { vm.micPressed() }
+                RoundButton("🦒", size = 40) { headPanel = !headPanel }
+                RoundButton(if (s.live == LiveState.OFF) "🎤" else "■", size = 52,
+                    color = (if (s.live == LiveState.OFF) ACCENT else Color(0xFFE57373)).copy(alpha = 0.6f)) { vm.micPressed() }
             }
         }
 
@@ -221,15 +227,15 @@ private fun Chip(text: String, onClick: (() -> Unit)? = null) {
     Text(
         text,
         color = Color.White,
-        fontSize = 13.sp,
-        modifier = Modifier.background(PANEL, RoundedCornerShape(16.dp))
+        fontSize = 12.sp,
+        modifier = Modifier.background(Color(0x55111820), RoundedCornerShape(12.dp))
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(horizontal = 8.dp, vertical = 4.dp),
     )
 }
 
 @Composable
-private fun RoundButton(label: String, size: Int = 44, color: Color = PANEL, onClick: () -> Unit) {
+private fun RoundButton(label: String, size: Int = 44, color: Color = Color(0x66111820), onClick: () -> Unit) {
     Box(
         Modifier.size(size.dp).background(color, CircleShape).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,

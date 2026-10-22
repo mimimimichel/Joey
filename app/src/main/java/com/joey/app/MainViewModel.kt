@@ -444,14 +444,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val gestures = com.joey.app.senses.GestureWatcher(app)
     private val body = com.joey.app.senses.BodyLanguage()
     @Volatile private var lastBodyAt = 0L
+    @Volatile private var bodyCostMs = 0L
     @Volatile private var rpsWaiting = false
 
     private fun readBody(bmp: android.graphics.Bitmap) {
         val now = System.currentTimeMillis()
-        if (!flag("gestures", true) || now - lastBodyAt < if (rpsWaiting) 120 else 300) return
+        // Téléphone lent (S8+…) : on espace l'analyse pour que le suivi du visage reste fluide (≤ ~25 % du temps).
+        val every = maxOf(if (rpsWaiting) 120L else 300L, bodyCostMs * 4)
+        if (!flag("gestures", true) || now - lastBodyAt < every) return
         lastBodyAt = now
         val small = android.graphics.Bitmap.createScaledBitmap(bmp, 480, 480 * bmp.height / bmp.width, true)
         val (hand, pose) = gestures.analyze(small)
+        bodyCostMs = (bodyCostMs * 3 + (System.currentTimeMillis() - now)) / 4
         when (val g = body.update(now, hand, pose)) {
             null -> {}
             com.joey.app.senses.Body.ThumbUp -> { log("👍"); setMood(Mood.CONTENT); live?.event("La personne te fait un pouce levé 👍.", reply = true) }

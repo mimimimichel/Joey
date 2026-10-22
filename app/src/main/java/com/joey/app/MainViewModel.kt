@@ -274,9 +274,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var faceStreak = 0
 
     private fun onFrame(bmp: android.graphics.Bitmap) {
-        // Où regardait la tête quand l'image a été prise (avant les calculs) : sert à viser en degrés.
-        val framePose = head.pose()
-        val frameAbs = head.absPan()
+        // Où regardait la tête quand l'image a été prise (un peu avant : l'image a ~80 ms de retard), SANS les petits
+        // mouvements expressifs (sinon ils étaient comptés deux fois : la tête oscillait de ±25° en suivant un visage).
+        val shot = poseAt(System.currentTimeMillis() - 80)
+        val framePose = shot?.let { Pair(Head.wrap(it.first - it.third.pan), it.second - it.third.tilt) } ?: head.pose()
+        val frameAbs = head.absPan()?.let { a -> shot?.let { Head.wrap(a - (head.pose()?.first ?: 0.0) + it.first - it.third.pan) } ?: a }
         val labels = trackLabels
         if (labels != null && System.currentTimeMillis() < trackUntil) {
             val best = objects.detect(bmp).filter { it.label in labels && it.score >= (if (it.label == "person") 0.55 else 0.5) }
@@ -1947,7 +1949,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "Extrais de 0 à 8 faits NOUVEAUX et DURABLES qui valent la peine d'être retenus pour les prochaines fois : " +
                     "prénoms et qui est qui, goûts, habitudes, animaux, où sont rangées les choses, projets, rendez-vous, promesses, " +
                     "ce qu'on a demandé à Joey de retenir. Une phrase courte et autonome chacun (avec les prénoms quand on les connaît). " +
-                    "Pas de banalités (« on a discuté »), rien de ce qui est déjà connu, rien d'inventé. Liste vide si rien."
+                    "Pas de banalités (« on a discuté »), rien de ce qui est déjà connu, rien d'inventé. Jamais l'état passager " +
+                    "de Joey (nacelle connectée ou non, Bluetooth, roues branchées, batterie, ce qu'il regarde) : c'est faux le " +
+                    "lendemain. Liste vide si rien."
                 val got = vision.json(prompt, MEMO_SCHEMA).optJSONArray("souvenirs")
                 var n = 0
                 if (got != null) for (i in 0 until got.length()) {
@@ -2128,6 +2132,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Outils qui peuvent durer (recherche, déplacement, relevé) : Gemini n'attend pas, il reçoit le résultat après. */
     private val longTools = setOf("chercher", "aller_vers", "viens_ici", "cartographier", "regarder_ce_que_je_montre")
     private val toolPool = Executors.newCachedThreadPool()
+    @Volatile private var longToolGen = 0
 
     private fun onTool(name: String, args: Map<String, Any?>): Map<String, Any?> {
         flushTurn()
@@ -2136,13 +2141,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (name !in longTools) return runTool(name, args).also {
             journal.write("outil", "$name -> $it (${System.currentTimeMillis() - t0} ms)")
         }
+        val gen = ++longToolGen
         val job = toolPool.submit<Map<String, Any?>> { runTool(name, args) }
         // Réponse rapide (refus, déjà vu…) : on la donne tout de suite.
         runCatching { return job.get(1500, TimeUnit.MILLISECONDS) }
         thread(name = "resultat-$name", isDaemon = true) {
             val r = runCatching { job.get() }.getOrElse { mapOf("result" to "interrompu") }
             journal.write("outil", "$name -> $r (${System.currentTimeMillis() - t0} ms, en arrière-plan)")
-            deliverLater(name, args, r)
+            // Une autre demande est arrivée entre-temps : ce résultat est périmé, on ne le dit pas (sinon « je n'ai pas
+            // trouvé le chien » arrivait au milieu de la recherche de la télé).
+            if (gen == longToolGen) deliverLater(name, args, r)
         }
         return mapOf("result" to "C'est lancé (ça prend quelques secondes). Le résultat t'arrivera tout seul dans un message de " +
             "l'application. En attendant, ne commente pas (au plus « je regarde »), réponds normalement si on te parle, et ne " +
@@ -2319,7 +2327,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             "regarder_de_pres" -> {
                 val q = args["question"] as? String ?: "que vois-tu ?"
-                val zone = args["zone"] as? String ?: "tout"
+                var zone = args["zone"] as? String ?: "tout"
+                // Une question sur la personne (ce qu'elle tient, porte, montre) : d'abord la regarder.
+                if (Regex("(?i)(je tiens|je porte|j'ai dans|ma main|mes mains|je montre|sur moi|mon |ma |mes |tu tiens|tiens-tu)").containsMatchIn(q) &&
+                    !follower.sees && gimbal.ready) {
+                    moveSync(holdMs = 4000, timeoutMs = 4000) { if (lookAtLastSeen()) "je te regarde" else "pas revu" }
+                    zone = "tout"
+                }
                 val jpeg = camera.zoomJpeg(zone) ?: return mapOf("result" to "pas d'image (caméra coupée ?)")
                 log("🔍 de près ($zone) : $q")
                 val r = runCatching { vision.ask(jpeg, q) }.getOrElse { "vision indisponible : ${it.message}" }
@@ -2673,9 +2687,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         head.aim(Head.wrap(yaw - questYaw0), pitch)
     }
 
+    // Historique de la pose (40 ms) : pour savoir où regardait la tête au moment où l'image a été prise.
+    private val poseHistory = ArrayDeque<Pair<Long, Triple<Double, Double, com.joey.app.life.Expressive.Pose>>>()
+
+    private fun poseAt(t: Long): Triple<Double, Double, com.joey.app.life.Expressive.Pose>? = synchronized(poseHistory) {
+        poseHistory.lastOrNull { it.first <= t }?.second ?: poseHistory.firstOrNull()?.second
+    }
+
     private fun aimLoop() {
         while (true) {
             Thread.sleep(40)
+            runCatching {
+                val p = head.pose()
+                if (p != null) synchronized(poseHistory) {
+                    val now = System.currentTimeMillis()
+                    poseHistory.addLast(now to Triple(p.first, p.second, exprPose))
+                    while (poseHistory.size > 30) poseHistory.removeFirst()
+                }
+            }
             runCatching {
                 val st = _state.value
                 val now = System.currentTimeMillis()

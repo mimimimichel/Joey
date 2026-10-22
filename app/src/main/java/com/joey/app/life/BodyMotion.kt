@@ -58,8 +58,8 @@ class BodyMotion(private val now: () -> Long = { System.currentTimeMillis() }) {
         }
         if (lifted && t - liftedAt > 20_000) lifted = false
         // Poussé / déplacé : glisse à plat sans qu'il roule.
-        if (!lifted && hypot(vx, vy) > 0.35 && kotlin.math.abs(vz) < 0.2) { if (pushSince == 0L) pushSince = t } else pushSince = 0L
-        if (pushSince != 0L && t - pushSince >= 250) { pushSince = 0L; return fire(Event.PUSHED, t, 8000) }
+        if (!lifted && hypot(vx, vy) > 0.45 && kotlin.math.abs(vz) < 0.2) { if (pushSince == 0L) pushSince = t } else pushSince = 0L
+        if (pushSince != 0L && t - pushSince >= 400) { pushSince = 0L; return fire(Event.PUSHED, t, 8000) }
         return null
     }
 

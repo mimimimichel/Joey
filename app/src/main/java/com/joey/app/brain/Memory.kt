@@ -100,10 +100,17 @@ class Memory(private val file: File) {
     fun dated(n: Note) = "(${fmt.format(Date(n.time))}) ${n.text}"
 
     /** Texte ajouté au prompt système : les souvenirs les plus récents. */
+    /**
+     * Un souvenir sur l'état passager de son corps (« la nacelle est connectée », « roues débranchées », batterie…) :
+     * faux le lendemain, il ne doit pas le croire (l'outil « etat » dit la vérité).
+     */
+    private fun transient(n: Note) = Regex("(?i)(nacelle|bluetooth|roues?|roomba|batterie|câble|connect|branch)").containsMatchIn(n.text)
+
     fun promptText(): String = synchronized(notes) {
-        if (notes.isEmpty()) return ""
-        val recent = notes.takeLast(120)
-        "\n\nTes souvenirs (${notes.size} en tout ; voici les ${recent.size} plus récents, du plus ancien au plus récent ; " +
+        val kept = notes.filterNot(::transient)
+        if (kept.isEmpty()) return ""
+        val recent = kept.takeLast(120)
+        "\n\nTes souvenirs (${kept.size} en tout ; voici les ${recent.size} plus récents, du plus ancien au plus récent ; " +
             "pour les autres, outil « se_souvenir ») :\n" + recent.joinToString("\n") { "- " + dated(it) }
     }
 }

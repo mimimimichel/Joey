@@ -189,7 +189,7 @@ class Head(
      */
     private fun speed(err: Double, max: Int): Int {
         val m = abs(err)
-        val want = m / 0.18 + 4.0
+        val want = m / 0.25 + 3.0
         val s = min(max, maxOf(120, stickFor(want)))
         return (sign(err) * s).toInt()
     }

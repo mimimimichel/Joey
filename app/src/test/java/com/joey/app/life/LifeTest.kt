@@ -49,7 +49,7 @@ class BodyMotionTest {
 
     @Test fun pushedAcrossTheFloor() {
         run(1000)
-        assertEquals(BodyMotion.Event.PUSHED, run(500, ax = 2.5))
+        assertEquals(BodyMotion.Event.PUSHED, run(900, ax = 2.5))
     }
 
     @Test fun sensorNoiseIsNothing() {

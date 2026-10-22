@@ -23,7 +23,7 @@ class Seen(val label: String, val score: Double, val box: Box)
 object CocoClasses {
     /** Catégories du détecteur, et les catégories avec lesquelles il les confond souvent (vues de loin). */
     private val GROUPS: List<Pair<List<String>, Set<String>>> = listOf(
-        listOf("chien", "chiot", "toutou", "chienne") to setOf("dog", "cat", "sheep", "bear"),
+        listOf("chien", "chiot", "toutou", "chienne") to setOf("dog"), // (mouton, ours… donnaient de fausses alertes : coussins, tapis)
         listOf("chat", "chaton", "minou") to setOf("cat", "dog"),
         listOf("cheval", "chevaux", "poney", "jument", "ane") to setOf("horse", "cow", "sheep"),
         listOf("vache", "vaches", "veau", "taureau", "boeuf", "betail") to setOf("cow", "horse", "sheep"),

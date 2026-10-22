@@ -62,7 +62,17 @@ class MainActivity : ComponentActivity() {
         CrashReport.mark("caméra lancée")
         val bt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) granted(Manifest.permission.BLUETOOTH_CONNECT) &&
             granted(Manifest.permission.BLUETOOTH_SCAN) else granted(Manifest.permission.ACCESS_FINE_LOCATION)
-        if (bt) vm.connectGimbal() else vm.log("Permission Bluetooth refusée : la tête ne pourra pas bouger.")
+        if (bt) {
+            // Bluetooth coupé (ça arrive tout seul) : on propose de le rallumer, et on se reconnecte dès qu'il revient.
+            val adapter = getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter
+            if (adapter != null && !adapter.isEnabled) {
+                runCatching {
+                    @Suppress("MissingPermission")
+                    startActivity(android.content.Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE))
+                }
+            }
+            vm.connectGimbal()
+        } else vm.log("Permission Bluetooth refusée : la tête ne pourra pas bouger.")
         if (!granted(Manifest.permission.RECORD_AUDIO)) vm.log("Permission micro refusée : Joey ne t'entendra pas.")
         CrashReport.mark("nacelle lancée")
         vm.updateWake()
@@ -77,8 +87,23 @@ class MainActivity : ComponentActivity() {
         if (intent.action == android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED) vm.connectRoomba()
     }
 
+    /** Bluetooth rallumé : la nacelle se reconnecte toute seule. */
+    private val btWatcher = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: android.content.Context, i: android.content.Intent) {
+            val st = i.getIntExtra(android.bluetooth.BluetoothAdapter.EXTRA_STATE, -1)
+            if (st == android.bluetooth.BluetoothAdapter.STATE_ON) { vm.log("Bluetooth rallumé : je reconnecte ma nacelle"); vm.connectGimbal() }
+            if (st == android.bluetooth.BluetoothAdapter.STATE_OFF) vm.log("⚠️ Le Bluetooth vient de se couper : ma nacelle est déconnectée")
+        }
+    }
+
+    override fun onDestroy() {
+        runCatching { unregisterReceiver(btWatcher) }
+        super.onDestroy()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        runCatching { registerReceiver(btWatcher, android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)) }
         // Le rapport du plantage précédent (lu par JoeyApp avant tout le reste).
         val app = application as? JoeyApp
         val lastCrash = app?.lastCrash

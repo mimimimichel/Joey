@@ -20,6 +20,8 @@ class Camera : Eyes {
     @Volatile private var latest: String? = null
     @Volatile private var lastAt = 0L
     @Volatile private var lastFaceAt = 0L
+    /** Une image analysée toutes les [frameEveryMs] (90 ms normalement ; plus lent en économie de batterie). */
+    @Volatile var frameEveryMs = 90L
     /** Appelé ~10 fois par seconde avec l'image redressée (jusqu'à 1280 px). Sur le fil de la caméra. */
     @Volatile var onFrame: ((Bitmap) -> Unit)? = null
     @Volatile private var latestBitmap: Bitmap? = null
@@ -97,7 +99,7 @@ class Camera : Eyes {
                 analysis.setAnalyzer(worker) { img ->
                     try {
                         val now = System.currentTimeMillis()
-                        val wantFace = now - lastFaceAt >= 90
+                        val wantFace = now - lastFaceAt >= frameEveryMs
                         val wantJpeg = now - lastAt >= 500
                         if (wantFace || wantJpeg) {
                             val bmp = img.toBitmap()

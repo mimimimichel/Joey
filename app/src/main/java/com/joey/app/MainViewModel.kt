@@ -65,6 +65,8 @@ data class UiState(
     val roomba: String? = null,
     /** Mode nuit (écran assombri, il s'endort plus vite). */
     val night: Boolean = false,
+    /** Personne depuis 5 min, rien à faire : écran baissé, caméra au ralenti (économie de batterie). */
+    val idle: Boolean = false,
     val phoneBattery: Int = -1,
     /** Grand texte au milieu du visage (pierre-feuille-ciseaux, compte de cache-cache…). */
     val bigText: String? = null,
@@ -326,6 +328,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- plusieurs personnes : qui regarder -------------------------------------------------------
     private val chooser = com.joey.app.senses.FaceChooser()
     @Volatile private var lastPersonTalkAt = 0L
+    private val enrichedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /** Direction de la voix avec les deux micros, réglée toute seule en t'écoutant (gardée sur le téléphone). */
     private val stereoDir = com.joey.app.audio.StereoDirection(
@@ -704,8 +707,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             var tp = pose.first + dPan
             var tt = (pose.second + dTilt).coerceIn(-70.0, 70.0)
             if (prev != null) {
-                tp = if (kotlin.math.abs(dPan) < 4) prev.first else prev.first + Head.wrap(tp - prev.first) * 0.7
-                tt = if (kotlin.math.abs(dTilt) < 4) prev.second else prev.second + (tt - prev.second) * 0.7
+                // Calme : petits écarts (< 5°) ignorés, écarts moyens rattrapés en douceur ; un grand saut (la personne a
+                // vraiment bougé) est suivi franchement.
+                val jp = Head.wrap(tp - prev.first)
+                val jt = tt - prev.second
+                tp = if (kotlin.math.abs(jp) < 5) prev.first else prev.first + jp * (if (kotlin.math.abs(jp) > 25) 0.8 else 0.4)
+                tt = if (kotlin.math.abs(jt) < 5) prev.second else prev.second + jt * (if (kotlin.math.abs(jt) > 20) 0.8 else 0.4)
             } else {
                 if (kotlin.math.abs(dPan) < 4) tp = pose.first
                 if (kotlin.math.abs(dTilt) < 4) tt = pose.second
@@ -727,7 +734,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var poseLogged: Pair<Double, Double>? = null
 
     /** Où regarde la tête, dans le journal (toutes les 2 s au plus, quand ça change) : pour comprendre les ratés. */
+    private val calmPans = ArrayDeque<Double>()
+    @Volatile private var calmAt = 0L
+
+    /** Nervosité de la tête quand elle regarde quelqu'un : écart type du cap sur 10 s (dans le journal). */
+    private fun journalCalm(now: Long) {
+        val p = head.pose()
+        if (p != null && follower.sees && trackLabels == null && !_state.value.busy) calmPans.addLast(p.first)
+        if (now - calmAt < 10_000) return
+        calmAt = now
+        if (calmPans.size >= 15) {
+            val m = calmPans.average()
+            val sd = kotlin.math.sqrt(calmPans.sumOf { (Head.wrap(it - m)) * Head.wrap(it - m) } / calmPans.size)
+            journal.write("mesure", "nervosité de la tête en regardant quelqu'un : écart type %.1f° (%d points)".format(sd, calmPans.size))
+        }
+        calmPans.clear()
+    }
+
     private fun journalPose(now: Long) {
+        runCatching { journalCalm(now) }
         if (now - poseLoggedAt < 2000 || !gimbal.ready) return
         val p = head.pose() ?: return
         val last = poseLogged
@@ -865,6 +890,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val active = live != null || s.busy || questFollowing || s.tracking != null
             if (active || follower.sees) lastLifeAt = now
             runCatching { journalPose(now) }
+            runCatching {
+                val idle = live == null && !s.busy && now - follower.seenAt > 5 * 60_000L && now - motionAt > 5 * 60_000L &&
+                    !flag("watch", false) && !questFollowing
+                if (idle != s.idle) {
+                    _state.update { it.copy(idle = idle) }
+                    camera.frameEveryMs = if (idle) 400L else 90L
+                    log(if (idle) "🔅 Personne depuis 5 min : je me mets en économie" else "🔆 Je me réveille de l'économie")
+                }
+            }
             runCatching { conversationGaze(now, s) }
             runCatching { idlePose(now, s) }
             runCatching { initiatives(now, s) }
@@ -1085,11 +1119,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (people.names().isEmpty() || face.size < 0.04f || now - lastRecognizeAt < 700) return
         lastRecognizeAt = now
         val print = faceId.embed(bmp, box) ?: return
-        val (name, _) = people.identify(print)
+        val (name, score) = people.identify(print)
         // Deux reconnaissances de suite du même nom avant d'y croire.
         val prev = lastCandidate
         lastCandidate = name
         if (name == null || name != prev) return
+        // Reconnu avec certitude : il complète le visage (lumière, angle, coiffure du jour…), au plus toutes les 30 s.
+        if (score >= 0.62f && now - (enrichedAt[name] ?: 0L) > 30_000) {
+            enrichedAt[name] = now
+            people.learn(name, listOf(print))
+        }
         seeingName = name
         seeingAt = now
         if (_state.value.seeing != name) _state.update { it.copy(seeing = name) }
@@ -1510,6 +1549,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (!low) warned.remove(key)
         }
         warn("phone", phone in 0..19 && !phoneCharging(), "La batterie de mon téléphone est à $phone % : branche-moi.")
+        // Téléphone presque vide et des roues : il rentre à la base de lui-même (une fois).
+        roomba?.let { rr ->
+            if (phone in 0..12 && !phoneCharging() && !rr.onBase && !following && !_state.value.busy && warned.add("phone_dock")) {
+                log("🔋 Téléphone à $phone % : je rentre à ma base")
+                thread(isDaemon = true) { runCatching { rr.seekDock() } }
+            }
+            if (phone > 20) warned.remove("phone_dock")
+        }
+        // La nuit (3 h - 5 h), sans conversation : ménage dans les souvenirs, une fois par jour.
+        val cleanDay = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.FRENCH).format(Date())
+        if (h in 3..4 && live == null && prefs.getString("memory_cleanup_day", "") != cleanDay && geminiKey.isNotBlank()) {
+            prefs.edit().putString("memory_cleanup_day", cleanDay).apply()
+            thread(name = "menage-souvenirs", isDaemon = true) { runCatching { cleanMemories() } }
+        }
         warn("gimbal", gimbal.battery in 0..14, "La batterie de ma nacelle (mon cou) est à ${gimbal.battery} %.")
         val r = roomba
         val rb = r?.battery ?: -1
@@ -1983,6 +2036,46 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var lastExtractAt = System.currentTimeMillis()
     @Volatile private var extracting = false
 
+    /**
+     * Ménage dans les souvenirs : Gemini repère les doublons, les banalités, l'état passager et ce qui est dépassé ;
+     * l'app applique (avec une copie de l'ancienne mémoire). Bloquant.
+     */
+    fun cleanMemories(): String {
+        val notes = memory.all()
+        if (notes.size < 8) return "rien à ranger"
+        val list = notes.mapIndexed { i, n -> "$i. (${java.text.SimpleDateFormat("d MMM yyyy", Locale.FRENCH).format(Date(n.time))}) ${n.text}" }
+            .joinToString("\n")
+        val schema = org.json.JSONObject("""
+        {"type":"object","properties":{
+          "supprimer":{"type":"array","items":{"type":"integer"},"description":"numéros des souvenirs à supprimer"},
+          "fusions":{"type":"array","items":{"type":"object","properties":{
+            "remplace":{"type":"array","items":{"type":"integer"}},"par":{"type":"string"}},"required":["remplace","par"]}}
+        },"required":["supprimer","fusions"]}
+        """.trimIndent())
+        val prompt = "Voici la mémoire de Joey, un petit robot de maison (numérotée) :\n$list\n\nFais le ménage, prudemment : " +
+            "supprime les banalités (« on a discuté »), l'état passager de Joey (nacelle connectée, roues, batterie, Bluetooth, " +
+            "ce qu'il regardait), les événements sans intérêt durable, et ce qui est contredit par un souvenir plus récent. " +
+            "Fusionne les doublons en une phrase claire. GARDE tout ce qui est durable et utile : prénoms et qui est qui, " +
+            "animaux et leurs noms, goûts, habitudes, où sont les choses, projets, promesses, rendez-vous. Dans le doute, garde."
+        val j = vision.json(prompt, schema)
+        val remove = HashSet<Int>()
+        j.optJSONArray("supprimer")?.let { a -> for (i in 0 until a.length()) remove.add(a.optInt(i, -1)) }
+        val merges = ArrayList<Pair<Set<Int>, String>>()
+        j.optJSONArray("fusions")?.let { a ->
+            for (i in 0 until a.length()) {
+                val o = a.optJSONObject(i) ?: continue
+                val g = HashSet<Int>(); o.optJSONArray("remplace")?.let { r -> for (k in 0 until r.length()) g.add(r.optInt(k, -1)) }
+                merges.add(g to o.optString("par"))
+            }
+        }
+        // Garde-fou : jamais plus de la moitié d'un coup.
+        if (remove.size > notes.size / 2) return "ménage refusé (trop de suppressions proposées)"
+        val (gone, merged) = memory.applyCleanup(notes, remove, merges)
+        refreshSettings()
+        log("🧹 Souvenirs rangés : $gone retirés ou fusionnés, $merged fusions (${memory.size} gardés)")
+        return "souvenirs rangés"
+    }
+
     private val MEMO_SCHEMA = org.json.JSONObject("""
         {"type":"object","properties":{"souvenirs":{"type":"array","items":{"type":"string"},
           "description":"faits durables à retenir, une phrase courte chacun, en français"}},"required":["souvenirs"]}
@@ -2158,7 +2251,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         setMood(m, sound = false)
     }
 
+    /** Ce que la personne a dit depuis la dernière réponse de Joey (pour reconnaître du bruit). */
+    private val heardTurn = StringBuilder()
+
+    private fun isNoise(t: String) = com.joey.app.audio.NoiseFilter.isNoise(t)
+
     private fun onTranscript(person: Boolean, text: String) {
+        if (person) {
+            synchronized(heardTurn) { if (turnPerson == false) heardTurn.setLength(0); heardTurn.append(text) }
+            // Du bruit : ça ne compte pas comme quelqu'un qui parle (pas de recherche, pas de « je réfléchis »).
+            if (isNoise(synchronized(heardTurn) { heardTurn.toString() })) {
+                synchronized(turnText) {
+                    if (turnPerson != null && turnPerson != person) flushTurn()
+                    turnPerson = person; turnText.append(text)
+                }
+                return
+            }
+        } else {
+            // Il commence à répondre à un tour qui n'était que du bruit : on coupe sa réponse.
+            val heard = synchronized(heardTurn) { heardTurn.toString() }
+            if (turnPerson == true && heard.isNotBlank() && isNoise(heard)) {
+                log("🔇 Bruit pris pour de la parole (« ${heard.take(30)} ») : je ne réponds pas")
+                live?.dropTurn()
+                synchronized(heardTurn) { heardTurn.setLength(0) }
+                return
+            }
+            synchronized(heardTurn) { heardTurn.setLength(0) }
+        }
         if (!person) expressFromSpeech(text, turnStart = turnPerson != false)
         synchronized(turnText) {
             if (turnPerson != null && turnPerson != person) flushTurn()
@@ -2286,6 +2405,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     (vision.quotaText()?.let { " ; détecteur du téléphone seulement : $it" } ?: ", détecteur et Gemini") +
                     "). Peut-être caché, trop loin ou dans le noir. Dis-le honnêtement ; si la personne te dit où il est, " +
                     "regarde là (« regarder »).")
+            }
+            "tester_roues" -> {
+                val r = roomba ?: return mapOf("result" to noWheels)
+                log("🛞 Test des roues")
+                var res = ""
+                moveSync(holdMs = 1000, timeoutMs = 40_000) {
+                    val steps = ArrayList<String>()
+                    r.ready()?.let { steps.add("pas prêt : $it") }
+                    if (steps.isEmpty()) {
+                        steps.add("avance 20 cm : " + r.drive(0.2))
+                        steps.add("recule 20 cm : " + r.drive(-0.2))
+                        steps.add("tourne de 90° : " + r.turn(-90.0))
+                        steps.add("revient : " + r.turn(90.0))
+                    }
+                    steps.add("batterie des roues : ${r.battery} %" + (if (r.onBase) ", sur la base" else ""))
+                    res = steps.joinToString(" ; ")
+                    res
+                }
+                journal.write("roues", res)
+                mapOf("result" to res)
             }
             "dormir" -> {
                 // Il dit au revoir, puis la conversation s'arrête ; « Joey » le réveille.
@@ -2626,7 +2765,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 java.text.SimpleDateFormat("HH:mm", java.util.Locale.FRENCH).format(Date(until)))
         }
         camera.deviceOrientation = { sensors.deviceOrientation }
-        head.expression = { exprPose.pan to exprPose.tilt }
+        // En suivant quelqu'un, les petits mouvements expressifs sont atténués (la tête reste calme sur la personne).
+        head.expression = {
+            val tracking = System.currentTimeMillis() - lastTrackAimAt < 1000
+            if (tracking) exprPose.pan * 0.3 to exprPose.tilt * 0.6 else exprPose.pan to exprPose.tilt
+        }
         sensors.onMotion = { e -> bodyMoved(e) }
         // (Le niveau de la reconnaissance du mot de réveil saute à chaque relance : il n'est plus utilisé pour sursauter.)
         sensors.onShake = { shaken() }

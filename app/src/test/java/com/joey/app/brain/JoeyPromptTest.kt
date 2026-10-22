@@ -10,7 +10,7 @@ class JoeyPromptTest {
         val a = GeminiLive.toJson(JoeyPrompt.TOOLS) as JSONArray
         assertEquals(JoeyPrompt.TOOLS.size, a.length())
         val names = (0 until a.length()).map { a.getJSONObject(it).getString("name") }
-        assertEquals(listOf("regarder", "chercher", "dormir", "regarder_personne", "regarder_ce_que_je_montre", "regarder_autour", "retenir", "apprendre_visage", "oublier_visage", "regarder_de_pres", "apprendre_voix", "qui_parle", "oublier_voix", "maison_appareils", "maison_commande", "pierre_feuille_ciseaux", "cache_cache_compter", "rappel", "rappels", "annuler_rappel", "journal_du_jour", "avancer", "tourner_corps", "viens_ici", "suis_moi", "arrete", "aller_vers", "aller_a", "rentrer_base", "cartographier", "ou_est", "ou_suis_je", "carte", "mode_garde", "journal_de_garde", "danser", "prendre_photo", "se_souvenir", "oublier", "etat"), names)
+        assertEquals(listOf("regarder", "chercher", "tester_roues", "dormir", "regarder_personne", "regarder_ce_que_je_montre", "regarder_autour", "retenir", "apprendre_visage", "oublier_visage", "regarder_de_pres", "apprendre_voix", "qui_parle", "oublier_voix", "maison_appareils", "maison_commande", "pierre_feuille_ciseaux", "cache_cache_compter", "rappel", "rappels", "annuler_rappel", "journal_du_jour", "avancer", "tourner_corps", "viens_ici", "suis_moi", "arrete", "aller_vers", "aller_a", "rentrer_base", "cartographier", "ou_est", "ou_suis_je", "carte", "mode_garde", "journal_de_garde", "danser", "prendre_photo", "se_souvenir", "oublier", "etat"), names)
         val dir = a.getJSONObject(0).getJSONObject("parameters").getJSONObject("properties").getJSONObject("direction")
         assertEquals(6, dir.getJSONArray("enum").length())
     }

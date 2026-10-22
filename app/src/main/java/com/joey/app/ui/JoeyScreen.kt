@@ -115,13 +115,18 @@ fun JoeyScreen(vm: MainViewModel) {
         s.bigText?.let { t ->
             Text(t, color = Color.White, fontSize = 150.sp, modifier = Modifier.align(Alignment.Center))
         }
+        // Qui il reconnaît : le prénom, discrètement sous ses yeux (pour voir ce qu'il croit).
+        if (s.seeing != null && s.seesFace && s.bigText == null) {
+            Text(s.seeing!!, color = Color(0x994FC3F7), fontSize = 22.sp,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp))
+        }
 
         // Nuit : écran presque éteint (le visage reste visible, faiblement).
         val ctx = androidx.compose.ui.platform.LocalContext.current
-        LaunchedEffect(s.night) {
+        LaunchedEffect(s.night, s.idle) {
             (ctx as? android.app.Activity)?.window?.let { w ->
                 val a = w.attributes
-                a.screenBrightness = if (s.night) 0.02f else android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                a.screenBrightness = if (s.night) 0.02f else if (s.idle) 0.08f else android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                 w.attributes = a
             }
         }

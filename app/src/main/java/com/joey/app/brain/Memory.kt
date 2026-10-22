@@ -50,6 +50,28 @@ class Memory(private val file: File) {
 
     fun remove(note: Note) = synchronized(notes) { notes.remove(note); save() }
 
+    /**
+     * Ménage (proposé par Gemini, appliqué ici) : retire les souvenirs [remove] (numéros dans [all]) et remplace chaque
+     * groupe de [merges] par une seule phrase. Une copie de l'ancienne mémoire est gardée à côté (souvenirs.avant-menage).
+     * Renvoie (retirés, fusionnés).
+     */
+    fun applyCleanup(snapshot: List<Note>, remove: Set<Int>, merges: List<Pair<Set<Int>, String>>): Pair<Int, Int> = synchronized(notes) {
+        runCatching { if (file.exists()) file.copyTo(File(file.parentFile, file.name + ".avant-menage"), overwrite = true) }
+        val gone = HashSet<Note>()
+        remove.mapNotNull { snapshot.getOrNull(it) }.forEach { gone.add(it) }
+        var merged = 0
+        for ((group, text) in merges) {
+            val members = group.mapNotNull { snapshot.getOrNull(it) }
+            if (members.size < 2 || text.isBlank()) continue
+            gone.addAll(members)
+            notes.add(Note(text.trim().take(500), members.maxOf { it.time }, members.all { it.auto }))
+            merged++
+        }
+        notes.removeAll { n -> gone.any { it === n } }
+        save()
+        gone.size to merged
+    }
+
     /** Oublie les souvenirs qui parlent de [what]. Renvoie ceux effacés. */
     fun forget(what: String): List<String> = synchronized(notes) {
         val hits = search(what, 20)

@@ -284,14 +284,16 @@ class GeminiLive(
             .put("model", "models/${MODELS[modelIndex]}")
             // Images en basse résolution (~4 fois moins de jetons) : la conversation reste rapide plus longtemps.
             .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
-                .put("mediaResolution", "MEDIA_RESOLUTION_LOW"))
+                .put("mediaResolution", "MEDIA_RESOLUTION_LOW")
+                // Français imposé : moins de « phrases » inventées dans d'autres langues à partir du bruit.
+                .put("speechConfig", JSONObject().put("languageCode", "fr-FR")))
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
             // Ses outils, plus la recherche Google (météo, actualités, horaires…).
             .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", tools)).put(JSONObject().put("googleSearch", JSONObject())))
             // Fin de phrase détectée plus vite (500 ms de silence au lieu de ~1 s) : il répond plus tôt.
             .put("realtimeInputConfig", JSONObject().put("automaticActivityDetection", JSONObject()
                 .put("endOfSpeechSensitivity", "END_SENSITIVITY_HIGH").put("silenceDurationMs", 500).put("prefixPaddingMs", 100)))
-            .put("inputAudioTranscription", JSONObject())
+            .put("inputAudioTranscription", JSONObject().put("languageCodes", JSONArray().put("fr-FR")))
             .put("outputAudioTranscription", JSONObject())
             // Sans ça, audio + vidéo = 2 minutes de conversation au maximum.
             // Le plus vieux de la conversation est résumé tôt (dès ~25 000 jetons) : sinon chaque réponse devient de
@@ -326,13 +328,13 @@ class GeminiLive(
         m.optJSONObject("serverContent")?.let { sc ->
             if (sc.optBoolean("interrupted")) stopPlayback()
             sc.optJSONObject("inputTranscription")?.optString("text")?.takeIf { it.isNotEmpty() }?.let { onTranscript(true, it) }
-            sc.optJSONObject("outputTranscription")?.optString("text")?.takeIf { it.isNotEmpty() }?.let { onTranscript(false, it) }
+            if (!dropping) sc.optJSONObject("outputTranscription")?.optString("text")?.takeIf { it.isNotEmpty() }?.let { onTranscript(false, it) }
             val parts = sc.optJSONObject("modelTurn")?.optJSONArray("parts")
-            if (parts != null) for (i in 0 until parts.length()) {
+            if (parts != null && !dropping) for (i in 0 until parts.length()) {
                 val data = parts.optJSONObject(i)?.optJSONObject("inlineData")?.optString("data")
                 if (!data.isNullOrEmpty()) playQueue.add(Base64.decode(data, Base64.DEFAULT))
             }
-            if (sc.optBoolean("turnComplete")) onTurnEnd()
+            if (sc.optBoolean("turnComplete")) { dropping = false; onTurnEnd() }
         }
         m.optJSONObject("toolCall")?.optJSONArray("functionCalls")?.let { calls ->
             for (i in 0 until calls.length()) {
@@ -351,6 +353,15 @@ class GeminiLive(
                 }
             }
         }
+    }
+
+    /** Réponse en cours ignorée (elle répondait à du bruit) : on ne la joue pas, jusqu'à la fin du tour. */
+    @Volatile private var dropping = false
+
+    /** Coupe la réponse en cours (elle répondait à du bruit, pas à quelqu'un). */
+    fun dropTurn() {
+        dropping = true
+        stopPlayback()
     }
 
     private fun send(o: JSONObject) {

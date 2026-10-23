@@ -134,6 +134,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * d'une autre séance l'envoyait au fond de la cuisine).
      */
     @Volatile private var gridFrame = "seance-" + System.currentTimeMillis()
+    /** Pendant un trajet, la tête regarde la route (déclaré tôt : la boucle de la tête et les images s'en servent). */
+    private val roadGaze = com.joey.app.gimbal.RoadGaze(
+        bodyPan = { bodyPan() },
+        pose = { head.pose() },
+        aim = { p, t -> head.aim(p, t) },
+        stopAim = { head.stopAim() },
+        recenter = { calibrateBody() },
+        refAgeMs = { bodyRef?.let { System.currentTimeMillis() - it.third } },
+    )
+
     /** Ce qu'il apprend de ce qu'on lui dit : réglages ajustés, règles de conduite. */
     private val tuning = com.joey.app.life.Tuning(File(app.filesDir, "reglages.json"))
     private val people = com.joey.app.brain.People(File(app.filesDir, "personnes.json"))
@@ -807,7 +817,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 lastSeenPan = Head.wrap(abs + dPan); lastSeenTilt = (pose.second + dTilt).coerceIn(-60.0, 60.0)
                 lastSeenAt = now
             }
-            if (!follower.enabled || !gimbal.ready || now < follower.pausedUntil || calibrating || roadGazeDepth.get() > 0) {
+            if (!follower.enabled || !gimbal.ready || now < follower.pausedUntil || calibrating || roadGaze.active) {
                 aimTarget = null; return
             }
             val prev = aimTarget?.takeIf { now - aimTargetAt < 1000 }
@@ -831,7 +841,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             head.aim(t.first, t.second)
         } else {
             val t = aimTarget ?: return
-            if (now < follower.pausedUntil || !follower.enabled || roadGazeDepth.get() > 0) { aimTarget = null; return }
+            if (now < follower.pausedUntil || !follower.enabled || roadGaze.active) { aimTarget = null; return }
             // Juste perdu : il finit d'aller là où il l'a vue (elle est sûrement là, un peu plus loin).
             if (now - aimTargetAt < 1200) { lastTrackAimAt = now; head.aim(t.first, t.second) } else aimTarget = null
         }
@@ -2208,57 +2218,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return withRoadGaze { n.navigateTo(tx, ty, tries, budget) { attempt -> roadLegStart(attempt) } }
     }
 
-    // ---- la tête regarde la route pendant qu'il roule ------------------------------------------------------------
-    /**
-     * Pendant un trajet, la tête (nacelle) garde l'axe du corps, un peu vers le sol : la caméra voit les obstacles avant
-     * le choc. (Journal du 23/10 : la nacelle restait tournée vers là où elle regardait ; après chaque virage du Roomba
-     * la caméra regardait de côté, la vision du sol se coupait et il touchait les murs 13 fois de suite.)
-     */
-    private val roadGazeDepth = AtomicInteger(0)
-    @Volatile private var roadRecentering = false
-    private val ROAD_TILT = -22.0
-
+    // ---- la tête regarde la route pendant qu'il roule (voir [com.joey.app.gimbal.RoadGaze]) ------------------------
     private fun <T> withRoadGaze(body: () -> T): T {
         if (!gimbal.ready || roomba == null) return body()
-        if (roadGazeDepth.getAndIncrement() == 0) {
-            follower.pause(Long.MAX_VALUE / 4) // ni suivi de visage, ni recherche de qui parle : la route d'abord
-            if (bodyRef == null) recenterForRoad()
-        }
-        try { return body() } finally {
-            if (roadGazeDepth.decrementAndGet() == 0) { head.stopAim(); follower.pausedUntil = System.currentTimeMillis() + 2000 }
-        }
+        return roadGaze.during(
+            // Ni suivi de visage, ni recherche de qui parle pendant le trajet : la route d'abord.
+            onStart = { follower.pause(Long.MAX_VALUE / 4) },
+            onEnd = { follower.pausedUntil = System.currentTimeMillis() + 2000 },
+            body = body,
+        )
     }
 
-    /** La nacelle se remet droit devant le corps (sa propre commande, sans dérive) et on reprend le repère du corps. */
-    private fun recenterForRoad() {
-        roadRecentering = true
-        try { head.stopAim(); calibrateBody() } finally { roadRecentering = false }
-    }
+    /** Dans la boucle de la tête (25 fois par seconde) : vise l'avant du corps pendant un trajet. */
+    private fun roadAim() { if (gimbal.ready) roadGaze.tick() }
 
-    /** Dans la boucle de la tête (25 fois par seconde) : vise l'avant du corps. */
-    private fun roadAim() {
-        if (roadGazeDepth.get() == 0 || roadRecentering || !gimbal.ready) return
-        val bp = bodyPan() ?: return
-        val p = head.pose() ?: return
-        head.aim(Head.wrap(p.first - bp), ROAD_TILT)
-    }
-
-    /**
-     * Avant chaque essai d'un trajet : après un choc et un dégagement (le corps a tourné), la tête se recentre ; puis on
-     * attend (2,5 s au plus) qu'elle regarde bien devant, pour ne pas repartir à l'aveugle.
-     */
-    private fun roadLegStart(attempt: Int) {
-        if (!gimbal.ready || roadGazeDepth.get() == 0) return
-        val ref = bodyRef
-        if (attempt > 0 || ref == null || System.currentTimeMillis() - ref.third > 120_000) recenterForRoad()
-        val end = System.currentTimeMillis() + 2500
-        while (System.currentTimeMillis() < end) {
-            val bp = bodyPan() ?: break
-            val tilt = head.pose()?.second ?: break
-            if (kotlin.math.abs(bp) < 12 && kotlin.math.abs(tilt - ROAD_TILT) < 10) break
-            Thread.sleep(100)
-        }
-    }
+    /** Avant chaque essai d'un trajet : la tête se recentre après un dégagement et on attend qu'elle regarde devant. */
+    private fun roadLegStart(attempt: Int) { if (gimbal.ready) roadGaze.legStart(attempt) }
 
     /**
      * Rentrer à la base : si sa carte part de la base (il y était au départ), il revient d'abord tout près par le plus

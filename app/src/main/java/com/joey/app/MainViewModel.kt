@@ -1680,6 +1680,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val r = com.joey.app.robot.RoombaRobot(link, ::log)
                 r.connect()
                 roomba = r
+                bodyRef = null // nouvelles roues, nouveau repère
                 log("🛞 Roomba branché : j'ai des roues !")
                 refreshRoomba()
             } catch (e: Exception) {
@@ -1706,13 +1707,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val noWheels = "tes roues (le Roomba) ne sont pas branchées : tu ne peux pas te déplacer pour l'instant"
 
-    /** Tourne le corps vers où regarde la tête ; la tête revient droit devant (le suivi recentre ensuite). */
+    /**
+     * Repère du corps : cap de la tête (capteurs, repère du monde) quand elle regarde droit devant le Roomba, et cap des
+     * roues à ce moment-là. La tête et les roues ont chacune leur repère : sans lui, Joey croyait la tête « à 169° »
+     * alors qu'elle était presque dans l'axe, et faisait demi-tour au lieu de s'approcher.
+     */
+    @Volatile private var bodyRef: Triple<Double, Double, Long>? = null
+
+    /** La tête se recentre (droit devant le Roomba) : on note le repère du corps. */
+    private fun calibrateBody(): Boolean {
+        val r = roomba ?: return false
+        if (!gimbal.ready) return false
+        follower.pause(2500) // le suivi ne doit pas tirer la tête pendant qu'elle se recentre
+        head.center()
+        val abs = head.absPan() ?: return false
+        bodyRef = Triple(abs, r.heading, System.currentTimeMillis())
+        return true
+    }
+
+    /** Où regarde la tête par rapport à l'avant du Roomba (+ = droite), ou null si on ne sait pas. */
+    private fun bodyPan(): Double? {
+        val r = roomba ?: return null
+        if (!gimbal.ready) return 0.0 // sans nacelle, le téléphone est fixé au corps
+        val ref = bodyRef ?: return null
+        val abs = head.absPan() ?: return null
+        return Head.wrap(abs - (ref.first + Head.wrap(r.heading - ref.second)))
+    }
+
+    /** Tourne le corps vers où regarde la tête ; la tête garde sa cible (elle revient vers le même point). */
     private fun alignBodyWithHead(): Double {
         val r = roomba ?: return 0.0
-        val pan = head.pose()?.first ?: return 0.0
+        if (!gimbal.ready) return 0.0
+        val target = head.absPan() ?: return 0.0
+        // Repère inconnu ou ancien (les capteurs dérivent un peu) : la tête se recentre pour le reprendre, puis revient.
+        val ref = bodyRef
+        if (ref == null || System.currentTimeMillis() - ref.third > 10 * 60_000) {
+            if (!calibrateBody()) return 0.0
+            head.absPan()?.let { head.look(Head.wrap(target - it), null) }
+        }
+        val pan = bodyPan() ?: return 0.0
         if (kotlin.math.abs(pan) < 8) return 0.0
         r.turn(pan)
-        head.look(-pan, null)
+        head.absPan()?.let { now -> val d = Head.wrap(target - now); if (kotlin.math.abs(d) > 4) head.look(d, null) }
         return pan
     }
 
@@ -1741,6 +1777,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** « Suis-moi » : la tête suit la personne, le corps suit la tête et garde ~1,5 m. */
     private fun followMe(minutes: Double) {
         val r = roomba ?: return
+        if (gimbal.ready && bodyRef == null) calibrateBody()
         following = true
         trackName = "personne"
         trackLabels = setOf("person")
@@ -1752,8 +1789,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 while (following && System.currentTimeMillis() < trackUntil && roomba === r) {
                     Thread.sleep(150)
-                    val pan = head.pose()?.first ?: 0.0
                     val p = seenNow().filter { it.label == "person" && it.score >= 0.5 }.maxByOrNull { it.box.h }
+                    // Où est la personne par rapport à l'avant du corps : la tête (qui la suit), ou sans nacelle sa
+                    // place dans l'image.
+                    val pan = if (gimbal.ready) bodyPan() ?: 0.0
+                    else p?.let { (it.box.cx - 0.5) * camera.fovShort } ?: 0.0
                     if (p == null && !follower.sees) {
                         if (lostAt == 0L) lostAt = System.currentTimeMillis()
                         r.velocity(0.0, 0.0, 300)
@@ -1930,7 +1970,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun recenter() = background("centrer") { head.center() }
+    fun recenter() = background("centrer") {
+        head.center().also { r -> roomba?.let { w -> head.absPan()?.let { bodyRef = Triple(it, w.heading, System.currentTimeMillis()) } } }
+    }
     fun nod() = background("oui") { head.nod() }
     fun shake() = background("non") { head.shake() }
     fun sweep() = background("balayage") { head.sweep { } }
@@ -2365,13 +2407,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         flushTurn()
         val t0 = System.currentTimeMillis()
         journal.write("outil", "$name ${args}")
+        if (name in wheelTools) return wheelTool(name, args, t0)
         if (name !in longTools) return runTool(name, args).also {
             journal.write("outil", "$name -> $it (${System.currentTimeMillis() - t0} ms)")
         }
         val gen = ++longToolGen
         val job = toolPool.submit<Map<String, Any?>> { runTool(name, args) }
-        // Réponse rapide (refus, déjà vu…) : on la donne tout de suite.
-        runCatching { return job.get(1500, TimeUnit.MILLISECONDS) }
+        // Réponse rapide (refus, déjà vu…) : on la donne tout de suite. Pas plus de 0,4 s : au-delà, Gemini attendait
+        // pour rien avant de dire « j'arrive » (réponses à 4-5 s dans le journal du 23/10).
+        runCatching { return job.get(400, TimeUnit.MILLISECONDS) }
         thread(name = "resultat-$name", isDaemon = true) {
             val r = runCatching { job.get() }.getOrElse { mapOf("result" to "interrompu") }
             journal.write("outil", "$name -> $r (${System.currentTimeMillis() - t0} ms, en arrière-plan)")
@@ -2382,6 +2426,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return mapOf("result" to "C'est lancé (ça prend quelques secondes). Le résultat t'arrivera tout seul dans un message de " +
             "l'application. En attendant, ne commente pas (au plus « je regarde »), réponds normalement si on te parle, et ne " +
             "dis pas que c'est trouvé ou fait avant d'avoir reçu le résultat.")
+    }
+
+    // ---- roues : Joey dit « j'avance » pendant qu'il roule, au lieu d'attendre la fin du trajet pour parler ----------
+    private val wheelTools = setOf("avancer", "tourner_corps")
+    /** Un seul déplacement à la fois, dans l'ordre demandé (« avance, encore » = deux fois). */
+    private val wheelPool = Executors.newSingleThreadExecutor()
+    private val wheelGen = AtomicInteger()
+
+    private fun wheelTool(name: String, args: Map<String, Any?>, t0: Long): Map<String, Any?> {
+        if (roomba == null) return mapOf("result" to noWheels)
+        val gen = wheelGen.get()
+        val job = wheelPool.submit<Map<String, Any?>> {
+            if (gen != wheelGen.get()) mapOf("result" to "annulé") else runTool(name, args)
+        }
+        runCatching { return job.get(400, TimeUnit.MILLISECONDS).also { journal.write("outil", "$name -> $it (${System.currentTimeMillis() - t0} ms)") } }
+        thread(name = "roues-$name", isDaemon = true) {
+            val r = runCatching { job.get() }.getOrElse { mapOf("result" to "interrompu") }
+            journal.write("outil", "$name -> $r (${System.currentTimeMillis() - t0} ms, en arrière-plan)")
+            val text = r["result"]?.toString().orEmpty()
+            // Tout s'est bien passé : il l'a déjà dit en partant, on ne le répète pas.
+            val ok = text.startsWith("avancé") || text.startsWith("tourné") || text.startsWith("déjà") ||
+                text.startsWith("rien à faire") || text == "annulé" || text == "interrompu"
+            if (!ok && gen == wheelGen.get()) deliverLater(name, args, r)
+        }
+        return mapOf("result" to "C'est parti, tu es en train de bouger. Dis-le en trois mots au plus (« j'avance », " +
+            "« je tourne »). Tu ne seras prévenu que s'il y a un problème (obstacle, vide…).")
     }
 
     /** Donne à Gemini le résultat d'un outil long, quand personne ne parle (sans couper la parole). */
@@ -2646,6 +2716,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             "arrete" -> {
                 following = false
+                wheelGen.incrementAndGet() // les déplacements en attente sont annulés
                 roomba?.stop()
                 motionJob?.cancel(true)
                 head.stop()

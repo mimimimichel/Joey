@@ -85,7 +85,27 @@ object RoombaOI {
     )
     val SENSOR_BYTES = SENSOR_PACKETS.sumOf { it.second }
 
-    fun querySensors(): ByteArray = bytes(QUERY_LIST, SENSOR_PACKETS.size, *SENSOR_PACKETS.map { it.first }.toIntArray())
+    /**
+     * Les autres capteurs du Roomba (série 600), lus en plus quand il les accepte (sinon on reste aux capteurs de base) :
+     * mur à droite, mur virtuel, surintensité des moteurs, saleté, infrarouge (balises de la base), boutons, température
+     * de la batterie, intensité du capteur de mur, intensités des 6 détecteurs de proximité, infrarouge gauche/droite,
+     * roulette avant (il avance vraiment ?).
+     */
+    val EXTRA_PACKETS = listOf(
+        8 to 1, 13 to 1, 14 to 1, 15 to 1, 17 to 1, 18 to 1, 24 to 1, 27 to 2,
+        46 to 2, 47 to 2, 48 to 2, 49 to 2, 50 to 2, 51 to 2,
+        52 to 1, 53 to 1, 58 to 1,
+    )
+    val EXTENDED_PACKETS = SENSOR_PACKETS + EXTRA_PACKETS
+    val EXTENDED_BYTES = EXTENDED_PACKETS.sumOf { it.second }
+    /** Direction (degrés, + = droite) des 6 détecteurs de proximité : gauche, avant gauche, centre gauche, centre droit… */
+    val LIGHT_ANGLES = doubleArrayOf(-65.0, -32.0, -10.0, 10.0, 32.0, 65.0)
+
+    fun querySensors(extended: Boolean = false): ByteArray {
+        val list = if (extended) EXTENDED_PACKETS else SENSOR_PACKETS
+        return bytes(QUERY_LIST, list.size, *list.map { it.first }.toIntArray())
+    }
+    fun sensorBytes(extended: Boolean) = if (extended) EXTENDED_BYTES else SENSOR_BYTES
 
     class Sensors(
         val bumpRight: Boolean,
@@ -104,7 +124,29 @@ object RoombaOI {
         val leftCounts: Int,
         val rightCounts: Int,
         val lightBumper: Int,
+        // ---- capteurs en plus (absents si le Roomba ne les donne pas) ----
+        /** Mur tout près sur sa droite. */
+        val wall: Boolean? = null,
+        val virtualWall: Boolean? = null,
+        /** Surintensité : bit 4 roue gauche, bit 3 roue droite, bit 2 brosse principale, bit 0 brosse latérale. */
+        val overcurrent: Int = 0,
+        val dirt: Int = 0,
+        /** Code infrarouge reçu (balises de la base : 160-175), 0 sinon. */
+        val irOmni: Int = 0,
+        /** Boutons : bit 0 CLEAN, 1 SPOT, 2 DOCK. */
+        val buttons: Int = 0,
+        val batteryTempC: Int? = null,
+        val wallSignal: Int = 0,
+        /** Intensité des 6 détecteurs de proximité (0-4095), dans l'ordre de LIGHT_ANGLES. */
+        val lightSignals: IntArray? = null,
+        val irLeft: Int = 0,
+        val irRight: Int = 0,
+        /** Roulette avant : bit 0 = elle tourne (il avance vraiment). */
+        val stasis: Int? = null,
     ) {
+        val wheelOvercurrent get() = overcurrent and 0x18 != 0
+        /** La base (ses balises infrarouges) est en vue. */
+        val dockInSight get() = listOf(irOmni, irLeft, irRight).any { it in 160..175 }
         val bump get() = bumpLeft || bumpRight
         val wheelDrop get() = wheelDropLeft || wheelDropRight
         val batteryPct: Int? get() = if (capacityMah in 500..10_000) (chargeMah * 100 / capacityMah).coerceIn(0, 100) else null
@@ -113,8 +155,8 @@ object RoombaOI {
     }
 
     /** Lit la réponse à [querySensors] ; null si la taille ou les valeurs sont incohérentes (mauvaise vitesse de liaison). */
-    fun parseSensors(b: ByteArray): Sensors? {
-        if (b.size != SENSOR_BYTES) return null
+    fun parseSensors(b: ByteArray, extended: Boolean = false): Sensors? {
+        if (b.size != sensorBytes(extended)) return null
         fun u8(i: Int) = b[i].toInt() and 0xFF
         fun u16(i: Int) = (u8(i) shl 8) or u8(i + 1)
         fun s16(i: Int) = u16(i).toShort().toInt()
@@ -124,6 +166,12 @@ object RoombaOI {
         // Contrôles de cohérence : bits inutilisés à zéro, mode et état de charge dans leurs plages
         if (bumps and 0xF0 != 0 || mode > 3 || chargingState > 5) return null
         for (i in 1..4) if (u8(i) > 1) return null
+        // Capteurs en plus : à partir de l'octet 21, dans l'ordre d'EXTRA_PACKETS (24 octets).
+        val e = SENSOR_BYTES
+        if (extended) {
+            if (u8(e) > 1 || u8(e + 1) > 1 || u8(e + 2) and 0xE0 != 0 || u16(e + 7) > 1023 || u8(e + 23) > 3) return null
+            for (k in 0 until 6) if (u16(e + 9 + 2 * k) > 4095) return null
+        }
         return Sensors(
             bumpRight = bumps and 1 != 0,
             bumpLeft = bumps and 2 != 0,
@@ -140,6 +188,18 @@ object RoombaOI {
             leftCounts = u16(16),
             rightCounts = u16(18),
             lightBumper = u8(20),
+            wall = if (extended) u8(e) == 1 else null,
+            virtualWall = if (extended) u8(e + 1) == 1 else null,
+            overcurrent = if (extended) u8(e + 2) else 0,
+            dirt = if (extended) u8(e + 3) else 0,
+            irOmni = if (extended) u8(e + 4) else 0,
+            buttons = if (extended) u8(e + 5) else 0,
+            batteryTempC = if (extended) b[e + 6].toInt() else null,
+            wallSignal = if (extended) u16(e + 7) else 0,
+            lightSignals = if (extended) IntArray(6) { u16(e + 9 + 2 * it) } else null,
+            irLeft = if (extended) u8(e + 21) else 0,
+            irRight = if (extended) u8(e + 22) else 0,
+            stasis = if (extended) u8(e + 23) else null,
         )
     }
 

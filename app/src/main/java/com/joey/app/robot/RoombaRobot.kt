@@ -43,8 +43,26 @@ class RoombaRobot(
     @Volatile private var failures = 0
     /** Un contact : « pare-chocs », « vide » ou « proche », et le côté (-1 gauche, 0 devant, 1 droite). */
     @Volatile var onContact: ((String, Int) -> Unit)? = null
-    /** Un obstacle tout proche devant le pare-chocs (détecteurs de proximité). */
-    val obstacleNear: Boolean get() = ((sensors?.lightBumper ?: 0) and 0x3F) != 0
+    /** Un obstacle tout proche devant le pare-chocs (détecteurs de proximité ; leur intensité si on l'a). */
+    val obstacleNear: Boolean get() = ((sensors?.lightBumper ?: 0) and 0x3F) != 0 ||
+        (sensors?.lightSignals?.let { sig -> (1..4).any { sig[it] > 120 } } ?: false)
+    /** Un obstacle détecté (direction en degrés, + = droite ; distance au pare-chocs en m), pour la carte. */
+    @Volatile var onProximity: ((Double, Double) -> Unit)? = null
+    /** Un bouton du Roomba vient d'être appuyé : « clean », « spot » ou « dock ». */
+    @Volatile var onButton: ((String) -> Unit)? = null
+    /** Dernière fois que les balises infrarouges de la base ont été vues. */
+    @Volatile var dockSeenAt = 0L
+        private set
+    private var fineAt = 0L
+
+    /** Intensité d'un détecteur de proximité -> distance approximative (m), ou null si rien. */
+    private fun lightDistance(sig: Int): Double? = when {
+        sig > 800 -> 0.03
+        sig > 250 -> 0.08
+        sig > 100 -> 0.15
+        sig > 40 -> 0.25
+        else -> null
+    }
 
     /** Repart de zéro (posé sur sa base : la base devient l'origine de la carte). */
     fun resetOdometry() = odo.reset()
@@ -85,11 +103,27 @@ class RoombaRobot(
     // ---- liaison ------------------------------------------------------------------------------------
     private fun send(b: ByteArray) = synchronized(io) { link.write(b) }
 
+    /** Tous ses capteurs (proximité, mur, boutons…) : seulement si ce Roomba les accepte, sinon ceux de base. */
+    @Volatile var extended = false
+        private set
+
     fun readSensors(): RoombaOI.Sensors? = synchronized(io) {
         link.clearInput()
-        link.write(RoombaOI.querySensors())
-        val raw = link.read(RoombaOI.SENSOR_BYTES, 250) ?: return null
-        RoombaOI.parseSensors(raw)
+        link.write(RoombaOI.querySensors(extended))
+        val raw = link.read(RoombaOI.sensorBytes(extended), 250) ?: return null
+        RoombaOI.parseSensors(raw, extended)
+    }
+
+    /** Essaie la liste complète des capteurs ; si le Roomba ne la comprend pas, on reste à celle de base. */
+    private fun tryExtended() {
+        extended = true
+        var ok = 0
+        repeat(3) { if (readSensors() != null) ok++ }
+        if (ok < 2) {
+            extended = false
+            runCatching { sleeper(100); link.clearInput() }
+            log("Roomba : capteurs de base seulement (ce modèle ne donne pas les autres)")
+        } else log("Roomba : tous ses capteurs lus (proximité, mur, boutons, balises de la base…)")
     }
 
     fun wakePulse() {
@@ -115,10 +149,11 @@ class RoombaRobot(
         val ok = s ?: throw IllegalStateException(
             "la carte USB répond mais pas le Roomba. Vérifie : interrupteur de la carte sur 5V, TX -> trou 3, RX -> trou 4, " +
                 "GND -> trou 6, et que le Roomba est allumé (appuie une fois sur CLEAN pour le réveiller, puis réessaie)")
-        sensors = ok
+        tryExtended()
+        sensors = readSensors() ?: ok
         sensorsAt = System.currentTimeMillis()
         currentBaud = baud
-        odo.update(ok.leftCounts, ok.rightCounts)
+        odo.update(sensors!!.leftCounts, sensors!!.rightCounts)
         defineBabble()
         log("Roomba : réponse à $baud bauds, batterie ${ok.batteryPct ?: "?"} %, mode ${ok.modeName}")
         running = true
@@ -150,6 +185,8 @@ class RoombaRobot(
                 }
                 // Réveillé (par le fil de réveil, ou par quelqu'un sur CLEAN), il attend « start » pour répondre.
                 if (failures % 20 == 0) runCatching { send(RoombaOI.start()); if (driving) send(RoombaOI.safe()) }
+                // La liste complète des capteurs ne passe plus : on revient à celle de base.
+                if (extended && failures == 15) { extended = false; log("Roomba : je repasse aux capteurs de base") }
                 // Il a pu changer de vitesse de liaison (impulsions sur le fil de réveil) : on essaie les autres.
                 if (failures % 40 == 20) {
                     val bauds = listOf(115_200, 57_600, 19_200)
@@ -179,7 +216,22 @@ class RoombaRobot(
                 val lb = s.lightBumper and 0x3F
                 if (lb != 0 && ((prev?.lightBumper ?: 0) and 0x3F) == 0)
                     onContact?.invoke("proche", if (lb and 0x3C == 0 && lb and 0x03 != 0) -1 else if (lb and 0x0F == 0) 1 else 0)
+                if (s.virtualWall == true && prev?.virtualWall != true) onContact?.invoke("mur virtuel", 0)
+                // Les capteurs fins, 5 fois par seconde au plus (pour la carte) : proximité (6 directions) et mur à droite.
+                if (now - fineAt > 200) {
+                    fineAt = now
+                    s.lightSignals?.forEachIndexed { k, sig -> lightDistance(sig)?.let { d -> onProximity?.invoke(RoombaOI.LIGHT_ANGLES[k], d) } }
+                    if (s.wall == true || s.wallSignal > 30) onProximity?.invoke(90.0, if (s.wallSignal > 200) 0.05 else 0.12)
+                }
+                // Boutons du Roomba : des commandes pour Joey.
+                val pressed = s.buttons and (prev?.buttons ?: 0).inv()
+                if (pressed and 1 != 0) onButton?.invoke("clean")
+                if (pressed and 2 != 0) onButton?.invoke("spot")
+                if (pressed and 4 != 0) onButton?.invoke("dock")
             }
+            // Roues en surintensité (coincées, même si elles patinent) : il est coincé.
+            if (s.wheelOvercurrent && (abs(vel[0]) > 0.04 || driving)) stalledAt = now
+            if (s.dockInSight) dockSeenAt = now
             // En mode passif (au repos), le Roomba s'endort au bout de 5 min, et sans le fil de réveil on ne peut plus le
             // rallumer. En mode sécurité il ne s'endort pas : on l'y remet au bout de 3 min de repos (pas sur sa base).
             if (s.oiMode == 1 && !s.onHomeBase && !s.charging && keepAwake) {

@@ -1770,6 +1770,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 bodyRef = null // nouvelles roues, nouveau repère
                 anchorGrid(r)
                 r.onContact = { kind, side -> runCatching { gridContact(r, kind, side) } }
+                // Ses détecteurs de proximité et son capteur de mur dessinent les obstacles sur la carte avant qu'il les touche.
+                r.onProximity = { angle, d ->
+                    runCatching {
+                        val h = r.heading + (if (r.reversed) 180.0 else 0.0) + angle
+                        grid.markObstacle(r.x, r.y, h, com.joey.app.robot.NavGrid.ROBOT_RADIUS + d)
+                    }
+                }
+                // Les boutons du Roomba deviennent des commandes.
+                r.onButton = { b -> runCatching { roombaButton(r, b) } }
                 log("🛞 Roomba branché : j'ai des roues !")
                 // Il le sait tout de suite (sinon il répondait « pas branchées » d'après ce qu'il savait avant).
                 live?.event("Tes roues (le Roomba) viennent d'être branchées : tu peux rouler.", reply = false)
@@ -2074,9 +2083,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val h = r.heading + if (r.reversed) 180.0 else 0.0
         when (kind) {
             "vide" -> { grid.markCliff(r.x, r.y, h); log("🗺 Vide noté sur ma carte") }
+            "mur virtuel" -> { grid.markCliff(r.x, r.y, h); log("🗺 Mur virtuel : je ne le franchirai pas") }
             "proche" -> grid.markObstacle(r.x, r.y, h, 0.30, side)
             else -> grid.markObstacle(r.x, r.y, h, side = side)
         }
+    }
+
+    /** CLEAN : aspiration marche/arrêt ; SPOT : il vient vers toi ; DOCK : il rentre à sa base. */
+    private fun roombaButton(r: com.joey.app.robot.RoombaRobot, b: String) {
+        log("🔘 Bouton $b du Roomba")
+        when (b) {
+            "clean" -> thread(isDaemon = true) { log("🧹 " + r.vacuum(!r.vacuuming)) }
+            "spot" -> moveAsync(holdMs = 3000) { comeHere() }
+            "dock" -> thread(isDaemon = true) { following = false; log("🛞 " + r.seekDock()) }
+        }
+        live?.event("On vient d'appuyer sur le bouton ${b.uppercase()} de ton Roomba (" + when (b) {
+            "clean" -> "ton aspiration " + (if (r.vacuuming) "s'arrête" else "démarre")
+            "spot" -> "tu viens vers la personne"
+            else -> "tu rentres à ta base"
+        } + "). Réagis en trois mots au plus.", reply = true)
     }
 
     /** Distance parcourue d'après le résumé de drive() (« avancé de 0,70 m », « … après 0,35 m »). */
@@ -3707,6 +3732,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "roues" to (roomba?.let { r -> "branchées, batterie ${r.battery ?: "?"} %" + (if (r.onBase) ", sur ta base" else "") +
                         (if (r.charging) ", en charge" else "") + (if (r.vacuuming) ", aspiration en marche" else "") +
                         (if (r.reversed) ", visage vers l'arrière du Roomba" else "") +
+                        (if (System.currentTimeMillis() - r.dockSeenAt < 5000) ", ta base est en vue (balises)" else "") +
+                        (if (r.extended) ", tous tes capteurs (proximité, mur, boutons)" else ", capteurs de base") +
+                        (r.sensors?.batteryTempC?.let { t -> if (t >= 45) ", batterie chaude ($t °C)" else "" } ?: "") +
                         (r.safetyNote?.let { n -> ", dernier arrêt de sécurité : $n" } ?: "") }
                         ?: "pas branchées (Roomba)"),
                     "souvenirs" to memory.size,

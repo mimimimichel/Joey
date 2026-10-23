@@ -55,19 +55,42 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
                 143 -> mode = 1
                 145 -> if (mode >= 2) { right = ((c[1] shl 8) or c[2]).toShort().toInt(); left = ((c[3] shl 8) or c[4]).toShort().toInt() }
                 141 -> songs.add(c[1])
-                149 -> out.addAll(sensors().toList())
+                149 -> out.addAll(sensors(c.drop(2)).toList())
             }
         }
     }
 
-    private fun sensors(): ByteArray {
+    var supportsExtra = true
+    var buttons = 0
+    var lightSignal = 0
+
+    /** Réponse paquet par paquet, comme le vrai (un Roomba qui ne connaît pas un paquet ne répond rien d'utile). */
+    private fun sensors(ids: List<Int>): ByteArray {
         val l = countsL.toInt() and 0xFFFF; val r = countsR.toInt() and 0xFFFF
-        val v = intArrayOf(
-            if (bump) 3 else 0, if (cliff) 1 else 0, 0, 0, 0,
-            if (onBase) 2 else 0, 0x3A, 0x98, 0xFF, 0x38, 0x07, 0xD0, 0x0B, 0xB8,
-            if (onBase) 2 else 0, mode, l shr 8, l and 0xFF, r shr 8, r and 0xFF, 0,
-        )
-        return ByteArray(v.size) { v[it].toByte() }
+        val out = ArrayList<Int>()
+        for (id in ids) {
+            when (id) {
+                7 -> out.add(if (bump) 3 else 0)
+                9 -> out.add(if (cliff) 1 else 0); 10, 11, 12 -> out.add(0)
+                21 -> out.add(if (onBase) 2 else 0)
+                22 -> { out.add(0x3A); out.add(0x98) }
+                23 -> { out.add(0xFF); out.add(0x38) }
+                25 -> { out.add(0x07); out.add(0xD0) }
+                26 -> { out.add(0x0B); out.add(0xB8) }
+                34 -> out.add(if (onBase) 2 else 0)
+                35 -> out.add(mode)
+                43 -> { out.add(l shr 8); out.add(l and 0xFF) }
+                44 -> { out.add(r shr 8); out.add(r and 0xFF) }
+                45 -> out.add(0)
+                else -> {
+                    if (!supportsExtra) return ByteArray(3) // il ne comprend pas : réponse incohérente
+                    val size = RoombaOI.EXTRA_PACKETS.first { it.first == id }.second
+                    val v = when (id) { 18 -> buttons; 46, 47, 48, 49, 50, 51 -> lightSignal; 24 -> 25; else -> 0 }
+                    if (size == 2) { out.add(v shr 8); out.add(v and 0xFF) } else out.add(v)
+                }
+            }
+        }
+        return ByteArray(out.size) { out[it].toByte() }
     }
 
     @Synchronized override fun read(n: Int, timeoutMs: Int): ByteArray? {
@@ -164,6 +187,33 @@ class RoombaRobotTest {
         assertTrue(r.vacuuming)
         r.vacuum(false)
         assertTrue(!r.vacuuming)
+        r.disconnect()
+    }
+
+    @Test fun readsAllSensorsWhenItCan() {
+        val (f, r) = connected()
+        assertTrue(r.extended)
+        f.lightSignal = 300
+        Thread.sleep(250)
+        assertTrue(r.obstacleNear)
+        var pressed = ""
+        r.onButton = { pressed = it }
+        f.buttons = 1
+        Thread.sleep(250)
+        assertEquals("clean", pressed)
+        r.disconnect()
+    }
+
+    @Test fun fallsBackToBasicSensors() {
+        val f = FakeRoomba()
+        f.supportsExtra = false
+        val r = RoombaRobot(f)
+        r.connect()
+        Thread.sleep(200)
+        assertTrue(!r.extended)
+        assertTrue(r.linkOk)
+        r.drive(0.2)
+        assertTrue("x ${f.x}", f.x > 0.15)
         r.disconnect()
     }
 

@@ -1744,8 +1744,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 live?.event("Tes roues (le Roomba) viennent d'être branchées : tu peux rouler.", reply = false)
                 r.onLink = { ok ->
                     log(if (ok) "🛞 Liaison avec le Roomba revenue" else "🛞 Liaison avec le Roomba coupée (fil qui bouge ?)")
-                    live?.event(if (ok) "La liaison avec tes roues est revenue." else "La liaison avec tes roues vient de se couper " +
-                        "(un fil a peut-être bougé) : tu t'es arrêté par sécurité. Dis-le simplement.", reply = false)
+                    live?.event(if (ok) "La liaison avec tes roues est revenue." else "Tes roues ne répondent plus (le Roomba s'est " +
+                        "peut-être endormi, ou un fil a bougé) : tu t'es arrêté par sécurité. Dis-le simplement, et si ça dure, " +
+                        "demande qu'on appuie une fois sur le bouton CLEAN du Roomba pour le réveiller.", reply = false)
                 }
                 refreshRoomba()
             } catch (e: Exception) {
@@ -1844,6 +1845,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- il apprend : réglages, auto-tests des roues ------------------------------------------------------------
     private fun applyTuning(r: com.joey.app.robot.RoombaRobot) {
         r.reversed = flag("roomba_reversed", false)
+        r.keepAwake = flag("roomba_awake", true)
         r.maxSpeed = tuning.get("vitesse")
         r.turnScale = tuning.get("echelle_rotation")
     }
@@ -1915,6 +1917,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         tuning.set("echelle_rotation", scale)
         r.turnScale = tuning.get("echelle_rotation")
         return "angles : corrigés (%.0f° en vrai pour 90° annoncés)".format(measured)
+    }
+
+    /**
+     * « Cartographie la maison » : il relève la pièce où il est (nommée d'après ce qu'il y voit : salon, chambre…),
+     * part explorer ailleurs, relève la suivante… jusqu'à 5 pièces ou 8 minutes.
+     */
+    private fun mapHouse(): String {
+        val r = roomba ?: return mapHere("ici")
+        val t0 = System.currentTimeMillis()
+        val done = ArrayList<String>()
+        for (i in 0 until 5) {
+            if (System.currentTimeMillis() - t0 > 8 * 60_000) break
+            val tmp = "pièce ${i + 1} (provisoire)"
+            log("🗺 Pièce ${i + 1}")
+            mapHere(tmp)
+            houseMap.place(tmp)?.let { p ->
+                // Son nom : ce qu'il y a vu (« chambre »), ou « chambre 2 » si une autre chambre est déjà ailleurs.
+                var name = p.kind.ifBlank { "pièce" }
+                val near = { q: com.joey.app.brain.HouseMap.Place -> q.x != null && p.x != null &&
+                    kotlin.math.hypot(q.x!! - p.x!!, q.y!! - p.y!!) < 2.5 }
+                var k = 2
+                while (houseMap.place(name)?.let { it.name != tmp && !near(it) } == true) name = "${p.kind} ${k++}"
+                houseMap.put(name, p.kind, p.description, p.items, p.x, p.y)
+                houseMap.remove(tmp)
+                currentPlace = name
+                if (name !in done) done.add(name)
+            }
+            if (i == 4) break
+            // Ailleurs : il part explorer un moment avant le relevé suivant.
+            val e = explore(null, 45)
+            if (e.startsWith("exploration arrêtée") || e.contains("coincé")) { log("🗺 $e"); break }
+        }
+        return if (done.isEmpty()) "relevé impossible" else
+            "maison relevée : ${done.size} pièce(s) — ${done.joinToString()} (sur ta carte, avec leur position)"
     }
 
     // ---- explorer : partir à l'aventure (trouver une pièce, le chien, une porte…) -----------------------------------
@@ -2843,7 +2879,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- outils longs en arrière-plan : la conversation continue pendant qu'il cherche ou se déplace ----------
     /** Outils qui peuvent durer (recherche, déplacement, relevé) : Gemini n'attend pas, il reçoit le résultat après. */
     private val longTools = setOf("chercher", "aller_vers", "viens_ici", "cartographier", "regarder_ce_que_je_montre", "tester_roues",
-        "explorer", "se_degager")
+        "explorer", "se_degager", "aller_a")
     private val toolPool = Executors.newCachedThreadPool()
     @Volatile private var longToolGen = 0
 
@@ -2950,10 +2986,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         "choses simples (personne, chien, chat, chaise, télé…) : pas « $what »")
                     log("🔎 je cherche en tournant sur moi-même : $what")
                     var found: com.joey.app.senses.Seen? = null
-                    moveSync(holdMs = 3000, timeoutMs = 60_000) { found = searchWithBody(r, labels); if (found != null) "trouvé" else "pas trouvé" }
+                    var res = ""
+                    moveSync(holdMs = 3000, timeoutMs = 150_000) {
+                        found = labels?.let { searchWithBody(r, it) }
+                        // Pas ici : il part le chercher ailleurs.
+                        res = if (found != null) "trouvé" else explore(what, 90)
+                        res
+                    }
                     live?.sendFrameNow()
                     return mapOf("result" to if (found != null) "trouvé : tu es tourné vers « $what » (regarde l'image)"
-                        else "pas trouvé : « $what » (tu as fait un tour complet sur toi-même)")
+                        else "pas en vue autour de toi, alors tu es parti explorer : $res")
                 }
                 log("🔎 je cherche : $what" + (labels?.let { " (détecteur : ${it.joinToString()})" } ?: " (vision Gemini)"))
                 if (labels != null && labels == setOf("person") && !follower.sees) {
@@ -2967,6 +3009,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         }
                         r
                     }
+                    if (!(r.startsWith("trouvé") || r.startsWith("je te vois")) && roomba != null) {
+                        var e = ""
+                        moveSync(holdMs = 3000, timeoutMs = 120_000) { e = explore("personne", 90); e }
+                        r = "pas en vue d'ici, alors tu es parti chercher : $e"
+                    }
                     live?.sendFrameNow()
                     return mapOf("result" to if (r.startsWith("trouvé") || r.startsWith("je te vois")) "$r (vérifie sur l'image)" else r)
                 }
@@ -2975,6 +3022,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 moveSync(holdMs = 8000, timeoutMs = 100_000) {
                     sp = searchSpatial(what, labels?.takeIf { "person" !in it })
                     if (sp != null) "trouvé : $what" else "pas trouvé : $what"
+                }
+                // Pas ici : avec ses roues, il part le chercher ailleurs (au lieu d'abandonner sur place).
+                if (sp == null && roomba != null) {
+                    var res = ""
+                    moveSync(holdMs = 8000, timeoutMs = 120_000) { res = explore(what, 90); res }
+                    live?.sendFrameNow()
+                    return mapOf("result" to "pas en vue d'ici, alors tu es parti explorer : $res")
                 }
                 val found = sp
                 if (found != null) showingFoundUntil = System.currentTimeMillis() + 8000
@@ -3320,7 +3374,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "aller_a" -> {
                 val r = roomba ?: return mapOf("result" to noWheels)
                 val lieu = args["lieu"] as? String ?: ""
-                val p = houseMap.place(lieu) ?: return mapOf("result" to "« $lieu » n'est pas sur ta carte")
+                val p = houseMap.place(lieu) ?: run {
+                    // Pas sur la carte : il part la chercher.
+                    var e = ""
+                    moveSync(holdMs = 3000, timeoutMs = 150_000) { e = explore(lieu, 120); e }
+                    return mapOf("result" to "« $lieu » n'était pas sur ta carte, alors tu es parti la chercher : $e. Si tu l'as " +
+                        "trouvée, propose de la cartographier.")
+                }
                 val px = p.x; val py = p.y
                 if (px == null || py == null) return mapOf("result" to "je ne connais pas la position de « $lieu » (relevé fait sans les roues) : " +
                     "il faudra le relever à nouveau en y étant, avec les roues branchées")
@@ -3335,6 +3395,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (!flag("camera", true)) return mapOf("result" to "ta caméra est coupée")
                 val lieu = (args["lieu"] as? String)?.trim().orEmpty().ifEmpty { "ici" }
                 var r = ""
+                val wholeHouse = Regex("(?i)(maison|appartement|toutes les pi|les pièces|partout|tout l'étage)").containsMatchIn(lieu)
+                if (wholeHouse && roomba != null) {
+                    moveSync(holdMs = 2000, timeoutMs = 9 * 60_000L) { r = mapHouse(); r }
+                    live?.sendFrameNow()
+                    return mapOf("result" to r)
+                }
                 moveSync(holdMs = 2000, timeoutMs = 150_000) { r = mapHere(lieu); r }
                 live?.sendFrameNow()
                 mapOf("result" to r)

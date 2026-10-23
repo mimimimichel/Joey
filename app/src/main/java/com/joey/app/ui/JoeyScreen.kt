@@ -396,6 +396,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                         }
                     }
                 }
+                Toggle("Garder le Roomba éveillé (sinon il s'endort au bout de 5 min)", vm.flagValue("roomba_awake", true)) { vm.setFlagValue("roomba_awake", it) }
                 Toggle("Le Roomba bipe quand Joey parle (babil de robot)", vm.flagValue("roomba_babble", true)) { vm.setFlagValue("roomba_babble", it) }
                 Toggle("Visage tourné vers l'arrière du Roomba (côté opposé au pare-chocs)", vm.flagValue("roomba_reversed", false)) { vm.setFlagValue("roomba_reversed", it) }
                 Toggle("Gestes (pouce, coucou, doigt pointé)", vm.flagValue("gestures", true)) { vm.setFlagValue("gestures", it) }

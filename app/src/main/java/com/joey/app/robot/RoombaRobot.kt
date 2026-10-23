@@ -31,16 +31,20 @@ class RoombaRobot(
     private val io = Any()
     private val odo = Odometry()
     @Volatile var sensors: RoombaOI.Sensors? = null
+        private set
     /** Dernière lecture réussie des capteurs. */
     @Volatile var sensorsAt = 0L
         private set
     /** La liaison répond (capteurs lus il y a moins de 0,7 s) : sinon, on ne roule pas à l'aveugle. */
     val linkOk: Boolean get() = System.currentTimeMillis() - sensorsAt < 700
-        private set
     @Volatile var running = false
         private set
     @Volatile private var cancel = false
     @Volatile private var failures = 0
+    /** Le garder éveillé (mode sécurité au repos) : sinon il s'endort au bout de 5 min. */
+    @Volatile var keepAwake = true
+    private var passiveSince = 0L
+    private var awakeLogged = false
     /** La liaison vient de se couper (false) ou de revenir (true). */
     @Volatile var onLink: ((Boolean) -> Unit)? = null
     @Volatile private var currentBaud = 115_200
@@ -133,10 +137,12 @@ class RoombaRobot(
                 // Réveil : souvent au début, puis toutes les ~30 s (il était éteint : 92 messages en 3 min dans le journal).
                 if (failures == 3) runCatching { wheels(0.0, 0.0) } // ne jamais rouler à l'aveugle
                 if (failures == 10) runCatching { onLink?.invoke(false) }
-                if (failures == 10 || (failures > 10 && failures % 300 == 0)) {
+                if (failures == 10 || (failures > 10 && failures % 100 == 0)) {
                     if (failures == 10 || failures % 3000 == 0) log("Roomba : pas de réponse, je le réveille (est-il allumé ? un fil a bougé ?)")
-                    wakePulse(); runCatching { send(RoombaOI.start()) }
+                    wakePulse()
                 }
+                // Réveillé (par le fil de réveil, ou par quelqu'un sur CLEAN), il attend « start » pour répondre.
+                if (failures % 20 == 0) runCatching { send(RoombaOI.start()); if (driving) send(RoombaOI.safe()) }
                 // Il a pu changer de vitesse de liaison (impulsions sur le fil de réveil) : on essaie les autres.
                 if (failures % 40 == 20) {
                     val bauds = listOf(115_200, 57_600, 19_200)
@@ -158,6 +164,17 @@ class RoombaRobot(
             sensors = s
             sensorsAt = now
             bumpSince = if (s.bump) (if (bumpSince == 0L) now else bumpSince) else 0L
+            // En mode passif (au repos), le Roomba s'endort au bout de 5 min, et sans le fil de réveil on ne peut plus le
+            // rallumer. En mode sécurité il ne s'endort pas : on l'y remet au bout de 3 min de repos (pas sur sa base).
+            if (s.oiMode == 1 && !s.onHomeBase && !s.charging && keepAwake) {
+                if (passiveSince == 0L) passiveSince = now
+                else if (now - passiveSince > 180_000) {
+                    runCatching { send(RoombaOI.start()); sleeper(50); send(RoombaOI.safe()) }
+                    driving = true
+                    passiveSince = 0L
+                    if (!awakeLogged) { awakeLogged = true; log("Roomba : je le garde éveillé (sinon il s'endort au bout de 5 min)") }
+                }
+            } else passiveSince = 0L
             if (s.bump) lastBumpSide = if (s.bumpLeft && !s.bumpRight) -1 else if (s.bumpRight && !s.bumpLeft) 1 else 0
             odo.update(s.leftCounts, s.rightCounts)
             // En route, il repasse en mode passif de lui-même (vide, roue soulevée, base) : on arrête tout.

@@ -2259,14 +2259,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 res = r.followPath(listOf(target), r.maxSpeed) { x, y, h -> minOf(open, grid.speedFactor(x, y, h).coerceAtLeast(0.6)) }
                     .let { if (it == "arrivé") "avancé de %.2f m".format(asked) else it }
             } else {
-                // 3. Sans vision : la frontière la plus proche de sa carte (bord du connu), à au moins 80 cm.
-                val f = grid.frontiers(r.x, r.y, minSize = 4).firstOrNull { kotlin.math.hypot(it.first - r.x, it.second - r.y) > 0.8 }
-                if (f != null && stops % 4 != 0) {
+                // 3. Sans vision Gemini : exploration méthodique par les frontières de sa carte (bord du connu).
+                val n = nav
+                if (n != null && stops % 4 != 0) {
                     val before = r.x to r.y
-                    val nav = navigateTo(f.first, f.second, tries = 2, budget = 2.5)
+                    val step = n.frontierStep(budget = 3.0)
                     travelled += kotlin.math.hypot(r.x - before.first, r.y - before.second)
-                    if (nav.startsWith("arrêté")) return "exploration arrêtée : $nav (${summary()})"
-                    continue
+                    if (step != null) {
+                        if (step.startsWith("arrêté")) return "exploration arrêtée : $step (${summary()})"
+                        continue
+                    }
                 }
                 // 4. Sinon : tout droit, et on change de cap de temps en temps.
                 asked = 0.7

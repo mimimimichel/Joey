@@ -119,6 +119,26 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
                 hypot(startM.first - r.x, startM.second - r.y))
     }
 
+    /** Frontières où il n'a pas réussi à aller (il ne s'y acharne pas). */
+    private val failedFrontiers = ArrayList<Pair<Double, Double>>()
+
+    /**
+     * Un pas d'exploration méthodique : il va vers la frontière (le bord entre ce qu'il connaît et l'inconnu) la plus
+     * proche vers laquelle un chemin existe. Renvoie le résultat du trajet, ou null s'il n'y a plus de frontière :
+     * tout ce qui est accessible est connu.
+     */
+    fun frontierStep(budget: Double = 3.0): String? {
+        val x = robot.x; val y = robot.y
+        val f = grid.frontiers(x, y, minSize = 4)
+            .filter { (fx, fy) -> hypot(fx - x, fy - y) > 0.5 && failedFrontiers.none { hypot(it.first - fx, it.second - fy) < 0.5 } }
+            .take(6)
+            .firstOrNull { grid.plan(x, y, it.first, it.second) != null } ?: return null
+        log("🧭 vers l'inconnu : (%.1f ; %.1f)".format(f.first, f.second))
+        val res = navigateTo(f.first, f.second, tries = 3, budget = budget)
+        if (!res.startsWith("arrivé") && !res.startsWith("presque")) failedFrontiers.add(f)
+        return res
+    }
+
     /** Cap (degrés, + = droite) pour regarder le point (x, y) depuis là où il est. */
     fun bearingTo(x: Double, y: Double) = Math.toDegrees(atan2(y - robot.y, x - robot.x))
 

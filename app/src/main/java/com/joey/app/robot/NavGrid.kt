@@ -92,6 +92,16 @@ class NavGrid(val cell: Double = 0.1) {
         }
     }
 
+    /**
+     * La caméra voit le bord d'un obstacle à [dist] m dans la direction [headingDeg] : indice d'obstacle (moins sûr qu'un
+     * contact : il faut le voir deux fois de suite pour qu'il compte, une ombre ne bloque pas le chemin).
+     */
+    fun markSeenObstacle(x: Double, y: Double, headingDeg: Double, dist: Double) = synchronized(cells) {
+        val t = Math.toRadians(headingDeg)
+        val k = key(idx(x + dist * cos(t)), idx(y + dist * sin(t)))
+        if (k !in cliffs) cells[k] = ((cells[k] ?: 0f) + 1.0f).coerceAtMost(3.5f)
+    }
+
     /** Un vide (bord de marche) devant lui : interdit pour toujours. */
     fun markCliff(x: Double, y: Double, headingDeg: Double) = synchronized(cells) {
         val t = Math.toRadians(headingDeg)

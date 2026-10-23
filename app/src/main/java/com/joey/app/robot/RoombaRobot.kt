@@ -46,6 +46,15 @@ class RoombaRobot(
     /** Un obstacle tout proche devant le pare-chocs (détecteurs de proximité ; leur intensité si on l'a). */
     val obstacleNear: Boolean get() = ((sensors?.lightBumper ?: 0) and 0x3F) != 0 ||
         (sensors?.lightSignals?.let { sig -> (1..4).any { sig[it] > 120 } } ?: false)
+    /**
+     * Ce que la caméra voit de sol libre droit devant Joey (m), ou null si elle ne sait pas (tête tournée, sol pas vu,
+     * image trop vieille). Sert à ralentir puis s'arrêter AVANT le choc.
+     */
+    @Volatile var visionClear: () -> Double? = { null }
+
+    /** Vitesse permise par la vision (m/s) en avançant côté visage ; null = pas d'avis. */
+    private fun visionCap(): Double? = visionClear()?.let { c -> if (c.isInfinite()) null else ((c - 0.22) * 0.8).coerceAtLeast(0.0) }
+
     /** Un obstacle détecté (direction en degrés, + = droite ; distance au pare-chocs en m), pour la carte. */
     @Volatile var onProximity: ((Double, Double) -> Unit)? = null
     /** Un bouton du Roomba vient d'être appuyé : « clean », « spot » ou « dock ». */
@@ -392,7 +401,13 @@ class RoombaRobot(
                     break
                 }
                 // Un obstacle tout près (détecteurs de proximité) : il ralentit pour le toucher en douceur, ou l'éviter.
-                val vmax = if ((sign > 0) != reversed && obstacleNear) 0.08 else maxSpeed
+                var vmax = if ((sign > 0) != reversed && obstacleNear) 0.08 else maxSpeed
+                val vcap = if (sign > 0) visionCap() else null
+                if (vcap != null && vcap < 0.03) {
+                    result = "obstacle vu devant (%.0f cm) après %.2f m, arrêté avant de le toucher".format((visionClear() ?: 0.0) * 100, done)
+                    break
+                }
+                if (vcap != null) vmax = minOf(vmax, maxOf(0.06, vcap))
                 // Accélère en douceur (pas de saut de 0 à la vitesse max), ralentit à l'approche.
                 rampV = minOf(rampV + 0.035, (left * 1.5).coerceIn(0.06, maxOf(0.06, vmax)))
                 val v = rampV * sign
@@ -465,6 +480,14 @@ class RoombaRobot(
                 var want = cruise * speedFactor(x, y, h).coerceIn(0.2, 1.0) * (1 - abs(err) / 100).coerceAtLeast(0.25)
                 want = minOf(want, 0.06 + toGoal * 0.9)                 // ralentit à l'approche du but
                 if (obstacleNear) want = minOf(want, 0.08)              // un obstacle tout près : doucement
+                // La caméra voit un obstacle droit devant : il ralentit, et s'arrête avant de le toucher.
+                val vcap = visionCap()
+                if (vcap != null && vcap < 0.03 && abs(err) < 30) {
+                    wheels(0.0, 0.0)
+                    result = "obstacle vu devant (%.0f cm), arrêté avant de le toucher".format((visionClear() ?: 0.0) * 100)
+                    break
+                }
+                if (vcap != null) want = minOf(want, maxOf(0.06, vcap))
                 v = if (want > v) minOf(want, v + 0.035) else maxOf(want, v - 0.06) // ~0,7 m/s² pour accélérer
                 wheels(v, (err * 2.2).coerceIn(-110.0, 110.0))
                 sleeper(50)
@@ -520,6 +543,7 @@ class RoombaRobot(
             } else moveStart = 0L
             if ((f > 0) != reversed && f != 0.0 && sensors?.bump == true) f = 0.0 // pare-chocs : plus d'avance, il peut encore tourner
             if ((f > 0) != reversed && obstacleNear) f = f.coerceIn(-0.08, 0.08) // tout près d'un obstacle : doucement
+            if (f > 0) visionCap()?.let { cap -> f = minOf(f, cap) }           // la caméra voit un obstacle devant
             runCatching { wheels(f, yaw) }
             active = true
         }

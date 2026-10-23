@@ -339,7 +339,46 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var targetStreak = 0
     private var faceStreak = 0
 
+    // ---- voir l'obstacle avant de le toucher (la caméra regarde le sol devant) ------------------------------------
+    private val floorVision = com.joey.app.senses.FloorVision()
+    @Volatile private var floorClear = Double.NaN
+    @Volatile private var floorAt = 0L
+    private var floorFrameAt = 0L
+
+    private fun floorFrame(bmp: android.graphics.Bitmap) {
+        val r = roomba ?: return
+        val now = System.currentTimeMillis()
+        if (now - floorFrameAt < 150) return
+        floorFrameAt = now
+        // La caméra doit regarder dans l'axe du corps et voir le sol (le bas de l'image sous l'horizon).
+        val (hf, vf) = camera.fov(bmp.width, bmp.height)
+        val pitch = (if (gimbal.ready) head.pose()?.second else sensors.read()?.second) ?: run { floorClear = Double.NaN; return }
+        val pan = if (gimbal.ready) bodyPan() ?: 99.0 else 0.0
+        if (kotlin.math.abs(pan) > 20 || -pitch + vf / 2 < 15) { floorClear = Double.NaN; return }
+        val (w, h) = if (bmp.width >= bmp.height) 64 to 48 else 48 to 64
+        val small = android.graphics.Bitmap.createScaledBitmap(bmp, w, h, true)
+        val px = IntArray(w * h)
+        small.getPixels(px, 0, w, 0, 0, w, h)
+        // Le sol s'apprend en roulant sans rien toucher (ce qu'il y avait devant était bien du sol).
+        val movingFree = now - r.movingAt < 300 && !r.obstacleNear && r.sensors?.bump != true && !r.stuck
+        if (movingFree || !floorVision.ready) floorVision.learnFloor(px, w, h, if (floorVision.ready) 0.08 else 1.0)
+        val res = floorVision.analyse(px, w, h, pitch, hf, vf)
+        floorClear = if (res.floorVisible) res.clearAhead else Double.NaN
+        floorAt = now
+        if (!res.floorVisible) return
+        // Sur la carte : le sol vu est libre, son bord est un obstacle (à confirmer).
+        val x = r.x; val y = r.y
+        val base = r.heading + (if (gimbal.ready) pan else 0.0)
+        for (ray in res.rays) {
+            val b = base + ray.bearing
+            val d = if (ray.distance.isInfinite()) 2.5 else ray.distance.coerceAtMost(2.5)
+            if (d > 0.3) grid.markFreeRay(x, y, b, d - 0.08)
+            if (!ray.distance.isInfinite() && ray.distance < 2.0) grid.markSeenObstacle(x, y, b, ray.distance + 0.05)
+        }
+    }
+
     private fun onFrame(bmp: android.graphics.Bitmap) {
+        runCatching { floorFrame(bmp) }
         // Où regardait la tête quand l'image a été prise (un peu avant : l'image a ~80 ms de retard), SANS les petits
         // mouvements expressifs (sinon ils étaient comptés deux fois : la tête oscillait de ±25° en suivant un visage).
         val shot = poseAt(System.currentTimeMillis() - 80)
@@ -1777,6 +1816,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         grid.markObstacle(r.x, r.y, h, com.joey.app.robot.NavGrid.ROBOT_RADIUS + d)
                     }
                 }
+                // Ce que la caméra voit de sol libre devant (récent seulement) : il ralentit et s'arrête avant le choc.
+                r.visionClear = {
+                    val c = floorClear
+                    if (System.currentTimeMillis() - floorAt < 400 && !c.isNaN()) c else null
+                }
                 // Les boutons du Roomba deviennent des commandes.
                 r.onButton = { b -> runCatching { roombaButton(r, b) } }
                 log("🛞 Roomba branché : j'ai des roues !")
@@ -2121,6 +2165,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.3) return "arrivé"
             val path = grid.plan(r.x, r.y, tx, ty) ?: return "pas de chemin sur ma carte (tout est bouché par là)"
             val before = r.x to r.y
+            // La tête droit devant, un peu vers le sol : la caméra voit les obstacles avant le choc.
+            if (gimbal.ready && attempt == 0) { head.center(); head.look(null, -22.0) }
             // Un mouvement continu, en courbes, à la vitesse que permet la carte à chaque endroit.
             val res = r.followPath(path.drop(1).ifEmpty { listOf(tx to ty) }, r.maxSpeed) { x, y, h ->
                 grid.speedFactor(x, y, h + if (r.reversed) 180.0 else 0.0).let { if (r.reversed) minOf(it, 0.6) else it }
@@ -2129,6 +2175,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             when {
                 res.contains("liaison") || res.contains("vide") || res.startsWith("je ne roule pas") || res == "interrompu" ||
                     res.contains("roue soulevée") || res.startsWith("arrêté") -> return "arrêté : $res"
+                res.startsWith("obstacle vu") -> log("👁️ ${res}") // vu à temps, noté sur la carte : on recalcule le chemin
                 res.contains("obstacle") || res.contains("bloqué") -> log("🛞 ${r.unstick(attempt)}") // noté sur la carte : on recalcule
             }
             if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.35) return "arrivé"
@@ -2214,7 +2261,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         var stuckInRow = 0
         var doors = 0
         log("🧭 J'explore" + (goal?.let { " : je cherche $it" + (if (clue != it) " (un $clue)" else "") } ?: ""))
-        if (gimbal.ready) { head.center(); head.look(null, -12.0) } // la tête droit devant, un peu vers le sol
+        if (gimbal.ready) { head.center(); head.look(null, -20.0) } // la tête droit devant, vers le sol (voir les obstacles)
         fun summary() = "%.1f m parcourus, %.0f m² de plus sur ma carte%s".format(travelled, grid.knownArea() - area0,
             if (doors > 0) ", $doors porte(s) passée(s)" else "")
         while (System.currentTimeMillis() - t0 < maxSec * 1000L) {
@@ -2271,6 +2318,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             when {
                 res.contains("liaison") || res.contains("vide") || res.startsWith("je ne roule pas") || res == "interrompu" ->
                     return "exploration arrêtée : $res (${summary()})"
+                res.startsWith("obstacle vu") || res.contains("obstacle vu devant") -> {
+                    // Vu à temps : pas de choc, il part simplement d'un autre côté.
+                    log("👁️ $res")
+                    r.turn(if (stops % 2 == 0) 60.0 else -60.0)
+                    sinceTurn = 0.0
+                }
                 res.contains("obstacle") || res.contains("bloqué") -> {
                     if (++stuckInRow > 4) return "je n'arrive plus à avancer (coincé) : aide-moi (${summary()})"
                     log("🧭 ${r.unstick(stuckInRow - 1)}")

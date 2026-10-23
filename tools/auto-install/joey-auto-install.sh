@@ -58,6 +58,7 @@ install_on() {
   model=$(adb -s "$dev" shell getprop ro.product.model 2>/dev/null | tr -d '\r')
   log "Installation de Joey $version sur $model ($dev)…"
   if adb -s "$dev" install -r "$apk" >>"$LOG" 2>&1; then
+    adb -s "$dev" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 # écran allumé, sinon Joey reste derrière la veille
     adb -s "$dev" shell am start -n com.joey.app/.MainActivity >/dev/null 2>&1
     log "Joey $version installé et relancé sur $model."
     notify "Joey $version installé sur $model ✅"

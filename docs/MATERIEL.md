@@ -10,7 +10,7 @@
 | Fils **Dupont mâle-femelle** | Bout femelle sur la carte, bout mâle enfoncé dans la prise ronde du Roomba | Pas de soudure. Un point de colle chaude ou du scotch pour qu'ils tiennent |
 | Câble **USB-C <-> USB-C qui transmet les données** | Carte <-> téléphone | Un câble « charge seule » ne marche pas |
 | Nacelle **Feiyu SPG** (déjà là) | Le cou : tourner et lever la tête, image stable | Batterie à elle (~8 h). Voir `NACELLE.md` |
-| (plus tard) convertisseur 8-35 V -> USB 5 V 3 A + fusible 2 A | Alimenter le téléphone par la batterie du Roomba | La tension monte vers ~21 V sur la base : prendre une entrée qui monte au moins à 30 V |
+| (plus tard) convertisseur 8-35 V -> USB 5 V 3 A + fusible 2 A | Alimenter le téléphone par la batterie du Roomba | La tension monte vers ~21 V sur la base : prendre une entrée qui monte au moins à 30 V. **À brancher sur les fils de la batterie, pas sur la prise ronde** (voir plus bas) |
 
 Liens trouvés (à vérifier, les annonces changent) :
 - Câble mini-DIN 7 broches à fils nus (option plus propre) : [Adafruit #2438](https://www.adafruit.com/product/2438)
@@ -30,7 +30,10 @@ Liens trouvés (à vérifier, les annonces changent) :
 | VCCIO, CTS | rien |
 
 ⚠️ **Broches 1 et 2 = batterie du Roomba en direct (~14 V, jusqu'à ~21 V sur la base). Jamais sur la carte.**
-Elles ne servent qu'à l'entrée d'un convertisseur (avec fusible) pour alimenter le téléphone.
+**Ne pas y brancher le convertisseur du téléphone** : selon la spécification Open Interface (page 3), elles passent par
+un fusible réarmable de 200 mA (500 mA en pointe). Un téléphone qui charge demande ~0,75 A sous 14 V : le fusible coupe.
+Pour alimenter le téléphone, se brancher directement sur les fils de la batterie du Roomba, avec son propre fusible
+(2 A) près de la batterie. (Correction du 24/10/2026, d'après la recherche sur l'autonomie.)
 
 Le schéma de la prise est dans la doc officielle :
 [iRobot Roomba 600 / Create 2 Open Interface Spec](https://cdn.hackaday.io/files/1835247851890816/2021-04-13_iRobot_Roomba_600_Open_Interface_Spec-3.pdf)

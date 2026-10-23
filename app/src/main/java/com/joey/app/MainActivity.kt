@@ -160,6 +160,14 @@ class MainActivity : ComponentActivity() {
         CrashReport.mark("lancement")
         enableEdgeToEdge()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) // le visage reste allumé
+        // C'est un robot : relancé écran éteint et verrouillé (mise à jour par le PC la nuit), il s'affiche quand même par-dessus
+        // l'écran de verrouillage et rallume l'écran (24/10 : relancé derrière le verrouillage, il ne répondait plus au PC).
+        // Le reste du téléphone reste verrouillé.
+        if (Build.VERSION.SDK_INT >= 27) { setShowWhenLocked(true); setTurnScreenOn(true) }
+        else {
+            @Suppress("DEPRECATION")
+            window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
+        }
         // Plein écran : c'est un visage, pas une app.
         WindowCompat.getInsetsController(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.systemBars())

@@ -1813,6 +1813,89 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---- manette (Xbox…) : on le pilote à la main -------------------------------------------------------------
+    private val pad = com.joey.app.remote.Gamepad()
+    @Volatile private var padLoop: Thread? = null
+    @Volatile private var padWheels = false
+    @Volatile private var padHead = false
+    @Volatile private var padSeen = false
+
+    private fun padHello() {
+        if (padSeen) return
+        padSeen = true
+        log("🎮 Manette : stick gauche = rouler (RT = plus vite), stick droit = tête, A = aspiration, B = stop, " +
+            "Y = tête droite, X = parler, LB = base")
+    }
+
+    /** Les axes de la manette ont bougé. */
+    fun padAxes(lx: Float, ly: Float, rx: Float, ry: Float, rt: Float) {
+        padHello()
+        pad.axes(lx, ly, rx, ry, rt)
+        if (padLoop == null) synchronized(pad) {
+            if (padLoop == null) padLoop = thread(name = "manette", isDaemon = true) { padTick() }
+        }
+    }
+
+    /** Toutes les 80 ms : la manette conduit les roues et la tête tant qu'un stick est poussé. */
+    private fun padTick() {
+        while (!cleared) {
+            try {
+                Thread.sleep(80)
+                val d = pad.drive()
+                val r = roomba
+                if (r != null && !d.idle) {
+                    if (!padWheels) {
+                        // On reprend la main : il arrête ce qu'il faisait tout seul (suivre, venir, avancer).
+                        padWheels = true
+                        following = false
+                        wheelGen.incrementAndGet()
+                        r.stop()
+                    }
+                    r.manual(d.forward, d.yaw)
+                } else if (padWheels) {
+                    padWheels = false
+                    r?.manual(0.0, 0.0)
+                }
+                val (hx, hy) = pad.head()
+                if (hx != 0f || hy != 0f) { padHead = true; manualStick(hx, hy) }
+                else if (padHead) { padHead = false; manualStick(0f, 0f) }
+            } catch (e: InterruptedException) {
+                return
+            } catch (e: Exception) {
+                log("🎮 Manette : ${e.message}")
+            }
+        }
+    }
+
+    /** Un bouton de la manette. */
+    fun padButton(b: com.joey.app.remote.Gamepad.Button) {
+        padHello()
+        val r = roomba
+        when (b) {
+            com.joey.app.remote.Gamepad.Button.A -> thread(isDaemon = true) {
+                if (r == null) { log("🎮 Pas de roues branchées : pas d'aspiration"); return@thread }
+                val res = r.vacuum(!r.vacuuming)
+                log("🧹 $res")
+                if (r.vacuuming) r.sing(com.joey.app.robot.RoombaRobot.Tune.YES) else r.sing(com.joey.app.robot.RoombaRobot.Tune.NO)
+            }
+            com.joey.app.remote.Gamepad.Button.B -> {
+                following = false
+                wheelGen.incrementAndGet()
+                motionJob?.cancel(true)
+                head.stop()
+                thread(isDaemon = true) { r?.stop(); if (r?.vacuuming == true) r.vacuum(false) }
+                log("🎮 Stop")
+            }
+            com.joey.app.remote.Gamepad.Button.Y -> recenter()
+            com.joey.app.remote.Gamepad.Button.X -> micPressed()
+            com.joey.app.remote.Gamepad.Button.LB -> thread(isDaemon = true) {
+                following = false
+                log("🎮 " + (r?.seekDock() ?: noWheels))
+            }
+            else -> {}
+        }
+    }
+
     // ---- carte de la maison (Gemini Robotics-ER) -------------------------------------------------
     /**
      * Relève le lieu où Joey se trouve : tour du regard en 6 arrêts (60°), à chaque arrêt Robotics-ER pointe les éléments
@@ -2793,7 +2876,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "tete" to (pose?.let { "%.0f° %s, inclinée à %.0f°".format(kotlin.math.abs(it.first), if (it.first >= 0) "à droite" else "à gauche", it.second) } ?: "position inconnue"),
                     "batterie_nacelle_pourcent" to gimbal.battery.takeIf { it >= 0 },
                     "roues" to (roomba?.let { r -> "branchées, batterie ${r.battery ?: "?"} %" + (if (r.onBase) ", sur ta base" else "") +
-                        (if (r.charging) ", en charge" else "") + (r.safetyNote?.let { n -> ", dernier arrêt de sécurité : $n" } ?: "") }
+                        (if (r.charging) ", en charge" else "") + (if (r.vacuuming) ", aspiration en marche" else "") +
+                        (r.safetyNote?.let { n -> ", dernier arrêt de sécurité : $n" } ?: "") }
                         ?: "pas branchées (Roomba)"),
                     "souvenirs" to memory.size,
                     "visage_vu" to follower.sees,

@@ -14,6 +14,7 @@ object RoombaOI {
     const val POWER_DOWN = 133
     const val SEEK_DOCK = 143
     const val DRIVE_DIRECT = 145
+    const val MOTORS = 138
     const val LEDS = 139
     const val SONG = 140
     const val PLAY = 141
@@ -58,6 +59,9 @@ object RoombaOI {
     }
 
     fun play(number: Int) = bytes(PLAY, number)
+
+    /** Aspiration : brosse latérale (bit 0), aspirateur (bit 1), brosse principale (bit 2). */
+    fun motors(on: Boolean) = bytes(MOTORS, if (on) 0b111 else 0)
 
     /** Voyants : [debris] et [spot] (bleus), bouton CLEAN de la couleur [color] (0 vert -> 255 rouge), [intensity] 0-255. */
     fun leds(debris: Boolean, spot: Boolean, color: Int, intensity: Int) =

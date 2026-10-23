@@ -127,6 +127,7 @@ class RoombaRobot(
                     else -> "le Roomba a repris la main"
                 }
                 log("Roomba : arrêt de sécurité, $safetyNote")
+                vacuuming = false
                 stop()
             }
             // Au repos (mode passif), il s'endort au bout de 5 min : petite impulsion chaque minute.
@@ -172,6 +173,7 @@ class RoombaRobot(
     /** Fin de balade : roues arrêtées, mode passif (ses boutons remarchent). */
     fun park() {
         stop()
+        if (vacuuming) vacuum(false)
         driving = false
         runCatching { send(RoombaOI.start()) }
     }
@@ -297,6 +299,25 @@ class RoombaRobot(
     fun sing(t: Tune) {
         if (!running) return
         runCatching { send(RoombaOI.song(2, t.notes)); send(RoombaOI.play(2)) }
+    }
+
+    // ---- aspiration ----------------------------------------------------------------------------------------
+    /** Brosses et aspirateur en marche. */
+    @Volatile var vacuuming = false
+        private set
+
+    /** Aspiration marche / arrêt (mode sécurité). Renvoie un résumé. */
+    fun vacuum(on: Boolean): String {
+        if (on) ready()?.let { return it }
+        runCatching { send(RoombaOI.motors(on)) }.onFailure { return "le Roomba ne répond plus" }
+        vacuuming = on
+        return if (on) "aspiration en marche" else "aspiration arrêtée"
+    }
+
+    /** Manette : comme [velocity], mais jusqu'à [limit] m/s (plus vite que les déplacements tout seuls). */
+    fun manual(forward: Double, yaw: Double, limit: Double = 0.5) {
+        vel = doubleArrayOf(forward.coerceIn(-limit, limit), yaw.coerceIn(-180.0, 180.0))
+        velUntil = System.currentTimeMillis() + 300
     }
 
     /** Couleur du bouton CLEAN (0 vert -> 255 rouge) et voyants bleus. */

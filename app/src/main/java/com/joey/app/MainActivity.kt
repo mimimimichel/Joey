@@ -108,6 +108,42 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ---- manette (Xbox…) : prise avant l'écran, sinon B ferme l'app (c'est « retour » pour Android) ----------------
+    private fun fromPad(source: Int) = (source and android.view.InputDevice.SOURCE_GAMEPAD) == android.view.InputDevice.SOURCE_GAMEPAD ||
+        (source and android.view.InputDevice.SOURCE_JOYSTICK) == android.view.InputDevice.SOURCE_JOYSTICK
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (started && fromPad(event.source)) {
+            val b = when (event.keyCode) {
+                android.view.KeyEvent.KEYCODE_BUTTON_A -> com.joey.app.remote.Gamepad.Button.A
+                android.view.KeyEvent.KEYCODE_BUTTON_B -> com.joey.app.remote.Gamepad.Button.B
+                android.view.KeyEvent.KEYCODE_BUTTON_X -> com.joey.app.remote.Gamepad.Button.X
+                android.view.KeyEvent.KEYCODE_BUTTON_Y -> com.joey.app.remote.Gamepad.Button.Y
+                android.view.KeyEvent.KEYCODE_BUTTON_L1 -> com.joey.app.remote.Gamepad.Button.LB
+                android.view.KeyEvent.KEYCODE_BUTTON_R1 -> com.joey.app.remote.Gamepad.Button.RB
+                android.view.KeyEvent.KEYCODE_BUTTON_START -> com.joey.app.remote.Gamepad.Button.START
+                android.view.KeyEvent.KEYCODE_BUTTON_SELECT -> com.joey.app.remote.Gamepad.Button.SELECT
+                else -> null
+            }
+            if (b != null) {
+                if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) vm.padButton(b)
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
+        if (started && fromPad(event.source) && event.action == android.view.MotionEvent.ACTION_MOVE) {
+            fun ax(a: Int) = event.getAxisValue(a)
+            val rt = maxOf(ax(android.view.MotionEvent.AXIS_RTRIGGER), ax(android.view.MotionEvent.AXIS_GAS))
+            vm.padAxes(ax(android.view.MotionEvent.AXIS_X), ax(android.view.MotionEvent.AXIS_Y),
+                ax(android.view.MotionEvent.AXIS_Z), ax(android.view.MotionEvent.AXIS_RZ), rt)
+            return true
+        }
+        return super.dispatchGenericMotionEvent(event)
+    }
+
     override fun onDestroy() {
         runCatching { unregisterReceiver(btWatcher) }
         super.onDestroy()

@@ -1717,7 +1717,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         roomba?.let { rr ->
             if (phone in 0..12 && !phoneCharging() && !rr.onBase && !following && !_state.value.busy && warned.add("phone_dock")) {
                 log("🔋 Téléphone à $phone % : je rentre à ma base")
-                thread(isDaemon = true) { runCatching { rr.seekDock() } }
+                thread(isDaemon = true) { runCatching { log("🛞 " + goHome()) } }
             }
             if (phone > 20) warned.remove("phone_dock")
         }
@@ -1733,7 +1733,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         warn("roomba", rb in 0..14 && r?.charging == false, "La batterie de mes roues est à $rb %, je rentre à ma base.")
         if (r != null && rb in 0..14 && !r.charging && !r.onBase && !following && !_state.value.busy && warned.contains("roomba") &&
             warned.add("roomba_dock")) {
-            log("🛞 " + r.seekDock())
+            thread(isDaemon = true) { runCatching { log("🛞 " + goHome()) } }
         }
         if (rb > 30) warned.remove("roomba_dock")
         // Journal du jour : le soir à 21 h 30, une fois.
@@ -2073,7 +2073,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     missionStart = r.x to r.y
                     moveSync(holdMs = 1000, timeoutMs = 5 * 60_000L) {
                         val e = explore(null, 75)
-                        val back = if (fromBase) r.seekDock() else missionStart?.let { navigateTo(it.first, it.second) } ?: ""
+                        val back = if (fromBase) goHome() else missionStart?.let { navigateTo(it.first, it.second) } ?: ""
                         missionStart = null
                         log("🤖 $e ; retour : $back")
                         e
@@ -2120,7 +2120,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         when (b) {
             "clean" -> thread(isDaemon = true) { log("🧹 " + r.vacuum(!r.vacuuming)) }
             "spot" -> moveAsync(holdMs = 3000) { comeHere() }
-            "dock" -> thread(isDaemon = true) { following = false; log("🛞 " + r.seekDock()) }
+            "dock" -> moveAsync(holdMs = 1000) { goHome() }
         }
         live?.event("On vient d'appuyer sur le bouton ${b.uppercase()} de ton Roomba (" + when (b) {
             "clean" -> "ton aspiration " + (if (r.vacuuming) "s'arrête" else "démarre")
@@ -2145,6 +2145,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // La tête droit devant, un peu vers le sol : la caméra voit les obstacles avant le choc.
             if (gimbal.ready && attempt == 0) { head.center(); head.look(null, -22.0) }
         }
+    }
+
+    /**
+     * Rentrer à la base : si sa carte part de la base (il y était au départ), il revient d'abord tout près par le plus
+     * court chemin, puis le Roomba accoste avec ses balises. Sinon, le Roomba cherche sa base seul (plus long).
+     */
+    private fun goHome(): String {
+        val r = roomba ?: return noWheels
+        following = false
+        if (r.onBase) return "déjà sur ma base"
+        val n = nav
+        if (gridAnchored && n != null && n.distanceTo(0.0, 0.0) > 1.0) {
+            log("🏠 Je rentre à ma base par ma carte")
+            // La base est à l'origine ; il s'arrête 50 cm devant (le Roomba recule de ~30 cm en la quittant).
+            val res = n.navigateTo(0.5, 0.0, tries = 6, budget = 30.0)
+            log("🏠 $res")
+        }
+        return r.seekDock()
     }
 
     /** Où il a vu chacun pour la dernière fois (x, y sur la carte, heure). */
@@ -2551,7 +2569,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             com.joey.app.remote.Gamepad.Button.X -> { log("🎮 X : " + (if (live != null) "fin de la conversation" else "je t'écoute")); micPressed() }
             com.joey.app.remote.Gamepad.Button.LB -> thread(isDaemon = true) {
                 following = false
-                log("🎮 " + (r?.seekDock() ?: noWheels))
+                log("🎮 " + (if (r == null) noWheels else goHome()))
             }
             else -> {}
         }
@@ -3162,7 +3180,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- outils longs en arrière-plan : la conversation continue pendant qu'il cherche ou se déplace ----------
     /** Outils qui peuvent durer (recherche, déplacement, relevé) : Gemini n'attend pas, il reçoit le résultat après. */
     private val longTools = setOf("chercher", "aller_vers", "viens_ici", "cartographier", "regarder_ce_que_je_montre", "tester_roues",
-        "explorer", "se_degager", "aller_a", "revenir", "aller_voir")
+        "explorer", "se_degager", "aller_a", "revenir", "aller_voir", "rentrer_base")
     private val toolPool = Executors.newCachedThreadPool()
     @Volatile private var longToolGen = 0
 
@@ -3664,9 +3682,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 mapOf("result" to "arrêté")
             }
             "rentrer_base" -> {
-                val r = roomba ?: return mapOf("result" to noWheels)
+                if (roomba == null) return mapOf("result" to noWheels)
                 following = false
-                mapOf("result" to r.seekDock())
+                var res = ""
+                moveSync(holdMs = 1000, timeoutMs = 240_000) { res = goHome(); res }
+                mapOf("result" to res)
             }
             "aller_vers" -> {
                 if (roomba == null) return mapOf("result" to noWheels)
@@ -4163,7 +4183,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "head" -> { manualStick((q["x"]?.toFloatOrNull() ?: 0f), (q["y"]?.toFloatOrNull() ?: 0f)); "" }
             "stop" -> { padButton(com.joey.app.remote.Gamepad.Button.B); "arrêté" }
             "vacuum" -> { if (r == null) "roues non branchées" else { thread(isDaemon = true) { log("🧹 " + r.vacuum(!r.vacuuming)) }; "" } }
-            "dock" -> { if (r == null) "roues non branchées" else { thread(isDaemon = true) { following = false; log("🛞 " + r.seekDock()) }; "il rentre à sa base" } }
+            "dock" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 1000) { goHome() }; "il rentre à sa base" } }
             "center" -> { recenter(); "" }
             "come" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 3000) { comeHere() }; "il vient vers toi (vers la personne qu'il voit)" } }
             "explore" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 3000) { explore(null, 120) }; "il explore (2 min)" } }

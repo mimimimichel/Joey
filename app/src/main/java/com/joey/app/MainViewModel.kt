@@ -1787,24 +1787,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
-    /** « Viens ici » sans nacelle : il se tourne avec les roues pour te trouver et te garder en face. */
-    private fun comeHereWithBody(r: com.joey.app.robot.RoombaRobot): String {
-        val person = setOf("person")
-        var p = searchWithBody(r, person) ?: return "je ne vois personne autour de moi (j'ai fait un tour sur moi-même)"
-        repeat(8) {
-            val faceBig = (faces.lastSize ?: 0f) >= 0.12f
-            if (faceBig || p.box.h >= 0.85) return "je suis arrivé près de toi"
-            val ang = (p.box.cx - 0.5) * hfovNow()
-            if (kotlin.math.abs(ang) > 8) { r.turn(ang); Thread.sleep(300) }
-            val d = 0.9 / p.box.h.coerceAtLeast(0.15)
-            val res = r.drive((d - 1.0).coerceIn(0.15, 0.6))
-            if (res.contains("obstacle") || res.contains("vide") || res.contains("interrompu") || res.startsWith("je ne roule pas"))
-                return "je me suis arrêté : $res"
-            Thread.sleep(300)
-            p = bestSeen(person) ?: searchWithBody(r, person) ?: return "je t'ai perdu de vue en route"
-        }
-        return "je me suis approché autant que j'ai pu"
-    }
+    /** « Viens ici » sans nacelle : les roues font le cou (il tourne pour te trouver et te garder en face). */
+    private fun comeHereWithBody(r: com.joey.app.robot.RoombaRobot): String = chase(r, untilClose = true)
 
     /** « Viens ici » : trouve la personne, se tourne vers elle, s'approche jusqu'à ~1 m. Bloquant. */
     private fun comeHere(): String {
@@ -1829,7 +1813,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return "je suis là"
     }
 
-    /** « Suis-moi » : la tête suit la personne, le corps suit la tête et garde ~1,5 m. */
+    /**
+     * « Suis-moi », avec ou sans nacelle : le corps se tourne vers la personne (sans nacelle, c'est lui qui fait le
+     * cou) et avance tant qu'elle est loin.
+     * - Ordres lissés : il accélère et tourne en douceur (avant, il changeait d'avis toutes les 0,15 s et avançait
+     *   « en tremblant », un coup en avant, un coup en arrière).
+     * - L'image a toujours un peu de retard : on retire ce que le corps a déjà tourné depuis (odométrie), sinon il
+     *   dépassait la cible et repartait dans l'autre sens.
+     * - Perdue : il ralentit, puis tourne doucement du côté où il l'a vue (un tour au plus).
+     */
     private fun followMe(minutes: Double) {
         val r = roomba ?: return
         if (gimbal.ready && bodyRef == null) calibrateBody()
@@ -1840,39 +1832,100 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         follower.pausedUntil = 0
         _state.update { it.copy(tracking = "je te suis") }
         thread(name = "suivre", isDaemon = true) {
-            var lostAt = 0L
+            try { chase(r, untilClose = false) } finally {
+                following = false
+                trackUntil = 0
+                _state.update { it.copy(tracking = null) }
+            }
+        }
+    }
+
+    /**
+     * Le pilotage commun de « suis-moi » et « viens ici » : boucle de 0,1 s, voir [followMe].
+     * [untilClose] : s'arrête et renvoie dès qu'il est tout près (viens ici) ; sinon tant que [following].
+     */
+    private fun chase(r: com.joey.app.robot.RoombaRobot, untilClose: Boolean, maxMs: Long = 60_000): String {
+            val start = System.currentTimeMillis()
+            val person = setOf("person")
+            val headings = ArrayDeque<Pair<Long, Double>>() // cap des roues dans le temps
+            fun headingAt(t: Long) = headings.lastOrNull { it.first <= t }?.second ?: r.heading
+            var seenAngle = 0.0  // où était la personne par rapport à l'avant du corps (+ = droite)…
+            var seenHeading = r.heading // … et le cap du corps à ce moment-là
+            var seenAt = 0L
+            var seenH = 0.75
+            var lastFrame = 0L
+            var fwd = 0.0
+            var yaw = 0.0
+            var searchAt = 0L
+            var searched = 0.0
+            var prevHeading = r.heading
             try {
-                while (following && System.currentTimeMillis() < trackUntil && roomba === r) {
-                    Thread.sleep(150)
-                    val p = seenNow().filter { it.label == "person" && it.score >= 0.5 }.maxByOrNull { it.box.h }
-                    // Où est la personne par rapport à l'avant du corps : la tête (qui la suit), ou sans nacelle sa
-                    // place dans l'image.
-                    val pan = if (gimbal.ready) bodyPan() ?: 0.0
-                    else p?.let { (it.box.cx - 0.5) * camera.fovShort } ?: 0.0
-                    if (p == null && !follower.sees) {
-                        if (lostAt == 0L) lostAt = System.currentTimeMillis()
-                        r.velocity(0.0, 0.0, 300)
-                        if (System.currentTimeMillis() - lostAt > 8000) { log("🛞 Je t'ai perdu"); break }
-                        continue
+                while (roomba === r && (if (untilClose) System.currentTimeMillis() - start < maxMs
+                        else following && System.currentTimeMillis() < trackUntil)) {
+                    Thread.sleep(100)
+                    val now = System.currentTimeMillis()
+                    headings.addLast(now to r.heading)
+                    while (headings.size > 40) headings.removeFirst()
+                    // Une nouvelle image : où est la personne ?
+                    val frameAt = camera.frameAt
+                    if (frameAt != lastFrame) {
+                        lastFrame = frameAt
+                        val p = bestSeen(person)
+                        if (gimbal.ready && follower.sees) {
+                            // La tête la suit déjà : l'angle de la tête par rapport au corps, en ce moment.
+                            bodyPan()?.let { seenAngle = it; seenHeading = r.heading; seenAt = now; searchAt = 0L }
+                            p?.let { seenH = it.box.h }
+                        } else if (p != null) {
+                            seenAngle = (p.box.cx - 0.5) * hfovNow() + (if (gimbal.ready) bodyPan() ?: 0.0 else 0.0)
+                            seenHeading = headingAt(frameAt)
+                            seenH = p.box.h
+                            seenAt = now
+                            searchAt = 0L
+                        }
                     }
-                    lostAt = 0L
-                    // La caméra est au ras du sol : quelqu'un de proche remplit vite l'image. Il avance tant que la
-                    // silhouette est petite, s'arrête quand elle remplit l'image, et ne recule que si on est tout contre
-                    // lui (avant, il reculait dès qu'on était à 2 m : « tu vas dans le mauvais sens »).
-                    val h = p?.box?.h ?: 0.75
-                    val fwd = when {
-                        h < 0.75 -> ((0.75 - h) * 0.8).coerceIn(0.05, r.maxSpeed)
-                        h > 0.97 && (faces.lastSize ?: 0f) > 0.25f -> -0.05
-                        else -> 0.0
+                    val lost = now - seenAt
+                    when {
+                        seenAt > 0 && lost < 1500 -> {
+                            val a = Head.wrap(seenAngle - Head.wrap(r.heading - seenHeading))
+                            if (untilClose && kotlin.math.abs(a) < 20 && (seenH >= 0.85 || (faces.lastSize ?: 0f) >= 0.12f))
+                                return "je suis arrivé près de toi"
+                            val wantYaw = if (kotlin.math.abs(a) < 6) 0.0 else (a * 1.8).coerceIn(-70.0, 70.0)
+                            // Caméra au ras du sol : quelqu'un de proche remplit l'image. Il avance tant que la silhouette
+                            // est petite, s'arrête quand elle remplit l'image, ne recule que si on est tout contre lui.
+                            var wantFwd = when {
+                                seenH < 0.75 -> ((0.75 - seenH) * 0.9).coerceIn(0.06, r.maxSpeed)
+                                seenH > 0.97 && (faces.lastSize ?: 0f) > 0.25f -> -0.05
+                                else -> 0.0
+                            }
+                            // Bien de côté : d'abord se tourner, puis avancer.
+                            wantFwd *= (1 - kotlin.math.abs(a) / 35).coerceIn(0.0, 1.0)
+                            fwd += (wantFwd - fwd) * 0.3
+                            yaw += (wantYaw - yaw) * 0.45
+                            r.velocity(fwd, yaw, 400)
+                        }
+                        seenAt > 0 && lost < 3000 -> {
+                            fwd *= 0.6; yaw *= 0.6
+                            r.velocity(fwd, yaw, 300)
+                        }
+                        else -> {
+                            if (searchAt == 0L) { searchAt = now; searched = 0.0; prevHeading = r.heading; log("🛞 Je te cherche en tournant") }
+                            searched += kotlin.math.abs(Head.wrap(r.heading - prevHeading))
+                            prevHeading = r.heading
+                            if (searched > 360 || now - searchAt > 15_000) {
+                                log("🛞 Je t'ai perdu")
+                                return if (seenAt == 0L) "je ne vois personne autour de moi (j'ai fait un tour sur moi-même)"
+                                else "je t'ai perdu de vue en route"
+                            }
+                            fwd = 0.0
+                            yaw += ((if (seenAngle < 0) -45.0 else 45.0) - yaw) * 0.4
+                            r.velocity(0.0, yaw, 300)
+                        }
                     }
-                    r.velocity(fwd, (pan * 1.5).coerceIn(-60.0, 60.0), 400)
                 }
             } finally {
                 r.velocity(0.0, 0.0, 100)
-                following = false
-                trackUntil = 0
             }
-        }
+            return if (untilClose) "je me suis approché autant que j'ai pu" else "fini de te suivre"
     }
 
     // ---- manette (Xbox…) : on le pilote à la main -------------------------------------------------------------
@@ -1911,6 +1964,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         padWheels = true
                         following = false
                         wheelGen.incrementAndGet()
+                        if (_state.value.busy) motionJob?.cancel(true) // « viens ici », « va vers »… en cours
                         r.stop()
                     }
                     r.manual(d.forward, d.yaw)

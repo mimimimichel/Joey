@@ -140,13 +140,31 @@ class SpgGimbal(
         setState(GimbalState.OFF)
     }
 
+    /** Ce que la recherche a vu (adresse -> nom, force du signal) : écrit dans le journal si la nacelle n'y est pas. */
+    private val seen = LinkedHashMap<String, String>()
+    private var seenLogged = ""
+    private val UART: UUID = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
+
+    /** La nacelle : son nom (« FY_Spg… »), ou son service série (6e400001…) avec un nom Feiyu ou pas de nom. */
+    private fun isGimbal(name: String?, result: ScanResult): Boolean {
+        if (name != null && name.startsWith(SpgProtocol.NAME_PREFIX, ignoreCase = true)) return true
+        val uart = result.scanRecord?.serviceUuids?.any { it.uuid == UART } == true
+        return uart && (name == null || name.startsWith("FY", ignoreCase = true))
+    }
+
+    /** Déjà appairée à ce téléphone (par l'app Feiyu ou les réglages Bluetooth). */
+    private fun bondedGimbal(): BluetoothDevice? = runCatching {
+        adapter?.bondedDevices?.firstOrNull { d -> runCatching { d.name }.getOrNull()?.startsWith(SpgProtocol.NAME_PREFIX, true) == true }
+    }.getOrNull()
+
     private val scanCb = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val name = result.scanRecord?.deviceName ?: runCatching { result.device.name }.getOrNull() ?: return
-            if (!name.startsWith(SpgProtocol.NAME_PREFIX, ignoreCase = true)) return
+            val name = result.scanRecord?.deviceName ?: runCatching { result.device.name }.getOrNull()
+            synchronized(seen) { if (seen.size < 40) seen[result.device.address] = "${name ?: "sans nom"} ${result.rssi} dBm" }
+            if (!isGimbal(name, result)) return
             if (!scanning) return
             stopScan()
-            log("Trouvée : $name (${result.device.address})")
+            log("Trouvée : ${name ?: "nacelle sans nom"} (${result.device.address})")
             saveAddress(result.device.address)
             connectTo(result.device)
         }
@@ -160,6 +178,22 @@ class SpgGimbal(
 
     private fun scan() {
         val scanner = adapter?.bluetoothLeScanner ?: return
+        // Déjà appairée : on s'y connecte directement (pas besoin de la voir dans la recherche).
+        bondedGimbal()?.let { d ->
+            if (savedAddress() != d.address) {
+                log("Nacelle appairée à ce téléphone : ${runCatching { d.name }.getOrNull()} (${d.address}), je m'y connecte")
+                saveAddress(d.address)
+                connectTo(d)
+                return
+            }
+        }
+        // Android 9-11 : sans l'autorisation « position », la recherche ne trouve rien, sans erreur.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S &&
+            context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            log("Nacelle : Joey n'a pas l'autorisation « Position » (Paramètres > Applis > Joey > Autorisations) : sans elle, " +
+                "Android ${Build.VERSION.RELEASE} ne montre aucun appareil Bluetooth.")
+        }
+        synchronized(seen) { seen.clear() }
         setState(GimbalState.SEARCHING)
         log("Recherche de la nacelle (allume-la, et ferme l'app Feiyu)…")
         scanning = true
@@ -177,6 +211,13 @@ class SpgGimbal(
                 log(if (locOff) "Nacelle introuvable : la LOCALISATION du téléphone est coupée (Android 9 en a besoin pour le Bluetooth). Active-la."
                     else "Nacelle introuvable. Est-elle allumée ? Est-elle encore reliée à un autre téléphone (Joey ouvert sur le S10, " +
                         "ou l'app Feiyu) ? Une nacelle ne parle qu'à un téléphone à la fois.")
+                // Ce que le téléphone a vu (une fois par changement) : pour comprendre ce qui bloque.
+                val list = synchronized(seen) { seen.entries.take(12).joinToString(" ; ") { "${it.value} (${it.key})" } }
+                val count = synchronized(seen) { seen.size }
+                val summary = if (count == 0) "Bluetooth : ce téléphone ne voit AUCUN appareil (recherche bloquée par Android ? " +
+                    "localisation, autorisation « Position » de Joey, ou Bluetooth à redémarrer)"
+                    else "Bluetooth : $count appareil(s) vu(s), pas la nacelle : $list"
+                if (summary != seenLogged) { seenLogged = summary; log(summary) }
                 setState(GimbalState.OFF)
                 wanted = false
             }

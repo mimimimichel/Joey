@@ -15,8 +15,7 @@ Tout passe par `python3 joey.py …` (dans ce dossier). Lis `python3 joey.py` po
 - `feed` : ce qu'il a pensé et fait depuis ton dernier appel (ce qu'il entend, dit, les outils et leurs résultats).
 - `frame photo.jpg` puis lis l'image : c'est ce qu'il voit. Fais-le souvent : c'est ta preuve.
 - `map` : sa carte en texte (`#` obstacle, `.` libre, `!` vide/marche, `R` lui).
-- `tool NOM '{json}'` : lance un de ses outils et attend le résultat (il faut `JOEY_TOKEN`, le « 🔑 Code pilote »
-  de son journal). Les outils et leurs paramètres sont dans `app/src/main/java/com/joey/app/brain/JoeyPrompt.kt`
+- `tool NOM '{json}'` : lance un de ses outils et attend le résultat. Les outils et leurs paramètres sont dans `app/src/main/java/com/joey/app/brain/JoeyPrompt.kt`
   (liste `TOOLS`). Exemples : `tool etat`, `tool avancer '{"metres":0.3}'`, `tool tourner_corps '{"degres":90}'`,
   `tool chercher '{"objet":"le chien"}'`, `tool explorer '{"objectif":"la cuisine","secondes":60}'`,
   `tool tester_roues`, `tool aller_a '{"lieu":"salon"}'`, `tool revenir`, `tool se_degager`.

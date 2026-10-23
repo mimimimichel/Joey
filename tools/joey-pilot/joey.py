@@ -3,7 +3,7 @@
 Piloter Joey depuis le PC (même Wi-Fi que le téléphone) : pour qu'une session Claude Code locale le teste en autonomie.
 
 Adresse du téléphone : JOEY_HOST=192.168.1.42 (sinon trouvée par adb, comme l'installation automatique).
-Code pour lancer ses outils : JOEY_TOKEN=xxxxxxxx (affiché dans le journal de Joey : « 🔑 Code pilote »).
+Tout est ouvert sur le Wi-Fi de la maison (pas de code).
 
   joey.py state                  état (humeur, conversation, batteries, roues, carte, place libre devant…)
   joey.py feed [--all]           ce qu'il a pensé/fait depuis la dernière fois (entendu, dit, outils, résultats)
@@ -27,7 +27,7 @@ import urllib.request
 PORT = 8080
 SINCE_FILE = os.path.expanduser("~/.joey-pilot-since")
 
-# Réglages du PC (comme l'installation automatique) : JOEY_TOKEN=…, JOEY_HOST=… dans ~/.config/joey/env
+# Réglages du PC (comme l'installation automatique) : JOEY_HOST=… dans ~/.config/joey/env (facultatif)
 _env = os.path.expanduser(os.environ.get("JOEY_ENV", "~/.config/joey/env"))
 if os.path.exists(_env):
     for _l in open(_env):
@@ -104,11 +104,8 @@ def main(argv):
         get("/tab/cmd?c=drive&f=0&t=0")
         print("fait")
     elif c == "tool":
-        token = os.environ.get("JOEY_TOKEN", "")
-        if not token:
-            sys.exit("Il faut le code pilote : export JOEY_TOKEN=… (dans le journal de Joey : « 🔑 Code pilote »)")
         args = rest[1] if len(rest) > 1 else "{}"
-        q = "/tab/tool?k=%s&name=%s&args=%s" % (token, urllib.parse.quote(rest[0]), urllib.parse.quote(args))
+        q = "/tab/tool?name=%s&args=%s" % (urllib.parse.quote(rest[0]), urllib.parse.quote(args))
         print(json.dumps(get(q, timeout=400), ensure_ascii=False, indent=1))
     elif c == "frame":
         out = rest[0] if rest else "joey-%s.jpg" % time.strftime("%H%M%S")

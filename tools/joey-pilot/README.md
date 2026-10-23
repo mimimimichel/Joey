@@ -6,16 +6,16 @@ transmet à la vérification de nuit (Claude dans le cloud corrige et publie une
 
 ## Une fois
 
-1. Ouvre l'app Joey sur le téléphone (version 0.56 ou plus).
-2. Dans son journal, repère la ligne **« 🔑 Code pilote : … »** (aussi dans ⚙ → Tablette).
-3. Sur le PC :
+1. Ouvre l'app Joey sur le téléphone (version 0.56 ou plus), sur le même Wi-Fi que le PC.
+2. Sur le PC :
 
 ```sh
 cd ~/Joey/tools/joey-pilot          # (le dossier du dépôt cloné par l'installation automatique)
-echo 'JOEY_TOKEN=le_code_pilote' >> ~/.config/joey/env   # gardé pour les prochaines fois
-# (facultatif) echo 'JOEY_HOST=192.168.x.y' >> ~/.config/joey/env   sinon l'adresse est trouvée par adb
 python3 joey.py state               # doit afficher son état
 ```
+
+L'adresse du téléphone est trouvée par adb (comme l'installation automatique). Sinon :
+`echo 'JOEY_HOST=192.168.x.y' >> ~/.config/joey/env`. Pas de code : tout est ouvert sur le Wi-Fi de la maison.
 
 ## Lancer une campagne de tests
 

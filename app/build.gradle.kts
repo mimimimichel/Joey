@@ -18,8 +18,8 @@ android {
         applicationId = "com.joey.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 42
-        versionName = "0.42"
+        versionCode = 43
+        versionName = "0.43"
         buildConfigField("String", "GEMINI_KEY", "\"" + geminiKey + "\"")
         // Journal envoyé à Supabase (projet « joey ») : injecté à la compilation, comme la clé Gemini.
         buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("supabaseUrl") as String? ?: System.getenv("SUPABASE_URL") ?: "") + "\"")

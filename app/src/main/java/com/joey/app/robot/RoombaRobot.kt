@@ -45,6 +45,10 @@ class RoombaRobot(
         private set
     @Volatile private var vel = DoubleArray(2) // m/s, °/s
     @Volatile private var velUntil = 0L
+    /** Le visage (téléphone) regarde vers l'arrière du Roomba : « avancer » = rouler côté visage. */
+    @Volatile var reversed = false
+        set(v) { field = v; odo.reversed = v }
+
     /** Vitesse max en intérieur (m/s). */
     var maxSpeed = 0.25
 
@@ -111,7 +115,11 @@ class RoombaRobot(
             val now = System.currentTimeMillis()
             if (s == null) {
                 failures++
-                if (failures % 30 == 10) { log("Roomba : pas de réponse, je le réveille"); wakePulse(); runCatching { send(RoombaOI.start()) } }
+                // Réveil : souvent au début, puis toutes les ~30 s (il était éteint : 92 messages en 3 min dans le journal).
+                if (failures == 10 || (failures > 10 && failures % 300 == 0)) {
+                    if (failures == 10 || failures % 3000 == 0) log("Roomba : pas de réponse, je le réveille (est-il allumé ?)")
+                    wakePulse(); runCatching { send(RoombaOI.start()) }
+                }
                 continue
             }
             failures = 0
@@ -135,15 +143,23 @@ class RoombaRobot(
         }
     }
 
+    /** Dernière fois que les roues ont tourné (ou viennent de s'arrêter). */
+    @Volatile var movingAt = 0L
+        private set
+
     private fun wheels(forwardMS: Double, yawDegS: Double) {
-        val (r, l) = RoombaOI.wheelSpeeds(forwardMS, yawDegS)
+        val f = if (reversed) -forwardMS else forwardMS
+        if (forwardMS != 0.0 || yawDegS != 0.0 || System.currentTimeMillis() - movingAt < 500) movingAt = System.currentTimeMillis()
+        val (r, l) = RoombaOI.wheelSpeeds(f, yawDegS)
         send(RoombaOI.driveDirect(r, l))
     }
 
     /** Prêt à rouler (mode sécurité ; quitte la base en reculant si besoin). null si c'est bon, sinon pourquoi pas. */
     fun ready(): String? {
         val s = sensors ?: readSensors() ?: return "le Roomba ne répond plus"
-        if (s.cliff || s.wheelDrop) return "je ne roule pas : ${if (s.cliff) "vide détecté sous moi" else "roue soulevée"}"
+        // Seulement les roues soulevées : le mode sécurité du Roomba s'arrête tout seul au bord d'un vide, et le
+        // « vide » vu à l'arrêt était souvent faux (tapis sombre, robot penché) : il refusait de rouler pour rien.
+        if (s.wheelDrop) return "je ne roule pas : roue soulevée (on m'a soulevé ?)"
         if (!driving || s.oiMode != 2) {
             safetyNote = null
             send(RoombaOI.start())
@@ -153,7 +169,8 @@ class RoombaRobot(
                 send(RoombaOI.full())
                 sleeper(100)
                 val end = System.currentTimeMillis() + 2500
-                while (System.currentTimeMillis() < end) { wheels(-0.12, 0.0); sleeper(100) }
+                // Recule (sens du Roomba, quel que soit le montage du visage).
+                while (System.currentTimeMillis() < end) { wheels(if (reversed) 0.12 else -0.12, 0.0); sleeper(100) }
                 wheels(0.0, 0.0)
             }
             send(RoombaOI.safe())
@@ -184,10 +201,15 @@ class RoombaRobot(
         ready()?.let { return it }
         cancel = false
         if (abs(deg) < 1.5) return "déjà dans la bonne direction"
-        val target = Head.wrap(odo.headingDeg + deg)
+        // On compte ce qui a été tourné (et pas un cap à atteindre) : « un tour complet » (360°) marche aussi.
+        var turned = 0.0
+        var prev = odo.headingDeg
         val end = System.currentTimeMillis() + ((abs(deg) / 20.0 + 3) * 1000).toLong()
         while (!cancel && System.currentTimeMillis() < end) {
-            val err = Head.wrap(target - odo.headingDeg)
+            val h = odo.headingDeg
+            turned += Head.wrap(h - prev)
+            prev = h
+            val err = deg - turned
             if (abs(err) < 2.0) break
             val rate = (err * 3).coerceIn(-90.0, 90.0).let { if (abs(it) < 18) Math.signum(it) * 18 else it }
             wheels(0.0, rate)
@@ -207,18 +229,29 @@ class RoombaRobot(
         val sign = Math.signum(dist)
         val end = System.currentTimeMillis() + ((abs(dist) / 0.05 + 3) * 1000).toLong()
         var result = "avancé de %.2f m".format(dist)
+        val t0 = System.currentTimeMillis()
         try {
             while (!cancel && System.currentTimeMillis() < end) {
                 val done = odo.travelledM - start
                 val left = abs(dist) - done
                 if (left < 0.01) break
                 val s = sensors
-                if (sign > 0 && s != null && s.bump) {
+                // Le Roomba s'est arrêté de lui-même (mode sécurité : vide, roue soulevée) : on le dit.
+                if (s != null && s.oiMode == 1 && System.currentTimeMillis() - t0 > 400) {
+                    result = "arrêté après %.2f m : ".format(done) + (safetyNote ?: when {
+                        s.cliff -> "vide détecté sous moi (bord de marche ?)"
+                        s.wheelDrop -> "roue soulevée"
+                        else -> "le Roomba a repris la main"
+                    })
+                    break
+                }
+                // Le pare-chocs est à l'avant du Roomba (derrière Joey s'il est monté à l'envers).
+                if ((sign > 0) != reversed && s != null && s.bump) {
                     wheels(0.0, 0.0)
-                    val side = if (s.bumpLeft && s.bumpRight) "devant" else if (s.bumpLeft) "à gauche" else "à droite"
+                    val side = if (reversed) "derrière moi" else if (s.bumpLeft && s.bumpRight) "devant" else if (s.bumpLeft) "à gauche" else "à droite"
                     log("Roomba : pare-chocs touché $side")
                     val back = System.currentTimeMillis() + 500
-                    while (System.currentTimeMillis() < back) { wheels(-0.1, 0.0); sleeper(50) }
+                    while (System.currentTimeMillis() < back) { wheels(if (reversed) 0.1 else -0.1, 0.0); sleeper(50) }
                     result = "obstacle touché $side après %.2f m (j'ai reculé un peu)".format(done)
                     break
                 }
@@ -234,7 +267,7 @@ class RoombaRobot(
         } finally {
             wheels(0.0, 0.0)
         }
-        return if (cancel) "interrompu" else result
+        return if (cancel) safetyNote?.let { "arrêté : $it" } ?: "interrompu" else result
     }
 
     /** Va au point (x, y) de l'odométrie : se tourne vers lui, puis avance. */
@@ -268,7 +301,7 @@ class RoombaRobot(
             }
             if (!active && ready() != null) { velUntil = 0L; continue }
             var (f, yaw) = vel
-            if (f > 0 && sensors?.bump == true) f = 0.0 // pare-chocs : plus d'avance, il peut encore tourner
+            if ((f > 0) != reversed && f != 0.0 && sensors?.bump == true) f = 0.0 // pare-chocs : plus d'avance, il peut encore tourner
             runCatching { wheels(f, yaw) }
             active = true
         }

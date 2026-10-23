@@ -107,6 +107,10 @@ class SpgGimbal(
     }
 
     // ---- connexion ----------------------------------------------------------------------------
+    /** Échecs de suite : on espace les essais (le journal en montrait 116 en 15 min, la nacelle étant éteinte). */
+    @Volatile private var failsInRow = 0
+    private fun quietRetry() = failsInRow > 3 && failsInRow % 10 != 0
+
     fun connect() {
         val a = adapter
         if (a == null || !a.isEnabled) {
@@ -117,7 +121,7 @@ class SpgGimbal(
         if (state != GimbalState.OFF) return
         val addr = savedAddress()
         if (addr != null && BluetoothAdapter.checkBluetoothAddress(addr)) {
-            log("Connexion directe à $addr…")
+            if (!quietRetry()) log("Connexion directe à $addr…" + if (failsInRow > 3) " (essai ${failsInRow + 1})" else "")
             val gen = ++attempt
             connectTo(a.getRemoteDevice(addr))
             // Si rien au bout de 8 s : on cherche à nouveau (la nacelle a pu changer d'adresse). Seulement pour CETTE
@@ -211,10 +215,12 @@ class SpgGimbal(
                 log("Connectée, lecture des services…")
                 main.postDelayed({ runCatching { g.discoverServices() } }, 300)
             } else {
-                log("Nacelle déconnectée (état $newState, code $status).")
+                if (!quietRetry()) log("Nacelle déconnectée (état $newState, code $status).")
+                failsInRow++
                 closeGatt()
                 setState(GimbalState.OFF)
-                if (wanted) main.postDelayed({ if (wanted && state == GimbalState.OFF) connect() }, 3000)
+                val wait = when { failsInRow < 5 -> 3000L; failsInRow < 20 -> 15_000L; else -> 30_000L }
+                if (wanted) main.postDelayed({ if (wanted && state == GimbalState.OFF) connect() }, wait)
             }
         }
 
@@ -265,6 +271,7 @@ class SpgGimbal(
                 stopScan() // connectée : plus besoin de chercher
                 setState(GimbalState.READY)
                 log("Nacelle prête.")
+                failsInRow = 0
             }, 400)
         }
 

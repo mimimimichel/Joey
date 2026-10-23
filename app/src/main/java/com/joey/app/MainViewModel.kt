@@ -266,7 +266,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun message(text: String?) = _state.update { it.copy(message = text) }
 
     fun flagValue(name: String, def: Boolean) = flag(name, def)
-    fun setFlagValue(name: String, v: Boolean) { setFlag(name, v); refreshSettings() }
+    fun setFlagValue(name: String, v: Boolean) {
+        setFlag(name, v)
+        if (name == "roomba_reversed") roomba?.reversed = v
+        refreshSettings()
+    }
 
     // ---- réglages ---------------------------------------------------------------------------
     fun saveSettings(key: String, robotVoice: Boolean, camera: Boolean, front: Boolean, invertPan: Boolean, bargeIn: Boolean, subtitles: Boolean, followFace: Boolean, speed: Int,
@@ -591,7 +595,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun bodyMoved(e: com.joey.app.life.BodyMotion.Event) {
         val r = roomba
         // Ses propres roues : pas une surprise.
-        if (r != null && System.currentTimeMillis() - roombaMovedAt < 3000 && e == com.joey.app.life.BodyMotion.Event.PUSHED) return
+        // (pendant qu'il roule, les à-coups ressemblaient à « on me secoue / on me soulève » : seule la chute compte)
+        if (wheelsJustMoved() && e != com.joey.app.life.BodyMotion.Event.FALLING) return
         val (mood, text) = when (e) {
             com.joey.app.life.BodyMotion.Event.LIFTED -> Mood.ETONNE to "On te soulève ! Réagis tout de suite, en quelques mots (surpris, un peu inquiet ou amusé)."
             com.joey.app.life.BodyMotion.Event.PUT_DOWN -> Mood.CONTENT to "On vient de te reposer : réagis en quelques mots (soulagé)."
@@ -1084,7 +1089,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         remark("On te caresse l'écran : un petit ronronnement de robot, en trois mots au plus.", minGapMs = 30_000)
     }
 
+    /** Ses roues ont tourné à l'instant : les secousses viennent de lui, pas de quelqu'un. */
+    private fun wheelsJustMoved() = roomba?.let { System.currentTimeMillis() - it.movingAt < 2500 } == true ||
+        System.currentTimeMillis() - roombaMovedAt < 3000
+
     private fun shaken() {
+        if (wheelsJustMoved()) return
         log("😵 On me secoue")
         temperament.feel(-0.1)
         moodResetAt = 0
@@ -1680,6 +1690,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val r = com.joey.app.robot.RoombaRobot(link, ::log)
                 r.connect()
                 roomba = r
+                r.reversed = flag("roomba_reversed", false)
                 bodyRef = null // nouvelles roues, nouveau repère
                 log("🛞 Roomba branché : j'ai des roues !")
                 refreshRoomba()
@@ -1752,9 +1763,53 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return pan
     }
 
+    /** Largeur de champ de la caméra, en degrés, pour l'image en cours. */
+    private fun hfovNow(): Double = camera.frame()?.let { camera.fov(it.width, it.height).first } ?: camera.fovShort
+
+    private fun bestSeen(labels: Set<String>) = seenNow().filter { it.label in labels && it.score >= 0.5 }.maxByOrNull { it.box.h * it.box.w }
+
+    /**
+     * Sans nacelle, le corps sert de cou : il tourne sur place par huitièmes de tour et regarde à chaque arrêt.
+     * Renvoie ce qu'il a vu (déjà à peu près en face), ou null après un tour complet.
+     */
+    private fun searchWithBody(r: com.joey.app.robot.RoombaRobot, labels: Set<String>): com.joey.app.senses.Seen? {
+        for (i in 0..8) {
+            val p = bestSeen(labels) ?: run { Thread.sleep(250); bestSeen(labels) } // deux regards par arrêt
+            if (p != null) {
+                val ang = (p.box.cx - 0.5) * hfovNow()
+                if (kotlin.math.abs(ang) > 8) { r.turn(ang); Thread.sleep(400) }
+                return bestSeen(labels) ?: p
+            }
+            if (i == 8 || r.ready() != null) return null
+            r.turn(45.0)
+            Thread.sleep(500)
+        }
+        return null
+    }
+
+    /** « Viens ici » sans nacelle : il se tourne avec les roues pour te trouver et te garder en face. */
+    private fun comeHereWithBody(r: com.joey.app.robot.RoombaRobot): String {
+        val person = setOf("person")
+        var p = searchWithBody(r, person) ?: return "je ne vois personne autour de moi (j'ai fait un tour sur moi-même)"
+        repeat(8) {
+            val faceBig = (faces.lastSize ?: 0f) >= 0.12f
+            if (faceBig || p.box.h >= 0.85) return "je suis arrivé près de toi"
+            val ang = (p.box.cx - 0.5) * hfovNow()
+            if (kotlin.math.abs(ang) > 8) { r.turn(ang); Thread.sleep(300) }
+            val d = 0.9 / p.box.h.coerceAtLeast(0.15)
+            val res = r.drive((d - 1.0).coerceIn(0.15, 0.6))
+            if (res.contains("obstacle") || res.contains("vide") || res.contains("interrompu") || res.startsWith("je ne roule pas"))
+                return "je me suis arrêté : $res"
+            Thread.sleep(300)
+            p = bestSeen(person) ?: searchWithBody(r, person) ?: return "je t'ai perdu de vue en route"
+        }
+        return "je me suis approché autant que j'ai pu"
+    }
+
     /** « Viens ici » : trouve la personne, se tourne vers elle, s'approche jusqu'à ~1 m. Bloquant. */
     private fun comeHere(): String {
         val r = roomba ?: return noWheels
+        if (!gimbal.ready) return comeHereWithBody(r)
         if (!follower.sees && !searchLocal("personne", setOf("person"), keepMs = 2500)) return "je ne vois personne autour de moi"
         follower.pausedUntil = 0 // le suivi garde la personne au centre pendant qu'il avance
         repeat(8) { step ->
@@ -1801,8 +1856,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         continue
                     }
                     lostAt = 0L
-                    val h = p?.box?.h ?: 0.6
-                    val fwd = ((0.6 - h) * 0.8).coerceIn(-0.08, r.maxSpeed)
+                    // La caméra est au ras du sol : quelqu'un de proche remplit vite l'image. Il avance tant que la
+                    // silhouette est petite, s'arrête quand elle remplit l'image, et ne recule que si on est tout contre
+                    // lui (avant, il reculait dès qu'on était à 2 m : « tu vas dans le mauvais sens »).
+                    val h = p?.box?.h ?: 0.75
+                    val fwd = when {
+                        h < 0.75 -> ((0.75 - h) * 0.8).coerceIn(0.05, r.maxSpeed)
+                        h > 0.97 && (faces.lastSize ?: 0f) > 0.25f -> -0.05
+                        else -> 0.0
+                    }
                     r.velocity(fwd, (pan * 1.5).coerceIn(-60.0, 60.0), 400)
                 }
             } finally {
@@ -1868,8 +1930,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Un bouton de la manette. */
+    private val padPressedAt = HashMap<com.joey.app.remote.Gamepad.Button, Long>()
+
     fun padButton(b: com.joey.app.remote.Gamepad.Button) {
         padHello()
+        // Un appui = une fois (le journal montrait l'aspiration marche/arrêt/marche/arrêt en moins d'une seconde).
+        val now = System.currentTimeMillis()
+        synchronized(padPressedAt) {
+            if (now - (padPressedAt[b] ?: 0L) < 400) return
+            padPressedAt[b] = now
+        }
         val r = roomba
         when (b) {
             com.joey.app.remote.Gamepad.Button.A -> thread(isDaemon = true) {
@@ -1887,7 +1957,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 log("🎮 Stop")
             }
             com.joey.app.remote.Gamepad.Button.Y -> recenter()
-            com.joey.app.remote.Gamepad.Button.X -> micPressed()
+            com.joey.app.remote.Gamepad.Button.X -> { log("🎮 X : " + (if (live != null) "fin de la conversation" else "je t'écoute")); micPressed() }
             com.joey.app.remote.Gamepad.Button.LB -> thread(isDaemon = true) {
                 following = false
                 log("🎮 " + (r?.seekDock() ?: noWheels))
@@ -2566,10 +2636,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 mapOf("result" to r, "visage_dans_l_image" to follower.sees)
             }
             "chercher" -> {
-                if (!gimbal.ready) return mapOf("result" to noHead)
                 if (!flag("camera", true)) return mapOf("result" to "ta caméra est coupée (réglages) : tu ne vois rien")
                 val what = (args["objet"] as? String)?.trim().orEmpty().ifEmpty { "personne" }
                 val labels = CocoClasses.forTarget(what)
+                if (!gimbal.ready) {
+                    // Sans cou, il tourne tout le corps (s'il a ses roues) pour chercher ce que le téléphone sait reconnaître.
+                    val r = roomba ?: return mapOf("result" to noHead)
+                    if (labels == null) return mapOf("result" to "sans ta nacelle, tu ne sais chercher en tournant que des " +
+                        "choses simples (personne, chien, chat, chaise, télé…) : pas « $what »")
+                    log("🔎 je cherche en tournant sur moi-même : $what")
+                    var found: com.joey.app.senses.Seen? = null
+                    moveSync(holdMs = 3000, timeoutMs = 60_000) { found = searchWithBody(r, labels); if (found != null) "trouvé" else "pas trouvé" }
+                    live?.sendFrameNow()
+                    return mapOf("result" to if (found != null) "trouvé : tu es tourné vers « $what » (regarde l'image)"
+                        else "pas trouvé : « $what » (tu as fait un tour complet sur toi-même)")
+                }
                 log("🔎 je cherche : $what" + (labels?.let { " (détecteur : ${it.joinToString()})" } ?: " (vision Gemini)"))
                 if (labels != null && labels == setOf("person") && !follower.sees) {
                     var r = ""

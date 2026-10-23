@@ -41,7 +41,7 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         for (v in b) inBuf.add(v.toInt() and 0xFF)
         while (inBuf.isNotEmpty()) {
             val op = inBuf[0]
-            val need = when (op) { 128, 131, 132, 143 -> 1; 145 -> 5; 141 -> 2; 140 -> if (inBuf.size >= 3) 3 + 2 * inBuf[2] else 99
+            val need = when (op) { 128, 131, 132, 143 -> 1; 145 -> 5; 138 -> 2; 141 -> 2; 140 -> if (inBuf.size >= 3) 3 + 2 * inBuf[2] else 99
                 149 -> if (inBuf.size >= 2) 2 + inBuf[1] else 99; else -> 1 }
             if (inBuf.size < need) return
             val c = inBuf.subList(0, need).toList()
@@ -136,6 +136,32 @@ class RoombaRobotTest {
         val res = r.drive(2.0)
         assertTrue(res, res.contains("obstacle"))
         assertTrue("x ${f.x}", f.x < 1.0)
+        r.disconnect()
+    }
+
+    @Test fun fullTurn() {
+        val (f, r) = connected()
+        val res = r.turn(360.0)
+        assertTrue(res, res.startsWith("tourné"))
+        assertTrue("cap ${f.h}", abs(f.h - 360) < 8)
+        r.disconnect()
+    }
+
+    @Test fun reversedMountDrivesTowardTheFace() {
+        val (f, r) = connected()
+        r.reversed = true
+        r.drive(0.3)
+        assertTrue("x ${f.x}", f.x < -0.24) // le Roomba recule : le visage est à l'arrière
+        assertTrue("odo ${r.x}", abs(r.x - 0.3) < 0.06) // et pour Joey, il a bien avancé
+        r.disconnect()
+    }
+
+    @Test fun vacuumOnOff() {
+        val (_, r) = connected()
+        assertTrue(r.vacuum(true).contains("marche"))
+        assertTrue(r.vacuuming)
+        r.vacuum(false)
+        assertTrue(!r.vacuuming)
         r.disconnect()
     }
 

@@ -80,7 +80,7 @@ class SharedMemory(
         val up = JSONArray()
         mine.forEach { n -> up.put(JSONObject().put("foyer", f).put("id", n.id).put("texte", n.text.take(600)).put("temps", n.time)
             .put("auto", n.auto).put("supprime", false).put("appareil", device)) }
-        tomb.forEach { id -> up.put(JSONObject().put("foyer", f).put("id", id).put("texte", "").put("temps", 0).put("supprime", true).put("appareil", device)) }
+        tomb.forEach { id -> up.put(JSONObject().put("foyer", f).put("id", id).put("texte", "").put("temps", 0).put("auto", false).put("supprime", true).put("appareil", device)) }
         upsert("souvenirs", "foyer,id", up)
         memory.markSent(mine.map { it.id }, tomb)
         val (changed, forgotten) = people.pending()

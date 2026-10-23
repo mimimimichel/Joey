@@ -383,6 +383,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Caméra avant (côté écran)", front) { front = it }
                 Toggle("Mot de réveil « Joey » (sans bouton)", wakeWord) { wakeWord = it }
                 Toggle("Vie propre (curiosité, ennui, sommeil)", life) { life = it }
+                Toggle("Visage tourné vers l'arrière du Roomba (côté opposé au pare-chocs)", vm.flagValue("roomba_reversed", false)) { vm.setFlagValue("roomba_reversed", it) }
                 Toggle("Gestes (pouce, coucou, doigt pointé)", vm.flagValue("gestures", true)) { vm.setFlagValue("gestures", it) }
                 Toggle("Mode nuit (23 h - 7 h)", vm.flagValue("night_mode", true)) { vm.setFlagValue("night_mode", it) }
                 Toggle("Langage du corps (hochements, respiration)", vm.flagValue("body_language", true)) { vm.setFlagValue("body_language", it) }

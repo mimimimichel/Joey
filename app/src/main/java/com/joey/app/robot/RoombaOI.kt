@@ -228,6 +228,15 @@ class Odometry {
     @Volatile var turnScale = 1.0
     private var lastL: Int? = null
     private var lastR: Int? = null
+    /**
+     * Cap mesuré par un gyroscope fixé au corps (le téléphone, quand il n'est pas sur la nacelle), en degrés, + = droite,
+     * ou null. Plus juste que les roues (qui patinent sur un tapis) : s'il est là, c'est lui qui donne les rotations.
+     */
+    @Volatile var gyroHeading: (() -> Double?)? = null
+    private var lastGyro: Double? = null
+    /** Rotations prises au gyroscope (pour le journal / les tests). */
+    @Volatile var gyroUsed = false
+        private set
 
     fun reset() { x = 0.0; y = 0.0; headingDeg = 0.0; travelledM = 0.0 }
 
@@ -242,7 +251,14 @@ class Odometry {
         if (kotlin.math.abs(dl) > 0.3 || kotlin.math.abs(dr) > 0.3) return 0.0 to 0.0
         val d = (dl + dr) / 2 * (if (reversed) -1 else 1)
         // Roue gauche plus loin que la droite : le robot tourne à droite
-        val dth = Math.toDegrees((dl - dr) / (RoombaOI.WHEEL_BASE_MM / 1000.0)) * turnScale
+        val wheelTh = Math.toDegrees((dl - dr) / (RoombaOI.WHEEL_BASE_MM / 1000.0)) * turnScale
+        // Le gyroscope, s'il est là et cohérent (pas de saut absurde entre deux lectures) : il remplace les roues.
+        val g = runCatching { gyroHeading?.invoke() }.getOrNull()
+        val lg = lastGyro
+        lastGyro = g
+        val gyroTh = if (g != null && lg != null) com.joey.app.gimbal.Head.wrap(g - lg) else null
+        val dth = if (gyroTh != null && kotlin.math.abs(gyroTh) < 30) gyroTh else wheelTh
+        gyroUsed = gyroTh != null && kotlin.math.abs(gyroTh) < 30
         val mid = Math.toRadians(headingDeg + dth / 2)
         x += d * kotlin.math.cos(mid)
         y += d * kotlin.math.sin(mid)

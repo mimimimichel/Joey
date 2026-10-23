@@ -1811,6 +1811,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 r.onContact = { kind, side -> runCatching { n.contact(kind, side) } }
                 // Ses détecteurs de proximité et son capteur de mur dessinent les obstacles sur la carte avant qu'il les touche.
                 r.onProximity = { angle, d -> runCatching { n.proximity(angle, d) } }
+                // Sans nacelle, le téléphone est fixé au corps : son gyroscope donne les rotations, plus justes que les roues
+                // (qui patinent sur un tapis) ; la carte ne se tord plus. Avec la nacelle (qui le stabilise), ou téléphone à plat
+                // (cap de la caméra indéfini) : les roues.
+                r.gyroHeading = { if (gimbal.ready) null else sensors.read()?.takeIf { kotlin.math.abs(it.second) < 60 }?.first }
                 // Ce que la caméra voit de sol libre devant (récent seulement) : il ralentit et s'arrête avant le choc.
                 r.visionClear = {
                     val c = floorClear

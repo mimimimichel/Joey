@@ -94,6 +94,12 @@ class RoombaRobot(
     /** Le visage (téléphone) regarde vers l'arrière du Roomba : « avancer » = rouler côté visage. */
     @Volatile var reversed = false
         set(v) { field = v; odo.reversed = v }
+    /** Cap d'un gyroscope fixé au corps (le téléphone sans nacelle), ou null : voir [Odometry.gyroHeading]. */
+    var gyroHeading: (() -> Double?)?
+        get() = odo.gyroHeading
+        set(v) { odo.gyroHeading = v }
+    val gyroUsed: Boolean get() = odo.gyroUsed
+
     /** Correction des angles mesurés par les roues. */
     var turnScale: Double
         get() = odo.turnScale

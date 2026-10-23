@@ -244,6 +244,22 @@ class RoombaRobotTest {
         r.disconnect()
     }
 
+    @Test fun gyroCorrectsWheelErrors() {
+        val (f, r) = connected()
+        r.turnScale = 1.3 // roues mal réglées (tapis) : « 90° » des roues = 69° en vrai
+        r.turn(90.0)
+        val wheelsOnly = f.h
+        assertTrue("roues seules : $wheelsOnly", abs(wheelsOnly - 90) > 12)
+        // Avec le gyroscope du téléphone fixé au corps : le vrai quart de tour.
+        r.gyroHeading = { f.h }
+        Thread.sleep(150)
+        val start = f.h
+        r.turn(90.0)
+        assertTrue("avec le gyroscope : ${f.h - start}", abs(f.h - start - 90) < 5)
+        assertTrue(r.gyroUsed)
+        r.disconnect()
+    }
+
     @Test fun seesItIsStuckAndGetsFree() {
         val (f, r) = connected()
         f.blocked = true

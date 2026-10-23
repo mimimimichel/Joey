@@ -292,8 +292,7 @@ class GeminiVision(private val apiKey: () -> String) {
         """.trimIndent())
         val want = if (goal.isNullOrBlank()) "Le robot explore la maison pour en faire la carte."
             else "Le robot cherche « $goal ». S'il est visible, but_visible = true et le point est sur le sol juste devant lui."
-        val prompt = "Image de la caméra d'un petit robot à roues (un aspirateur, caméra à ~40 cm du sol). $want
-" +
+        val prompt = "Image de la caméra d'un petit robot à roues (un aspirateur, caméra à ~40 cm du sol). $want\n" +
             "Choisis UN point du sol (pas un mur, pas un meuble) où le robot peut rouler sans obstacle sur le chemin : de " +
             "préférence une porte ou un passage vers une pièce qu'on ne voit pas encore, sinon le sol libre le plus loin vers " +
             "une zone inexplorée. Estime sa distance, et combien de sol libre il y a droit devant. N'invente rien."

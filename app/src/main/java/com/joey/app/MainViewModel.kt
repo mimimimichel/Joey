@@ -1203,6 +1203,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         seeingName = name
         seeingAt = now
         if (_state.value.seeing != name) _state.update { it.copy(seeing = name) }
+        // Où il ou elle est, sur la carte (distance d'après la taille du visage, ~15 cm de large).
+        roomba?.takeIf { it.linkOk }?.let { rr ->
+            runCatching {
+                val hf = camera.fov(bmp.width, bmp.height).first
+                val dist = (0.15 / (face.size * 2 * kotlin.math.tan(Math.toRadians(hf / 2)))).coerceIn(0.3, 6.0)
+                val bearing = rr.heading + (if (gimbal.ready) bodyPan() ?: 0.0 else 0.0) +
+                    imageToDegrees(face.x, 0f, bmp.width, bmp.height).first
+                personSeenAt[name.lowercase()] = Triple(rr.x + dist * kotlin.math.cos(Math.toRadians(bearing)),
+                    rr.y + dist * kotlin.math.sin(Math.toRadians(bearing)), now)
+            }
+        }
         // Quelqu'un qu'il n'a pas vu depuis 20 min : il le salue par son prénom (si on est en conversation).
         val l = live
         if (l != null && now - (greetedAt[name] ?: 0L) > 20 * 60_000L && greeted) {
@@ -1475,6 +1486,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun goToward(what: String): String {
         val r = roomba ?: return noWheels
         missionStart = r.x to r.y
+        // Il sait où c'est (vu en cartographiant) et c'est loin : il y va d'abord par sa carte, puis s'approche à vue.
+        if (gridAnchored) houseMap.find(what).firstOrNull { it.second.x != null }?.let { (place, item) ->
+            val ix = item.x!!; val iy = item.y!!
+            val d = kotlin.math.hypot(ix - r.x, iy - r.y)
+            if (d > 1.3) {
+                log("🗺 Je sais où est « ${item.name} » (${place.name}) : j'y vais")
+                val k = (d - 0.7) / d
+                val nav = navigateTo(r.x + (ix - r.x) * k, r.y + (iy - r.y) * k)
+                if (nav.startsWith("arrêté")) return "je me suis arrêté en route : $nav"
+                r.turn(Head.wrap(Math.toDegrees(kotlin.math.atan2(iy - r.y, ix - r.x)) - r.heading))
+            }
+        }
         follower.pausedUntil = Long.MAX_VALUE // la tête vise la chose, pas les visages
         var sp = erLocate(what, floor = true)
         if (sp == null) return "Gemini Robotics-ER ne répond pas"
@@ -2094,6 +2117,43 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.6) "presque arrivé" else "pas réussi à y arriver (trop d'obstacles)"
     }
 
+    /** Où il a vu chacun pour la dernière fois (x, y sur la carte, heure). */
+    private val personSeenAt = java.util.concurrent.ConcurrentHashMap<String, Triple<Double, Double, Long>>()
+
+    /**
+     * « Va voir Johanna » : si elle est en vue, il y va ; sinon il va là où il l'a vue la dernière fois (sa carte), et la
+     * cherche autour ; sinon il explore pour la trouver.
+     */
+    private fun goSee(who: String): String {
+        val r = roomba ?: return noWheels
+        missionStart = r.x to r.y
+        val key = who.trim().lowercase()
+        if (key.isNotEmpty() && chooser.names().any { it.equals(who.trim(), true) }) {
+            chooser.want(who)
+            return comeHere()
+        }
+        val seen = personSeenAt[key]
+        if (seen != null && System.currentTimeMillis() - seen.third < 6 * 3600_000L) {
+            val d = kotlin.math.hypot(seen.first - r.x, seen.second - r.y)
+            log("🗺 Je vais là où j'ai vu $who (il y a ${(System.currentTimeMillis() - seen.third) / 60_000} min)")
+            if (d > 1.0) {
+                val k = (d - 0.8) / d
+                val nav = navigateTo(r.x + (seen.first - r.x) * k, r.y + (seen.second - r.y) * k)
+                if (nav.startsWith("arrêté")) return "arrêté en route : $nav"
+            }
+            r.turn(Head.wrap(Math.toDegrees(kotlin.math.atan2(seen.second - r.y, seen.first - r.x)) - r.heading))
+            Thread.sleep(800)
+            if (key.isEmpty() || chooser.names().any { it.equals(who.trim(), true) } || follower.sees) {
+                if (key.isNotEmpty()) chooser.want(who)
+                return comeHere()
+            }
+            return "arrivé là où j'avais vu $who, mais $who n'y est plus" +
+                (searchWithBody(r, setOf("person"))?.let { " ; il y a quelqu'un près de moi" } ?: "")
+        }
+        val e = explore("personne", 90)
+        return if (e.startsWith("trouvé")) comeHere() else "je n'ai pas trouvé $who : $e"
+    }
+
     /** Où il était avant sa dernière mission (pour « reviens »). */
     @Volatile private var missionStart: Pair<Double, Double>? = null
 
@@ -2487,7 +2547,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (nom.isBlank()) continue
                 val off = (pt.first * 2 - 1) * hfov / 2
                 val elev = pose.second - (pt.second * 2 - 1) * vfov / 2
-                items.add(com.joey.app.brain.HouseMap.Item(nom.trim(), stopHeading?.let { (it + off + 360) % 360 }, elev, dist, now))
+                // Sa position sur la carte en grille (seulement si la carte est gardée : repère = sa base).
+                val rr = roomba
+                val xy = if (rr != null && gridAnchored && dist != null && dist < 6) {
+                    val bearing = rr.heading + (if (gimbal.ready) bodyPan() ?: pose.first else 0.0) + off
+                    (rr.x + dist * kotlin.math.cos(Math.toRadians(bearing))) to (rr.y + dist * kotlin.math.sin(Math.toRadians(bearing)))
+                } else null
+                items.add(com.joey.app.brain.HouseMap.Item(nom.trim(), stopHeading?.let { (it + off + 360) % 360 }, elev, dist, now,
+                    xy?.first, xy?.second))
             }
             log("🗺 vue ${k + 1}/6 : ${sv.elements.size} éléments")
         }
@@ -3053,7 +3120,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- outils longs en arrière-plan : la conversation continue pendant qu'il cherche ou se déplace ----------
     /** Outils qui peuvent durer (recherche, déplacement, relevé) : Gemini n'attend pas, il reçoit le résultat après. */
     private val longTools = setOf("chercher", "aller_vers", "viens_ici", "cartographier", "regarder_ce_que_je_montre", "tester_roues",
-        "explorer", "se_degager", "aller_a", "revenir")
+        "explorer", "se_degager", "aller_a", "revenir", "aller_voir")
     private val toolPool = Executors.newCachedThreadPool()
     @Volatile private var longToolGen = 0
 
@@ -3502,6 +3569,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 log(if (on) "🤖 Mode autonome activé" else "🤖 Mode autonome arrêté")
                 mapOf("result" to if (on) "mode autonome activé : quand on ne te demande rien (de 8 h à 22 h), tu vas voir qui " +
                     "arrive, tu agrandis ta carte de la maison, et tu rentres à ta base quand ta batterie baisse" else "mode autonome arrêté")
+            }
+            "aller_voir" -> {
+                if (roomba == null) return mapOf("result" to noWheels)
+                val who = (args["qui"] as? String)?.trim().orEmpty()
+                log("🛞 Je vais voir ${who.ifEmpty { "quelqu'un" }}")
+                var res = ""
+                moveSync(holdMs = 3000, timeoutMs = 240_000) { res = goSee(who); res }
+                mapOf("result" to res)
             }
             "revenir" -> {
                 val r = roomba ?: return mapOf("result" to noWheels)

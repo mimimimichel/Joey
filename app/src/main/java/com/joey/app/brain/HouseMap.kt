@@ -12,7 +12,9 @@ import java.text.Normalizer
  * seront remplies par l'odométrie du Roomba quand il sera branché (plan de la maison).
  */
 class HouseMap(private val file: File) {
-    class Item(val name: String, val heading: Double?, val elevation: Double, val distanceM: Double?, val seenAt: Long)
+    class Item(val name: String, val heading: Double?, val elevation: Double, val distanceM: Double?, val seenAt: Long,
+               /** Position sur la carte en grille (m, repère = sa base), si connue. */
+               val x: Double? = null, val y: Double? = null)
     class Place(
         val name: String,
         var description: String,
@@ -36,7 +38,8 @@ class HouseMap(private val file: File) {
                 for (j in 0 until its.length()) {
                     val it = its.getJSONObject(j)
                     list.add(Item(it.getString("name"), if (it.isNull("heading")) null else it.getDouble("heading"),
-                        it.optDouble("elevation", 0.0), if (it.isNull("dist")) null else it.getDouble("dist"), it.getLong("seen")))
+                        it.optDouble("elevation", 0.0), if (it.isNull("dist")) null else it.getDouble("dist"), it.getLong("seen"),
+                        if (it.has("x") && !it.isNull("x")) it.getDouble("x") else null, if (it.has("y") && !it.isNull("y")) it.getDouble("y") else null))
                 }
                 places.add(Place(o.getString("name"), o.optString("description"), o.optString("kind"), list, o.getLong("updated"),
                     if (o.isNull("x")) null else o.optDouble("x"), if (o.isNull("y")) null else o.optDouble("y")))
@@ -49,7 +52,8 @@ class HouseMap(private val file: File) {
         places.forEach { p ->
             val its = JSONArray()
             p.items.forEach { its.put(JSONObject().put("name", it.name).put("heading", it.heading ?: JSONObject.NULL)
-                .put("elevation", it.elevation).put("dist", it.distanceM ?: JSONObject.NULL).put("seen", it.seenAt)) }
+                .put("elevation", it.elevation).put("dist", it.distanceM ?: JSONObject.NULL).put("seen", it.seenAt)
+                .put("x", it.x ?: JSONObject.NULL).put("y", it.y ?: JSONObject.NULL)) }
             a.put(JSONObject().put("name", p.name).put("description", p.description).put("kind", p.kind).put("items", its)
                 .put("updated", p.updatedAt).put("x", p.x ?: JSONObject.NULL).put("y", p.y ?: JSONObject.NULL))
         }

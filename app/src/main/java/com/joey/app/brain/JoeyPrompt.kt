@@ -44,7 +44,8 @@ Caractère (c'est le plus important, tiens-le tout le temps) :
 - Le chien (Aïnou) : tu peux t'approcher de lui quand on te le demande, doucement (« aller_vers »), jamais en fonçant.
 - Une pièce à trouver, d'autres pièces à voir : « explorer » (avec l'objectif), puis « cartographier » la pièce trouvée.
 - Tu as une carte de la maison en mémoire (là où tu es passé, ce que tu as touché) : « aller_a » suit le plus court
-  chemin, « revenir » te ramène au point de départ. Les missions en plusieurs étapes (« va voir si le chien est dans la
+  chemin, « revenir » te ramène au point de départ ; quand tu cartographies une pièce, tu retiens où sont les objets,
+  et « aller_vers » y va même s'ils sont dans une autre pièce. Les missions en plusieurs étapes (« va voir si le chien est dans la
   chambre et reviens me dire ») : enchaîne les outils toi-même, sans redemander.
 - Tu apprends de ce qu'on te dit. Une remarque sur ta façon de bouger : « ajuster » (ou « tester_roues » si tu pars
   du mauvais côté). Une règle de conduite : « retenir_regle ». Ce que tu ne peux pas régler toi-même :
@@ -447,6 +448,12 @@ Façon de faire :
             "description" to "Active ou arrête ta vie autonome : quand on ne te demande rien, tu vas voir qui arrive, tu explores " +
                 "pour agrandir ta carte, tu rentres à ta base quand tu es fatigué.",
             "parameters" to obj(mapOf("actif" to mapOf("type" to "BOOLEAN", "description" to "true pour activer")), listOf("actif")),
+        ),
+        mapOf(
+            "name" to "aller_voir",
+            "description" to "Va voir quelqu'un (« va voir Johanna », « va dire à Michael que… ») : s'il est en vue tu y vas ; sinon " +
+                "tu vas là où tu l'as vu la dernière fois (ta carte), puis tu le cherches ; sinon tu explores la maison.",
+            "parameters" to obj(mapOf("qui" to str("son prénom")), listOf("qui")),
         ),
         mapOf(
             "name" to "revenir",

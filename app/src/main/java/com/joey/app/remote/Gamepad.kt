@@ -58,5 +58,5 @@ class Gamepad {
     }
 
     /** Ce que demande la tête : x = droite, y = haut, de -1 à 1 (0,0 = rien). */
-    fun head(): Pair<Float, Float> = shape(rightX).toFloat() to (-shape(rightY)).toFloat()
+    fun head(): Pair<Float, Float> = (shape(rightX).toFloat() + 0f) to ((-shape(rightY)).toFloat() + 0f) // + 0f : pas de « -0 »
 }

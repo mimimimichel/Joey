@@ -57,6 +57,8 @@ class GeminiLive(
     private val robot: () -> Boolean = { false },
     /** true : la conversation peut démarrer sans le micro du téléphone (le casque fournit le sien). */
     private val micOptional: Boolean = false,
+    /** Voix de Gemini (« Charon », « Algenib »…), ou null : celle par défaut (aiguë, ~240 Hz). */
+    private val voiceName: String? = null,
 ) {
     companion object {
         private const val TAG = "GeminiLive"
@@ -128,6 +130,8 @@ class GeminiLive(
     @Volatile private var framesWritten = 0L
     /** Son du micro du téléphone (pour danser en rythme), sur le fil du micro. */
     @Volatile var onMicPcm: ((ShortArray, Int) -> Unit)? = null
+    /** Chaque morceau de la voix de Joey, juste avant le haut-parleur (pour le babil du Roomba). */
+    @Volatile var onSpeechChunk: ((ByteArray) -> Unit)? = null
     /** Volume de la voix en ce moment (0..1), pour animer la bouche / les yeux. */
     @Volatile var level = 0f
         private set
@@ -286,7 +290,9 @@ class GeminiLive(
             .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
                 .put("mediaResolution", "MEDIA_RESOLUTION_LOW")
                 // Français imposé : moins de « phrases » inventées dans d'autres langues à partir du bruit.
-                .put("speechConfig", JSONObject().put("languageCode", "fr-FR")))
+                .put("speechConfig", JSONObject().put("languageCode", "fr-FR").also { sc ->
+                    voiceName?.let { sc.put("voiceConfig", JSONObject().put("prebuiltVoiceConfig", JSONObject().put("voiceName", it))) }
+                }))
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
             // Ses outils, plus la recherche Google (météo, actualités, horaires…).
             .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", tools)).put(JSONObject().put("googleSearch", JSONObject())))
@@ -558,6 +564,7 @@ class GeminiLive(
             val gen = playGeneration
             if (robot()) robotFx.process(chunk)
             level = rms(chunk)
+            onSpeechChunk?.let { cb -> runCatching { cb(chunk) } }
             audioOut?.let { out ->
                 out(chunk)
                 val now = System.currentTimeMillis()

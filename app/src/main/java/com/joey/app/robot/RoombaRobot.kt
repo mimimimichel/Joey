@@ -338,6 +338,14 @@ class RoombaRobot(
         runCatching { send(RoombaOI.song(2, t.notes)); send(RoombaOI.play(2)) }
     }
 
+    private var chirpSlot = 3
+    /** Une seule note courte (babil pendant que Joey parle) ; deux emplacements de mélodie en alternance. */
+    fun chirp(note: Int, dur64: Int = 7) {
+        if (!running) return
+        chirpSlot = if (chirpSlot == 3) 4 else 3
+        runCatching { send(RoombaOI.song(chirpSlot, listOf(note to dur64))); send(RoombaOI.play(chirpSlot)) }
+    }
+
     // ---- aspiration ----------------------------------------------------------------------------------------
     /** Brosses et aspirateur en marche. */
     @Volatile var vacuuming = false

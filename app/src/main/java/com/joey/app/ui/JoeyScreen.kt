@@ -383,6 +383,20 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Caméra avant (côté écran)", front) { front = it }
                 Toggle("Mot de réveil « Joey » (sans bouton)", wakeWord) { wakeWord = it }
                 Toggle("Vie propre (curiosité, ennui, sommeil)", life) { life = it }
+                // Voix : la grave par défaut ; on peut aussi la changer à la voix (« prends une voix plus grave »).
+                var voice by remember { mutableStateOf(vm.voiceName()) }
+                Text("Voix de Joey : $voice", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
+                vm.VOICES.chunked(4).forEach { line ->
+                    Row {
+                        line.forEach { v ->
+                            TextButton(onClick = { voice = v; vm.setVoice(v) }) {
+                                Text(if (v == "defaut") "d'origine" else v, fontSize = 12.sp,
+                                    color = if (v == voice) Color(0xFF4FC3F7) else Color.White.copy(alpha = 0.7f))
+                            }
+                        }
+                    }
+                }
+                Toggle("Le Roomba bipe quand Joey parle (babil de robot)", vm.flagValue("roomba_babble", true)) { vm.setFlagValue("roomba_babble", it) }
                 Toggle("Visage tourné vers l'arrière du Roomba (côté opposé au pare-chocs)", vm.flagValue("roomba_reversed", false)) { vm.setFlagValue("roomba_reversed", it) }
                 Toggle("Gestes (pouce, coucou, doigt pointé)", vm.flagValue("gestures", true)) { vm.setFlagValue("gestures", it) }
                 Toggle("Mode nuit (23 h - 7 h)", vm.flagValue("night_mode", true)) { vm.setFlagValue("night_mode", it) }

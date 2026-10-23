@@ -110,6 +110,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<UiState> = _state
 
     val memory = Memory(File(app.filesDir, "memoire.json"))
+    private val babbleTimer = Executors.newSingleThreadScheduledExecutor()
+
+    /** Voix de Gemini : grave par défaut (celle d'origine est aiguë, ~240 Hz ; Charon ~130 Hz, Algenib ~105 Hz). */
+    fun voiceName(): String = prefs.getString("voice_name", null) ?: "Charon"
+    fun setVoice(v: String) {
+        prefs.edit().putString("voice_name", v).apply()
+        refreshSettings()
+        // Nouvelle voix : la conversation redémarre (après sa phrase) pour la prendre.
+        if (live != null) thread(isDaemon = true) { Thread.sleep(4500); if (live != null) { stopLive(); Thread.sleep(800); micPressed() } }
+    }
+
     /** Tours de la tête par rapport au corps (le câble vers le Roomba ne doit pas s'entortiller). */
     private val cable = com.joey.app.gimbal.CableTwist()
     /** Ce qu'il apprend de ce qu'on lui dit : réglages ajustés, règles de conduite. */
@@ -2363,7 +2374,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             bargeIn = flag("barge_in", true),
             robot = { flag("robot_voice", true) },
             micOptional = headsetAudioClients > 0,
+            voiceName = voiceName().takeIf { it != "defaut" },
         )
+        // Babil : le Roomba bipe au rythme de sa voix (un peu après, le temps que le son sorte du haut-parleur).
+        val babble = com.joey.app.audio.Babble(24_000)
+        l.onSpeechChunk = { chunk ->
+            val r = roomba
+            if (r != null && flag("roomba_babble", true)) {
+                val notes = babble.feed(chunk)
+                notes.forEachIndexed { i, n -> babbleTimer.schedule({ r.chirp(n) }, 120L + i * 150L, TimeUnit.MILLISECONDS) }
+            }
+        }
         live = l
         var stereoSeen = false
         l.onStereo = { left, right, n ->
@@ -2749,6 +2770,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- roues : Joey dit « j'avance » pendant qu'il roule, au lieu d'attendre la fin du trajet pour parler ----------
     private val wheelTools = setOf("avancer", "tourner_corps")
+    /** Voix graves essayées (hauteur mesurée), et celle d'origine. */
+    val VOICES = listOf("Algenib", "Charon", "Orus", "Fenrir", "Iapetus", "Alnilam", "defaut")
     /** Un seul déplacement à la fois, dans l'ordre demandé (« avance, encore » = deux fois). */
     private val wheelPool = Executors.newSingleThreadExecutor()
     private val wheelGen = AtomicInteger()
@@ -2892,6 +2915,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 } else tuning.adjust(what, how).also { roomba?.let { applyTuning(it) } }
                 log("🎛️ $res")
                 mapOf("result" to res)
+            }
+            "changer_voix" -> {
+                val v = (args["voix"] as? String)?.trim().orEmpty()
+                if (v !in VOICES) return mapOf("result" to "voix inconnue ; au choix : ${VOICES.joinToString()}")
+                log("🗣️ Nouvelle voix : $v")
+                setVoice(v)
+                mapOf("result" to "voix « $v » choisie : dis une phrase pour la saluer, la conversation redémarre dans 4 s avec elle")
             }
             "retenir_regle" -> {
                 val rule = (args["regle"] as? String)?.trim().orEmpty()

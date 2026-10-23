@@ -205,7 +205,18 @@ class HeadsetServer(
                 else send(out, "image/jpeg", img)
             }
             path.startsWith("/frame") -> {
-                pollAt = System.currentTimeMillis()
+                val asked = System.currentTimeMillis()
+                pollAt = asked
+                // Image trop vieille (la capture ne tourne que quand on regarde) : on attend la suivante. Sans ça, la première
+                // demande renvoyait une image de plusieurs minutes, ou rien (24/10, pilote PC).
+                if (asked - latestAt > 300) synchronized(frameLock) {
+                    val end = asked + 1500
+                    while (running && latestAt < asked) {
+                        val left = end - System.currentTimeMillis()
+                        if (left <= 0) break
+                        frameLock.wait(left)
+                    }
+                }
                 val f = latest
                 if (f == null) send(out, "text/plain", "pas d'image".toByteArray(), "404 Not Found")
                 else send(out, "image/jpeg", f)

@@ -125,10 +125,10 @@ fun JoeyScreen(vm: MainViewModel) {
 
         // Nuit : écran presque éteint (le visage reste visible, faiblement).
         val ctx = androidx.compose.ui.platform.LocalContext.current
-        LaunchedEffect(s.night, s.idle) {
+        LaunchedEffect(s.night, s.idle, s.testScreen) {
             (ctx as? android.app.Activity)?.window?.let { w ->
                 val a = w.attributes
-                a.screenBrightness = if (s.night) 0.02f else if (s.idle) 0.08f else android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                a.screenBrightness = if (s.testScreen) 0.01f else if (s.night) 0.02f else if (s.idle) 0.08f else android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                 w.attributes = a
             }
         }
@@ -219,6 +219,11 @@ fun JoeyScreen(vm: MainViewModel) {
                 confirmButton = { TextButton(onClick = { vm.message(null) }) { Text("OK") } },
             )
         }
+
+        // Mode test (pilote PC) : tout noir, pixels éteints sur l'AMOLED. Un appui rallume le visage.
+        if (s.testScreen) Box(Modifier.fillMaxSize().background(Color.Black).pointerInput(Unit) {
+            detectTapGestures(onTap = { vm.endTestScreen() })
+        })
     }
 }
 

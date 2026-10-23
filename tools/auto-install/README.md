@@ -42,7 +42,10 @@ besoin de réassocier).
 
 **Galaxy S8+ (Android 9)** : pas de débogage sans fil intégré. Une fois après chaque redémarrage du téléphone,
 branche-le en USB au PC et lance `adb tcpip 5555`, débranche, puis mets `JOEY_PHONE=IP_DU_TELEPHONE:5555` dans
-`~/.config/joey/env`.
+`~/.config/joey/env` (plusieurs adresses : séparées par des virgules).
+
+**Plusieurs téléphones** : chaque téléphone trouvé reçoit la nouvelle version (une seule compilation). Un téléphone
+absent la reçoit dès qu'il revient.
 
 ## Suivre
 

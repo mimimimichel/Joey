@@ -52,6 +52,13 @@ class RoombaRobot(
      */
     @Volatile var visionClear: () -> Double? = { null }
 
+    /**
+     * Prudence quand la caméra ne dit rien (tête pas encore baissée, sol pas reconnu) : il roule doucement, pour toucher
+     * en douceur ce qu'il n'a pas vu. (24/10 : parti à 0,4 m/s avant la première mesure, il a heurté un pied de chaise.)
+     */
+    @Volatile var cautiousWhenBlind = false
+    private fun blindCap(): Double? = if (cautiousWhenBlind && visionClear() == null) BLIND_SPEED else null
+
     /** Vitesse permise par la vision (m/s) en avançant côté visage ; null = pas d'avis. */
     private fun visionCap(): Double? = visionClear()?.let { c -> if (c.isInfinite()) null else ((c - 0.22) * 0.8).coerceAtLeast(0.0) }
 
@@ -111,6 +118,8 @@ class RoombaRobot(
 
     /** Vitesse max en intérieur (m/s). */
     var maxSpeed = 0.4
+    /** Vitesse quand la caméra ne voit pas devant (m/s) : un choc à cette vitesse est doux. */
+    val BLIND_SPEED = 0.2
 
     val x get() = odo.x
     val y get() = odo.y
@@ -439,6 +448,7 @@ class RoombaRobot(
                     break
                 }
                 if (vcap != null) vmax = minOf(vmax, maxOf(0.06, vcap))
+                if (sign > 0) blindCap()?.let { vmax = minOf(vmax, it) }
                 // Accélère en douceur (pas de saut de 0 à la vitesse max), ralentit à l'approche.
                 rampV = minOf(rampV + 0.035, (left * 1.5).coerceIn(0.06, maxOf(0.06, vmax)))
                 val v = rampV * sign
@@ -519,6 +529,7 @@ class RoombaRobot(
                     break
                 }
                 if (vcap != null) want = minOf(want, maxOf(0.06, vcap))
+                blindCap()?.let { want = minOf(want, it) }
                 v = if (want > v) minOf(want, v + 0.035) else maxOf(want, v - 0.06) // ~0,7 m/s² pour accélérer
                 wheels(v, (err * 2.2).coerceIn(-110.0, 110.0))
                 sleeper(50)

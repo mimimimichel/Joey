@@ -52,4 +52,18 @@ class FloorVisionTest {
         val r = f.analyse(scene(10), w, h, -25.0, 60.0, 46.0)
         assertTrue(!r.floorVisible && r.clearAhead.isNaN())
     }
+
+    /** 24/10 : une chaise droit devant, reconnue par le détecteur d'objets, donne sa distance par le bas de sa boîte. */
+    @Test fun chaiseVueParLeDetecteur() {
+        val f = FloorVision(cameraHeight = 0.40)
+        // Tête baissée de 22° : le bas de la boîte au centre de l'image est à 0,40 / tan(22°) ≈ 1 m.
+        val devant = f.objectClear(listOf(Box(0.5, 0.25, 0.3, 0.5)), -22.0, 66.0, 51.0)
+        assertEquals(0.99, devant, 0.05)
+        // Plus bas dans l'image = plus près.
+        assertTrue(f.objectClear(listOf(Box(0.5, 0.5, 0.3, 0.6)), -22.0, 66.0, 51.0) < devant)
+        // Une chaise bien sur le côté ne bloque pas son couloir.
+        assertTrue(f.objectClear(listOf(Box(0.95, 0.4, 0.08, 0.4)), -22.0, 66.0, 51.0).isInfinite())
+        // Une boîte au-dessus de l'horizon (tableau au mur) : rien.
+        assertTrue(f.objectClear(listOf(Box(0.5, 0.1, 0.2, 0.1)), 0.0, 66.0, 51.0).isInfinite())
+    }
 }

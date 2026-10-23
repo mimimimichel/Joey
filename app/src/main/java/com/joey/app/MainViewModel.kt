@@ -73,6 +73,8 @@ data class UiState(
     val idleLife: Boolean = true,
     /** Vitesse de la tête, en % de la vitesse max mesurée. */
     val headSpeed: Int = 100,
+    /** Mode test (pilote PC) : écran noir, pour ne pas marquer l'écran AMOLED pendant des heures d'essais. */
+    val testScreen: Boolean = false,
     val seesFace: Boolean = false,
     /** Ce qu'il cherche ou suit du regard en ce moment (null : les visages). */
     val tracking: String? = null,
@@ -382,11 +384,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val movingFree = now - r.movingAt < 300 && !r.obstacleNear && r.sensors?.bump != true && !r.stuck
         if (movingFree || !floorVision.ready) floorVision.learnFloor(px, w, h, if (floorVision.ready) 0.08 else 1.0)
         val res = floorVision.analyse(px, w, h, pitch, hf, vf)
-        floorClear = if (res.floorVisible) res.clearAhead else Double.NaN
+        // Pendant qu'il roule : les meubles et animaux reconnus comptent aussi (24/10 : l'apparence du sol ne voyait pas
+        // un pied de chaise en bois clair sur le tapis crème ; il l'a heurté à 0,4 m/s).
+        val objC = obstacleObjects(bmp, r, pitch, hf, vf, now)
+        var c = if (res.floorVisible) res.clearAhead else Double.NaN
+        if (!objC.isNaN() && !objC.isInfinite()) c = if (c.isNaN()) objC else minOf(c, objC)
+        floorClear = c
         floorAt = now
         if (!res.floorVisible) return
         // Sur la carte : le sol vu est libre, son bord est un obstacle (à confirmer).
         nav?.vision(r.heading + (if (gimbal.ready) pan else 0.0), res.rays.map { it.bearing to it.distance })
+    }
+
+    @Volatile private var objClear = Double.NaN
+    private var objAt = 0L
+    private var objLogAt = 0L
+
+    /** Place libre devant d'après le détecteur d'objets (m), seulement en roulant (~3 fois/s) ; NaN = pas d'avis. */
+    private fun obstacleObjects(bmp: android.graphics.Bitmap, r: com.joey.app.robot.RoombaRobot, pitch: Double, hf: Double, vf: Double, now: Long): Double {
+        if (now - r.movingAt > 1500 && !roadGaze.active) return Double.NaN
+        if (now - objAt >= 300) {
+            objAt = now
+            val seen = objects.detect(bmp).filter { it.label in com.joey.app.senses.FloorVision.OBSTACLE_LABELS && it.score >= 0.4 }
+            objClear = floorVision.objectClear(seen.map { it.box }, pitch, hf, vf)
+            if (!objClear.isInfinite() && objClear < 1.2 && now - objLogAt > 3000) {
+                objLogAt = now
+                val what = seen.maxByOrNull { it.box.cy + it.box.h / 2 }?.label?.let { CocoClasses.french(it) } ?: "un obstacle"
+                log("👁️ $what devant (%.0f cm)".format(objClear * 100))
+            }
+        }
+        return if (now - objAt < 700) objClear else Double.NaN
     }
 
     private fun onFrame(bmp: android.graphics.Bitmap) {
@@ -668,6 +695,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // Ses propres roues : pas une surprise.
         // (pendant qu'il roule, les à-coups ressemblaient à « on me secoue / on me soulève » : seule la chute compte)
         if (wheelsJustMoved() && e != com.joey.app.life.BodyMotion.Event.FALLING) return
+        // Déplacé à la main : ses roues ne l'ont pas senti, l'écart entre la tête et le corps n'est plus sûr (24/10 : il
+        // croyait sa tête tournée de 92° alors qu'elle regardait droit devant, et coupait sa vision du sol). Il le reprendra
+        // au prochain recentrage.
+        bodyRef = null
         val (mood, text) = when (e) {
             com.joey.app.life.BodyMotion.Event.LIFTED -> Mood.ETONNE to "On te soulève ! Réagis tout de suite, en quelques mots (surpris, un peu inquiet ou amusé)."
             com.joey.app.life.BodyMotion.Event.PUT_DOWN -> Mood.CONTENT to "On vient de te reposer : réagis en quelques mots (soulagé)."
@@ -1835,6 +1866,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // (cap de la caméra indéfini) : les roues.
                 r.gyroHeading = { if (gimbal.ready) null else sensors.read()?.takeIf { kotlin.math.abs(it.second) < 60 }?.first }
                 // Ce que la caméra voit de sol libre devant (récent seulement) : il ralentit et s'arrête avant le choc.
+                r.cautiousWhenBlind = true
                 r.visionClear = {
                     val c = floorClear
                     if (System.currentTimeMillis() - floorAt < 400 && !c.isNaN()) c else null
@@ -1881,6 +1913,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * alors qu'elle était presque dans l'axe, et faisait demi-tour au lieu de s'approcher.
      */
     @Volatile private var bodyRef: Triple<Double, Double, Long>? = null
+    /** Source de l'angle de la tête quand le repère a été pris (téléphone ou nacelle) : les deux n'ont pas le même zéro. */
+    @Volatile private var bodyRefPhone = false
+
+    private fun setBodyRef(abs: Double, wheels: Double) {
+        bodyRefPhone = head.usesPhone
+        bodyRef = Triple(abs, wheels, System.currentTimeMillis())
+    }
 
     /** La tête se recentre (droit devant le Roomba) : on note le repère du corps. */
     private fun calibrateBody(): Boolean {
@@ -1889,7 +1928,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         follower.pause(2500) // le suivi ne doit pas tirer la tête pendant qu'elle se recentre
         head.center()
         val abs = head.absPan() ?: return false
-        bodyRef = Triple(abs, r.heading, System.currentTimeMillis())
+        setBodyRef(abs, r.heading)
         return true
     }
 
@@ -1898,6 +1937,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val r = roomba ?: return null
         if (!gimbal.ready) return 0.0 // sans nacelle, le téléphone est fixé au corps
         val ref = bodyRef ?: return null
+        // La tête a changé de source de mesure : l'ancien repère ne veut plus rien dire.
+        if (head.usesPhone != bodyRefPhone) return null
         val abs = head.absPan() ?: return null
         return Head.wrap(abs - (ref.first + Head.wrap(r.heading - ref.second)))
     }
@@ -2839,7 +2880,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun recenter() = background("centrer") {
-        head.center().also { r -> roomba?.let { w -> head.absPan()?.let { bodyRef = Triple(it, w.heading, System.currentTimeMillis()) } } }
+        // Comme avant un trajet : le suivi du visage ne tire pas la tête pendant qu'elle se recentre, puis on reprend le repère.
+        if (roomba != null && calibrateBody()) "tête droite devant" else head.center()
     }
     fun nod() = background("oui") { head.nod() }
     fun shake() = background("non") { head.shake() }
@@ -2852,6 +2894,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val wake: com.joey.app.audio.WakeWord = com.joey.app.audio.WakeWord(app,
         onWake = { heard ->
             log("👂 « $heard » : je t'écoute")
+            endTestScreen() // on lui parle : il reprend son visage
             if (live == null && geminiKey.isNotBlank()) {
                 startedByWake = true
                 thread(isDaemon = true) {
@@ -3398,7 +3441,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 log("👀 regarder $dir${deg?.let { " ${it.toInt()}°" } ?: ""}")
                 gazeDirectedUntil = System.currentTimeMillis() + 60_000
                 // Il garde ce regard quelques secondes avant de revenir te suivre.
-                val r = moveSync(holdMs = if (dir == "devant") 1000 else 7000) { head.lookDirection(dir, deg) }
+                val r = moveSync(holdMs = if (dir == "devant") 1000 else 7000) {
+                    // « Devant » avec les roues : la nacelle se remet dans l'axe du corps (sa propre commande, sans dérive)
+                    // et le repère tête-corps est repris.
+                    if (dir.lowercase() == "devant" && roomba != null && calibrateBody()) "tête droite devant, dans l'axe de ton corps"
+                    else head.lookDirection(dir, deg)
+                }
                 live?.sendFrameNow()
                 mapOf("result" to r, "visage_dans_l_image" to follower.sees)
             }
@@ -4296,7 +4344,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Le PC lance un de ses outils (comme Gemini le ferait) et attend le résultat : pour les tests en autonomie.
      * Ouvert à tout le Wi-Fi de la maison (choix de Michael), comme la tablette.
      */
+    // ---- mode test : écran noir tant que le pilote PC travaille ----------------------------------------------------
+    @Volatile private var testScreenUntil = 0L
+    private val testScreenWatch by lazy {
+        thread(isDaemon = true, name = "ecran-test") {
+            while (true) {
+                Thread.sleep(5000)
+                if (_state.value.testScreen && System.currentTimeMillis() > testScreenUntil) endTestScreen()
+            }
+        }
+    }
+
+    /** Le pilote PC travaille : écran noir pendant 10 min (prolongé à chaque appel). */
+    fun testScreenOn(minutes: Int = 10) {
+        testScreenUntil = System.currentTimeMillis() + minutes * 60_000L
+        testScreenWatch
+        if (!_state.value.testScreen) { _state.update { it.copy(testScreen = true) }; log("⬛ Mode test : écran noir") }
+    }
+
+    /** On l'appelle, on le touche, ou les tests sont finis : le visage revient. */
+    fun endTestScreen() {
+        testScreenUntil = 0L
+        if (_state.value.testScreen) { _state.update { it.copy(testScreen = false) }; log("🙂 Fin du mode test : visage rallumé") }
+    }
+
     private fun pilotTool(q: Map<String, String>): String {
+        testScreenOn()
         val name = q["name"].orEmpty()
         val args = runCatching { org.json.JSONObject(q["args"] ?: "{}") }.getOrNull()
             ?: return org.json.JSONObject().put("erreur", "args : JSON invalide").toString()
@@ -4332,6 +4405,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "vacuum" -> { if (r == null) "roues non branchées" else { thread(isDaemon = true) { log("🧹 " + r.vacuum(!r.vacuuming)) }; "" } }
             "dock" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 1000) { goHome() }; "il rentre à sa base" } }
             "center" -> { recenter(); "" }
+            "test" -> { testScreenOn(); "mode test : écran noir" }
+            "visage" -> { endTestScreen(); "visage rallumé" }
             "come" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 3000) { comeHere() }; "il vient vers toi (vers la personne qu'il voit)" } }
             "explore" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 3000) { explore(null, 120) }; "il explore (2 min)" } }
             "map" -> { if (!canTurnGaze) "ni nacelle ni roues" else { moveAsync(holdMs = 2000) { if (roomba != null) mapHouse() else mapHere("ici") }; "il cartographie" } }

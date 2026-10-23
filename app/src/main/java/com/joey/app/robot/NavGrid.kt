@@ -39,6 +39,11 @@ class NavGrid(val cell: Double = 0.1) {
     private val cells = HashMap<Long, Float>()
     /** Les vides (marches) sont retenus à part : jamais traversés, même s'il croit y être passé. */
     private val cliffs = HashSet<Long>()
+    /**
+     * Les carreaux où son centre est passé : son corps y tenait, donc il peut toujours y repasser, même si la marge
+     * autour des meubles voisins dit le contraire (24/10 : glissé entre les chaises, il ne trouvait plus le chemin du retour).
+     */
+    private val trail = HashSet<Long>()
 
     val size: Int get() = synchronized(cells) { cells.size }
 
@@ -55,6 +60,7 @@ class NavGrid(val cell: Double = 0.1) {
         val r = ROBOT_RADIUS - cell / 2
         val n = (r / cell).roundToInt()
         val ci = idx(x); val cj = idx(y)
+        if (key(ci, cj) !in cliffs) trail.add(key(ci, cj))
         for (di in -n..n) for (dj in -n..n) {
             if (hypot(di * cell, dj * cell) > r) continue
             val k = key(ci + di, cj + dj)
@@ -136,7 +142,12 @@ class NavGrid(val cell: Double = 0.1) {
      * Plus court chemin de (x0, y0) à (x1, y1), en évitant les obstacles (avec une marge pour son corps) ; l'inconnu
      * coûte plus cher que le connu (il préfère ce qu'il connaît, mais ose). Renvoie des points (m), ou null.
      */
-    fun plan(x0: Double, y0: Double, x1: Double, y1: Double, maxCells: Int = 60_000): List<Pair<Double, Double>>? {
+    fun plan(x0: Double, y0: Double, x1: Double, y1: Double, maxCells: Int = 60_000): List<Pair<Double, Double>>? =
+        plan(x0, y0, x1, y1, maxCells, useTrail = false)
+            // Rien avec les marges habituelles : il repasse par où il est déjà passé (son corps y tenait).
+            ?: plan(x0, y0, x1, y1, maxCells, useTrail = true)
+
+    private fun plan(x0: Double, y0: Double, x1: Double, y1: Double, maxCells: Int, useTrail: Boolean): List<Pair<Double, Double>>? {
         val inflate = inflation()
         val si = idx(x0); val sj = idx(y0); val gi = idx(x1); val gj = idx(y1)
         val start = key(si, sj); val goal = key(gi, gj)
@@ -159,8 +170,10 @@ class NavGrid(val cell: Double = 0.1) {
                 val ni = i + di; val nj = j + dj
                 val nk = key(ni, nj)
                 if (nk in cliffs) continue
-                // Le départ peut être « bloqué » (il est collé à un mur) : on le laisse en sortir.
-                if (blocked(ni, nj, inflate) && hypot((ni - si).toDouble(), (nj - sj).toDouble()) > inflate) continue
+                // Le départ peut être « bloqué » (il est collé à un mur) : on le laisse en sortir. Là où il est déjà passé,
+                // il peut repasser (sauf si un contact y a mis un obstacle depuis).
+                val walked = useTrail && synchronized(cells) { nk in trail } && !occupied(ni, nj)
+                if (!walked && blocked(ni, nj, inflate) && hypot((ni - si).toDouble(), (nj - sj).toDouble()) > inflate) continue
                 val step = if (di != 0 && dj != 0) sqrt(2.0) else 1.0
                 val unknownCost = if (value(ni, nj) == null) 0.6 else 0.0
                 // Près d'un obstacle : un peu plus cher (il passe au milieu des portes plutôt qu'en frôlant).
@@ -177,7 +190,7 @@ class NavGrid(val cell: Double = 0.1) {
         var c: Long? = best
         while (c != null) { path.add(center(ki(c)) to center(kj(c))); c = from[c] }
         path.reverse()
-        return simplify(path)
+        return if (useTrail) path else simplify(path)
     }
 
     /** Garde les virages seulement (des segments droits) : moins d'arrêts. */
@@ -259,7 +272,7 @@ class NavGrid(val cell: Double = 0.1) {
     /** Part de la surface connue (m²) : pour dire « j'ai exploré 18 m² ». */
     fun knownArea(): Double = synchronized(cells) { cells.values.count { it < CLEAR } * cell * cell }
 
-    fun clear() = synchronized(cells) { cells.clear(); cliffs.clear() }
+    fun clear() = synchronized(cells) { cells.clear(); cliffs.clear(); trail.clear() }
 
     /** Les carreaux connus autour de (x, y), à [radius] carreaux au plus : (i, j, valeur), et les vides. Pour la tablette. */
     fun around(x: Double, y: Double, radius: Int = 50): Pair<List<Triple<Int, Int, Float>>, List<Pair<Int, Int>>> = synchronized(cells) {

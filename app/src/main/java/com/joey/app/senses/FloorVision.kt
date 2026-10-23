@@ -64,6 +64,9 @@ class FloorVision(
 
     val ready: Boolean get() = model != null
 
+    /** Dispersion apprise du sol (luminosité, chrominances) : grande sur un tapis bariolé. */
+    val spreadNow: DoubleArray get() = spread.copyOf()
+
     /**
      * Analyse une image (pixels ARGB, [w] × [h], à l'endroit). [pitchDeg] : inclinaison de la caméra (négatif = vers le
      * sol), [hfov]/[vfov] : champ de la caméra en degrés. [halfWidth] : demi-largeur de son corps (m).
@@ -98,6 +101,38 @@ class FloorVision(
             if (lateral <= halfWidth || abs(r.bearing) < 8) clear = min(clear, r.distance)
         }
         return Result(rays, clear, floorSeen >= columns / 2)
+    }
+
+    companion object {
+        /** Ce qui se pose au sol et qu'il ne doit pas percuter (noms du détecteur d'objets). Pas « person » : il doit pouvoir venir vers toi. */
+        val OBSTACLE_LABELS = setOf("chair", "couch", "bed", "dining table", "potted plant", "toilet", "bench", "dog", "cat",
+            "suitcase", "backpack", "handbag", "refrigerator", "oven", "sink", "toaster", "microwave", "tv")
+    }
+
+    /**
+     * Les meubles et animaux reconnus par le détecteur d'objets (boîtes, coordonnées 0..1) : le bas de la boîte touche le
+     * sol, ce qui donne leur distance. Renvoie la place libre devant (m) dans le couloir de son corps, l'infini sinon.
+     * Complète l'apparence du sol, qui ne voit pas un pied de chaise en bois clair sur un tapis crème (24/10).
+     */
+    fun objectClear(boxes: List<Box>, pitchDeg: Double, hfov: Double, vfov: Double, halfWidth: Double = 0.19): Double {
+        var clear = Double.POSITIVE_INFINITY
+        val margin = halfWidth + 0.05
+        for (b in boxes) {
+            val d = fracToDistance((b.cy + b.h / 2).coerceIn(0.0, 1.0), pitchDeg, vfov)
+            if (d.isInfinite()) continue
+            val left = tan(Math.toRadians(((b.cx - b.w / 2) - 0.5) * hfov)) * d
+            val right = tan(Math.toRadians(((b.cx + b.w / 2) - 0.5) * hfov)) * d
+            if (left <= margin && right >= -margin) clear = min(clear, d)
+        }
+        return clear
+    }
+
+    /** Hauteur dans l'image (0 en haut, 1 en bas) -> distance au sol (m) ; l'infini au-dessus de l'horizon. */
+    fun fracToDistance(frac: Double, pitchDeg: Double, vfov: Double): Double {
+        val off = frac * 2 - 1
+        val below = -pitchDeg + Math.toDegrees(atan(off * tan(Math.toRadians(vfov / 2))))
+        if (below <= 1.0) return Double.POSITIVE_INFINITY
+        return cameraHeight / tan(Math.toRadians(below))
     }
 
     /** Ligne de l'image (0 en haut) -> distance au sol (m) devant la caméra ; l'infini si la ligne est au-dessus de l'horizon. */

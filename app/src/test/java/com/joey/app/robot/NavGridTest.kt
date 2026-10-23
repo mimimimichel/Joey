@@ -81,4 +81,24 @@ class NavGridTest {
         assertTrue(h.occupied(h.idx(2.0), h.idx(-0.5)))
         assertTrue(h.free(h.idx(0.5), h.idx(0.0)))
     }
+
+    /** 24/10 : glissé entre deux chaises (passage de 45 cm, plus étroit que sa marge), il ne trouvait plus le retour. */
+    @Test fun revientParOuIlEstPasse() {
+        val g = NavGrid()
+        // Des pieds de chaise de part et d'autre d'un passage de 45 cm, de x = 1 à 2 m.
+        var x = 1.0
+        while (x <= 2.0) { repeat(3) { g.markObstacle(x, 0.0, 90.0, 0.225) ; g.markObstacle(x, 0.0, -90.0, 0.225) }; x += 0.05 }
+        // Il y est passé, en ligne droite, de 0 à 2,5 m.
+        x = 0.0
+        while (x <= 2.5) { g.markRobot(x, 0.0); x += 0.05 }
+        // Tout autour : bouché (on ne veut pas qu'il fasse le tour par l'inconnu).
+        for (y in listOf(-0.6, 0.6)) { var xx = -0.5; while (xx <= 3.0) { repeat(3) { g.markObstacle(xx, y, if (y > 0) 90.0 else -90.0, 0.0) }; xx += 0.05 } }
+        for (xx in listOf(-0.5, 3.0)) { var y = -0.6; while (y <= 0.6) { repeat(3) { g.markObstacle(xx, y, 0.0, 0.0) }; y += 0.05 } }
+        val back = g.plan(2.5, 0.0, 0.0, 0.0)
+        assertNotNull("pas de retour par son propre chemin", back)
+        back!!
+        assertTrue("$back", hypot(back.last().first, back.last().second) < 0.25)
+        // Le retour reste dans le passage (pas à travers les pieds).
+        assertTrue("$back", back.all { kotlin.math.abs(it.second) < 0.2 })
+    }
 }

@@ -13,7 +13,8 @@ Tout passe par `python3 joey.py …` (dans ce dossier). Lis `python3 joey.py` po
 
 - `state` : son état (conversation, batteries, roues branchées ou non, carte, place libre devant).
 - `feed` : ce qu'il a pensé et fait depuis ton dernier appel (ce qu'il entend, dit, les outils et leurs résultats).
-- `frame photo.jpg` puis lis l'image : c'est ce qu'il voit. Fais-le souvent : c'est ta preuve.
+- `frame photo.jpg` puis lis l'image : c'est ce qu'il voit. Fais-le souvent : c'est ta preuve. (Avant la 0.65, la
+  première image pouvait dater de plusieurs minutes : refais une demande si l'image ne colle pas.)
 - `map` : sa carte en texte (`#` obstacle, `.` libre, `!` vide/marche, `R` lui).
 - `tool NOM '{json}'` : lance un de ses outils et attend le résultat. Les outils et leurs paramètres sont dans `app/src/main/java/com/joey/app/brain/JoeyPrompt.kt`
   (liste `TOOLS`). Exemples : `tool etat`, `tool avancer '{"metres":0.3}'`, `tool tourner_corps '{"degres":90}'`,
@@ -32,7 +33,11 @@ Tout passe par `python3 joey.py …` (dans ce dossier). Lis `python3 joey.py` po
 - Au moindre doute (bruit anormal dans `feed`, « coincé », « vide », « liaison coupée », image bizarre) : `cmd stop`,
   puis regarde.
 - Ne change pas ses réglages ni sa mémoire sans raison, et dis-le dans ton rapport si tu l'as fait.
-- Tu ne touches pas au code ici : tu testes et tu rapportes (Claude, dans le cloud, corrige la nuit).
+- Depuis le 24/10/2026, le développement se fait sur ce PC (dossier `~/projets/joey-dev`, jamais dans le clone de
+  l'installation automatique, qu'elle remet à zéro) : tu peux corriger, tester, pousser sur la branche. La routine
+  cloud de nuit est en pause.
+- Pendant les tests, l'écran du téléphone reste noir (AMOLED) : tout appel `tool` l'éteint pour 10 min ;
+  `cmd visage` le rallume, `cmd test` l'éteint. « Joey » (mot de réveil) ou un appui sur l'écran le rallument aussi.
 
 ## Comment tester
 

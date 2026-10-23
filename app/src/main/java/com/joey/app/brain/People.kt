@@ -57,14 +57,17 @@ class People(private val file: File) {
 
     fun names(): List<String> = synchronized(people) { people.map { it.name } }
 
-    /** Ajoute des empreintes à une personne (créée si besoin ; nom comparé sans majuscules). */
-    fun learn(name: String, prints: List<FloatArray>) = synchronized(people) {
+    /**
+     * Ajoute des empreintes à une personne (créée si besoin ; nom comparé sans majuscules). [quiet] : complément
+     * automatique (il la reconnaît et affine) : partagé avec la synchro périodique, pas tout de suite.
+     */
+    fun learn(name: String, prints: List<FloatArray>, quiet: Boolean = false) = synchronized(people) {
         val n = name.trim().replaceFirstChar { it.uppercase() }
         val p = people.firstOrNull { it.name.equals(n, ignoreCase = true) } ?: Person(n, ArrayList()).also { people.add(it) }
         p.prints.addAll(prints)
         while (p.prints.size > 40) p.prints.removeAt(0)
         dirty.add(n.lowercase()); forgotten.remove(n.lowercase())
-        save()
+        save(silent = quiet)
     }
 
     fun forget(name: String): Boolean = synchronized(people) {

@@ -1230,10 +1230,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val prev = lastCandidate
         lastCandidate = name
         if (name == null || name != prev) return
-        // Reconnu avec certitude : il complète le visage (lumière, angle, coiffure du jour…), au plus toutes les 30 s.
-        if (score >= 0.62f && now - (enrichedAt[name] ?: 0L) > 30_000) {
+        // Reconnu avec certitude : il complète le visage (lumière, angle, coiffure du jour…), au plus toutes les 2 min.
+        // (Au plus toutes les 2 min, et partagé avec la synchro périodique : le journal du 23/10 montrait un envoi du
+        // visage complet toutes les 30 s.)
+        if (score >= 0.62f && now - (enrichedAt[name] ?: 0L) > 120_000) {
             enrichedAt[name] = now
-            people.learn(name, listOf(print))
+            people.learn(name, listOf(print), quiet = true)
         }
         seeingName = name
         seeingAt = now

@@ -85,6 +85,7 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
         var unsticks = 0
         var lastStop: Pair<Double, Double>? = null
         var dodge = 0
+        var cliffs = 0
         for (attempt in 0 until tries) {
             if (hypot(tx - r.x, ty - r.y) < 0.3) return "arrivé"
             val path = grid.plan(r.x, r.y, tx, ty) ?: return "pas de chemin sur ma carte (tout est bouché par là)"
@@ -96,8 +97,16 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
             travelled += hypot(r.x - before.first, r.y - before.second)
             log("🧭 trajet ${attempt + 1} : ${path.size - 1} segment(s) vers (%.1f ; %.1f) -> $res".format(tx, ty))
             when {
+                // Un vide (marche, escalier) : noté sur la carte comme infranchissable ; il recule, se tourne et cherche un
+                // autre chemin (comme un aspirateur robot), et n'abandonne qu'après plusieurs vides.
+                res.contains("vide") && !res.contains("roue soulevée") && cliffs < 8 -> {
+                    cliffs++
+                    log("🕳️ Vide devant : je recule et je contourne")
+                    r.drive(if (r.reversed) 0.2 else -0.2)
+                    r.turn(if (cliffs % 2 == 1) 60.0 else -120.0)
+                }
                 res.contains("liaison") || res.contains("vide") || res.startsWith("je ne roule pas") || res == "interrompu" ||
-                    res.contains("roue soulevée") || res.startsWith("arrêté") -> return "arrêté : $res"
+                    res.contains("roue soulevée") || res.startsWith("arrêté") -> return if (res.startsWith("arrêté")) res else "arrêté : $res"
                 res.startsWith("obstacle vu") -> {
                     log("👁️ $res") // vu à temps, noté sur la carte : on recalcule le chemin
                     // Arrêté deux fois au même endroit : il recule un peu et pivote avant de recalculer (sinon impasse).

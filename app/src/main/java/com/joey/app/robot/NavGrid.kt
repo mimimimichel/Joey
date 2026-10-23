@@ -105,7 +105,8 @@ class NavGrid(val cell: Double = 0.1) {
     /** Un vide (bord de marche) devant lui : interdit pour toujours. */
     fun markCliff(x: Double, y: Double, headingDeg: Double) = synchronized(cells) {
         val t = Math.toRadians(headingDeg)
-        for (d in listOf(0.18, 0.25)) for (a in listOf(-30.0, 0.0, 30.0)) {
+        // Un arc large et profond : le vide continue sûrement au-delà du bord senti (il en apprend la forme plus vite).
+        for (d in listOf(0.18, 0.26, 0.34)) for (a in listOf(-45.0, -22.0, 0.0, 22.0, 45.0)) {
             val ta = t + Math.toRadians(a)
             val k = key(idx(x + d * cos(ta)), idx(y + d * sin(ta)))
             cliffs.add(k); cells[k] = MAX

@@ -17,6 +17,9 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
     var blocked = false // coincé : les roues ne tournent plus
     /** Le monde simulé : true si (x, y) est dans un obstacle (mur, meuble). Le pare-chocs s'enfonce dedans. */
     var wall: ((Double, Double) -> Boolean)? = null
+    /** Un vide (escalier) : les capteurs de vide à l'avant (à 15 cm du centre) le sentent. */
+    var hole: ((Double, Double) -> Boolean)? = null
+    var maxInHole = 0.0
     var bumpAuto = false
     var bumps = 0
     var mute = false    // fil qui bouge : il n'entend plus rien
@@ -51,7 +54,13 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
             if (!hit) bumpAuto = false
         }
         x += d * cos(Math.toRadians(h)); y += d * sin(Math.toRadians(h)); h += dth
-        if (cliff && mode >= 2) mode = 1 // le mode sécurité le rend passif
+        hole?.let { z ->
+            // Les capteurs de vide sont devant ; le centre du robot ne doit jamais se retrouver au-dessus du vide.
+            cliff = listOf(-30.0, 0.0, 30.0).any { a -> z(x + 0.15 * cos(Math.toRadians(h + a)), y + 0.15 * sin(Math.toRadians(h + a))) }
+            if (z(x, y)) maxInHole = 1.0
+            if (cliff && mode >= 2 && right + left > 0) mode = 1 // comme le vrai : avancer vers un vide est interdit, reculer non
+        }
+        if (cliff && mode >= 2 && right + left > 0) mode = 1 // le mode sécurité le rend passif (s'il avance vers le vide)
         if (onBase && x < -0.1) onBase = false
     }
 

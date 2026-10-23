@@ -53,6 +53,9 @@ class Head(
         }
     }
 
+    /** Tours de la tête par rapport au corps (câble vers le Roomba) : jamais plus d'un demi-tour de chaque côté. */
+    @Volatile var twist: CableTwist? = null
+
     /** Sens du joystick pour faire tourner à droite / lever, mesurés avec le téléphone (0 = pas encore mesuré). */
     @Volatile var phonePanSign = 0
         private set
@@ -205,11 +208,15 @@ class Head(
         val start = cur() ?: return blindLook(panRight, tilt, maxSpeed)
         if (homePan == null) homePan = start.first
         val speedMax = min(maxSpeed, stickCap)
-        val panTarget = panRight?.let { start.first + it }
+        // Câble : le même mouvement, ou par l'autre côté s'il entortillerait le câble (alors plus de 180°).
+        val pr = panRight?.let { twist?.safe(it) ?: it }
         val tiltTarget = tilt?.coerceIn(TILT_MIN, TILT_MAX)
-        val limit = timeoutMs ?: timeFor(maxOf(abs(panRight ?: 0.0), tiltTarget?.let { abs(it - start.second) } ?: 0.0), speedMax)
+        val limit = timeoutMs ?: timeFor(maxOf(abs(pr ?: 0.0), tiltTarget?.let { abs(it - start.second) } ?: 0.0), speedMax)
         moving = true
-        gazeX = (panRight?.let { sign(it) } ?: 0.0).toFloat()
+        gazeX = (pr?.let { sign(it) } ?: 0.0).toFloat()
+        // On compte ce qui a été tourné (et pas un cap à atteindre) : un mouvement de plus de 180° va bien du bon côté.
+        var turned = 0.0
+        var lastPan = start.first
         gazeY = (tiltTarget?.let { sign(it - start.second) } ?: 0.0).toFloat()
         val ps = panStick()
         val ts = tiltStick()
@@ -217,7 +224,9 @@ class Head(
         try {
             while (!cancelled && now() - t0 < limit) {
                 val c = cur() ?: break
-                val ePan = panTarget?.let { wrap(it - c.first) } ?: 0.0
+                turned += wrap(c.first - lastPan)
+                lastPan = c.first
+                val ePan = pr?.let { it - turned } ?: 0.0
                 val eTilt = tiltTarget?.let { it - c.second } ?: 0.0
                 val panDone = abs(ePan) < 2.5
                 val tiltDone = abs(eTilt) < 2.5
@@ -317,7 +326,7 @@ class Head(
         val p = pose()
         if (p == null) { link.stick(0, 0); return true }
         val (oPan, oTilt) = runCatching { expression() }.getOrDefault(0.0 to 0.0)
-        val ePan = wrap(aimPan + oPan - p.first)
+        val ePan = wrap(aimPan + oPan - p.first).let { twist?.safe(it) ?: it }
         val eTilt = (aimTilt + oTilt).coerceIn(TILT_MIN, TILT_MAX) - p.second
         val max = maxStickNow()
         val sp = if (abs(ePan) < 1.5) 0 else speed(ePan, max) * panStick()
@@ -393,7 +402,8 @@ class Head(
         var dir = if (firstDir < 0) -1 else 1
         for (tilt in tilts) {
             if (cancelled) return false
-            look(null, tilt)
+            // Câble : un tour complet = d'un bord à l'autre (deux demi-tours), jamais un tour de plus dans le même sens.
+            twist?.let { tw -> look(tw.startForFullTurn(dir) - tw.value, tilt) } ?: look(null, tilt)
             if (found()) return true
             var last = cur()?.first ?: return false
             var turned = 0.0
@@ -401,7 +411,7 @@ class Head(
             moving = true
             gazeX = dir.toFloat()
             try {
-                while (!cancelled && turned < 365 && now() - t0 < limit) {
+                while (!cancelled && turned < 365 && now() - t0 < limit && twist?.blocks(dir.toDouble()) != true) {
                     link.stick(stick * dir * panStick(), 0)
                     sleep(50)
                     val p = cur()?.first ?: continue

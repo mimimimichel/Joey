@@ -110,6 +110,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<UiState> = _state
 
     val memory = Memory(File(app.filesDir, "memoire.json"))
+    /** Tours de la tête par rapport au corps (le câble vers le Roomba ne doit pas s'entortiller). */
+    private val cable = com.joey.app.gimbal.CableTwist()
     /** Ce qu'il apprend de ce qu'on lui dit : réglages ajustés, règles de conduite. */
     private val tuning = com.joey.app.life.Tuning(File(app.filesDir, "reglages.json"))
     private val people = com.joey.app.brain.People(File(app.filesDir, "personnes.json"))
@@ -1504,7 +1506,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val sign = if (flag("invert_pan", false)) -1 else 1
         if (x != 0f || y != 0f) follower.pause(4000)
         val speed = head.maxStickNow()
-        gimbal.stick((x * speed * sign).toInt(), (y * speed * viewTiltSign).toInt())
+        // Câble : pas plus d'un demi-tour de chaque côté, même à la main.
+        val px = if (cable.blocks(x.toDouble())) 0f else x
+        gimbal.stick((px * speed * sign).toInt(), (y * speed * viewTiltSign).toInt())
     }
 
     private fun background(name: String, body: () -> String): Unit = moveAsync(holdMs = 4000) { body() }
@@ -3214,6 +3218,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         ?: "pas branchées (Roomba)"),
                     "souvenirs" to memory.size,
                     "reglages_appris" to tuning.describe(),
+                    "cable_tete" to "tête tournée de $cable par rapport au corps (limite ±185°)",
                     "regles_apprises" to tuning.rules().size,
                     "visage_vu" to follower.sees,
                     "personne_reconnue" to (seeing() ?: "personne de connu en vue"),
@@ -3312,6 +3317,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         sensors.onShake = { shaken() }
         sensors.start()
         head.setPhoneSigns(prefs.getInt("phone_pan_sign", 0), prefs.getInt("phone_tilt_sign", 0))
+        // Câble vers le Roomba : on compte les tours de la tête par rapport au corps (10 fois par seconde).
+        head.twist = cable
+        thread(name = "cable", isDaemon = true) {
+            while (!cleared) {
+                runCatching {
+                    val ph = sensors.read()
+                    // Tête presque à la verticale : son cap ne veut plus rien dire, on reprend après.
+                    if (ph != null && kotlin.math.abs(ph.second) < 70) cable.update(ph.first, roomba?.heading) else cable.pause()
+                }
+                Thread.sleep(100)
+            }
+        }
         thread(name = "visee-casque", isDaemon = true) { aimLoop() }
         thread(name = "vie", isDaemon = true) { lifeLoop() }
         prefs.getString("speed_table", null)?.let { t ->

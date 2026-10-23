@@ -254,6 +254,15 @@ class NavGrid(val cell: Double = 0.1) {
 
     fun clear() = synchronized(cells) { cells.clear(); cliffs.clear() }
 
+    /** Les carreaux connus autour de (x, y), à [radius] carreaux au plus : (i, j, valeur), et les vides. Pour la tablette. */
+    fun around(x: Double, y: Double, radius: Int = 50): Pair<List<Triple<Int, Int, Float>>, List<Pair<Int, Int>>> = synchronized(cells) {
+        val ci = idx(x); val cj = idx(y)
+        val c = cells.entries.filter { abs(ki(it.key) - ci) <= radius && abs(kj(it.key) - cj) <= radius && abs(it.value) > 0.8f }
+            .map { Triple(ki(it.key), kj(it.key), it.value) }
+        val v = cliffs.filter { abs(ki(it) - ci) <= radius && abs(kj(it) - cj) <= radius }.map { ki(it) to kj(it) }
+        c to v
+    }
+
     // ---- sauvegarde (seulement quand le repère est sa base : sinon d'une fois sur l'autre les repères diffèrent) ----
     fun save(f: File) = synchronized(cells) {
         val o = JSONObject().put("cell", cell)

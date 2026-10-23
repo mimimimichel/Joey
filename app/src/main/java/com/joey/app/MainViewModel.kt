@@ -265,6 +265,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Journal de bord sur le téléphone (exportable) : conversations, actions, mesures. */
     private val journal = com.joey.app.brain.Journal(File(app.filesDir, "journal"))
     /** Le journal part aussi dans Supabase (pour que Claude voie ce qui se passe), si activé. */
+    /** Ce qu'il pense et fait, pour la tablette (déclaré avant le journal en ligne : il le remplit dès le démarrage). */
+    private val tabletFeed = com.joey.app.remote.TabletFeed()
+
     private val upload = com.joey.app.remote.JournalUpload(
         url = BuildConfig.SUPABASE_URL, key = BuildConfig.SUPABASE_KEY,
         device = (prefs.getString("device_id", null) ?: java.util.UUID.randomUUID().toString().take(8).also {
@@ -273,7 +276,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         version = BuildConfig.VERSION_NAME,
         enabled = { flag("upload_journal", true) && !android.os.Build.FINGERPRINT.contains("robolectric", ignoreCase = true) },
     ).also { u ->
-        journal.onLine = { at, kind, text -> u.add(at, kind, text) }
+        journal.onLine = { at, kind, text -> u.add(at, kind, text); tabletFeed.add(at, kind, text) }
         u.start()
     }
 
@@ -3907,6 +3910,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         thread(name = "visee-casque", isDaemon = true) { aimLoop() }
+        // La tablette (et le casque) peuvent se connecter à tout moment : le serveur démarre avec l'app.
+        if (flag("tablet", true)) thread(name = "tablette", isDaemon = true) { Thread.sleep(3000); if (!cleared) runCatching { setHeadset(true, quiet = true) } }
         thread(name = "vie", isDaemon = true) { lifeLoop() }
         thread(name = "autonome", isDaemon = true) { autonomyLoop() }
         prefs.getString("speed_table", null)?.let { t ->
@@ -3924,7 +3929,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var questYaw0 = 0.0
     @Volatile private var questFollowing = false
 
-    fun setHeadset(on: Boolean) {
+    fun setHeadset(on: Boolean, quiet: Boolean = false) {
         if (!on) {
             headset?.stop()
             headset = null
@@ -3944,6 +3949,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             onAudioClients = ::headsetAudio,
             extra = { path ->
                 when {
+                    path.startsWith("/tablette") -> "text/html; charset=utf-8" to com.joey.app.remote.TabletPage.HTML.toByteArray()
+                    path.startsWith("/tab/") -> "application/json; charset=utf-8" to (runCatching { tablet(path) }
+                        .getOrElse { org.json.JSONObject().put("msg", "erreur : ${it.message}").toString() }).toByteArray()
                     path.startsWith("/events") -> "application/json; charset=utf-8" to watch.json().toByteArray()
                     path.startsWith("/snap") -> path.substringAfter("id=", "").toLongOrNull()?.let { watch.photo(it) }?.let { "image/jpeg" to it }
                     else -> null
@@ -3951,12 +3959,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             },
         )
         if (!h.start()) {
-            message("Impossible de lancer la vue casque (port 8080 occupé ?).")
+            if (!quiet) message("Impossible de lancer la vue casque (port 8080 occupé ?).")
             return
         }
         headset = h
         val url = h.urls().firstOrNull()
         _state.update { it.copy(headsetUrl = url ?: "") }
+        val tabletUrl = h.urls().firstOrNull { it.startsWith("https") }?.trimEnd('/')?.plus("/tablette")
+        log("📱 Tablette : ouvre " + (tabletUrl ?: "https://<adresse du téléphone>:8443/tablette") + " (même Wi-Fi)")
+        if (quiet) return
         message(if (url == null) "Vue casque prête, mais le téléphone n'est sur aucun Wi-Fi : connecte-le au même Wi-Fi que le casque."
             else "Dans le navigateur du Quest (même Wi-Fi), ouvre :\n$url\n\nAccepte l'avertissement (Avancé → Continuer), puis « 🥽 Entrer en VR » : " +
                 "la tête de Joey suit la tienne. Gâchette = « devant » ici ; grip = suivi marche/arrêt ; A = parler à Joey ; B = « cherche-moi ».")
@@ -4075,6 +4086,114 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ctx.init(kmf.keyManagers, null, null)
         ctx.serverSocketFactory
     }.getOrNull()
+
+    // ---- la tablette : voir, comprendre, piloter, parler -----------------------------------------------------
+    private fun tabletQuery(path: String): Map<String, String> = path.substringAfter('?', "").split('&').filter { '=' in it }
+        .associate { it.substringBefore('=') to java.net.URLDecoder.decode(it.substringAfter('='), "UTF-8") }
+
+    private fun tablet(path: String): String {
+        val q = tabletQuery(path)
+        return when {
+            path.startsWith("/tab/state") -> tabletState(q["since"]?.toLongOrNull() ?: 0L)
+            path.startsWith("/tab/map") -> tabletMap()
+            path.startsWith("/tab/say") -> tabletSay(q["t"].orEmpty())
+            path.startsWith("/tab/cmd") -> tabletCmd(q)
+            else -> org.json.JSONObject().put("msg", "?").toString()
+        }
+    }
+
+    private fun tabletState(since: Long): String {
+        val s = _state.value
+        val r = roomba
+        val ahead = floorClear.takeIf { !it.isNaN() && System.currentTimeMillis() - floorAt < 1000 }
+        return org.json.JSONObject()
+            .put("version", BuildConfig.VERSION_NAME)
+            .put("mood", s.mood.name.lowercase())
+            .put("live", when (s.live) { LiveState.OFF -> "en veille"; LiveState.CONNECTING -> "réveil…"; LiveState.LISTENING -> "écoute"; LiveState.SPEAKING -> "parle" })
+            .put("thinking", isThinking())
+            .put("busy", s.busy || following)
+            .put("tracking", s.tracking ?: (if (following) "toi (il te suit)" else ""))
+            .put("seeing", seeing() ?: (if (follower.sees) "quelqu'un" else ""))
+            .put("joey", s.lines.lastOrNull { it.joey }?.text?.trim() ?: "")
+            .put("phone", phoneBattery())
+            .put("roomba", s.roomba ?: org.json.JSONObject.NULL)
+            .put("gimbal", if (s.gimbal == GimbalState.READY) "prête" + (gimbal.battery.takeIf { it >= 0 }?.let { " $it %" } ?: "") else s.gimbal.name.lowercase())
+            .put("map", "%.0f m²".format(grid.knownArea()) + if (gridAnchored) " (base)" else "")
+            .put("ahead", ahead?.let { if (it.isInfinite()) "libre" else "%.0f cm".format(it * 100) } ?: "—")
+            .put("autonomy", flag("autonomy", false))
+            .put("vacuum", r?.vacuuming == true)
+            .put("feed", tabletFeed.since(since))
+            .toString()
+    }
+
+    private fun tabletMap(): String {
+        val r = roomba
+        val x = r?.x ?: 0.0; val y = r?.y ?: 0.0
+        val (cells, cliffs) = grid.around(x, y, 45)
+        val o = org.json.JSONObject().put("cell", grid.cell).put("radius", 45).put("rx", x).put("ry", y).put("rh", r?.heading ?: 0.0)
+            .put("base", gridAnchored)
+            .put("info", if (r == null) "roues non branchées" else "%.0f m² connus%s".format(grid.knownArea(), if (gridAnchored) ", repère = la base" else ""))
+        o.put("cells", org.json.JSONArray().also { a -> cells.forEach { c -> a.put(org.json.JSONArray().put(c.first).put(c.second).put(c.third.toDouble())) } })
+        o.put("cliffs", org.json.JSONArray().also { a -> cliffs.forEach { c -> a.put(org.json.JSONArray().put(c.first).put(c.second)) } })
+        val places = org.json.JSONArray(); val items = org.json.JSONArray()
+        if (gridAnchored) houseMap.all().forEach { p ->
+            if (p.x != null && p.y != null) places.put(org.json.JSONObject().put("n", p.name).put("x", p.x).put("y", p.y))
+            p.items.filter { it.x != null }.take(30).forEach { items.put(org.json.JSONObject().put("n", it.name).put("x", it.x).put("y", it.y)) }
+        }
+        o.put("places", places).put("items", items)
+        o.put("people", org.json.JSONArray().also { a -> personSeenAt.forEach { (n, v) ->
+            if (System.currentTimeMillis() - v.third < 3 * 3600_000L) a.put(org.json.JSONObject().put("n", n.replaceFirstChar { it.uppercase() }).put("x", v.first).put("y", v.second)) } })
+        return o.toString()
+    }
+
+    /** Ce qu'on lui écrit depuis la tablette : comme si on le lui disait (la conversation démarre si besoin). */
+    private fun tabletSay(text: String): String {
+        val t = text.trim()
+        if (t.isEmpty()) return org.json.JSONObject().put("msg", "").toString()
+        journal.write("toi", "(tablette) $t")
+        val l = live
+        if (l != null) { l.userText(t); return org.json.JSONObject().put("msg", "").toString() }
+        if (geminiKey.isBlank()) return org.json.JSONObject().put("msg", "pas de clé Gemini sur le téléphone").toString()
+        // Pas de conversation : on la lance, puis on lui transmet le message quand elle est prête.
+        thread(isDaemon = true) {
+            runCatching { android.os.Handler(android.os.Looper.getMainLooper()).post { if (live == null) micPressed() } }
+            val end = System.currentTimeMillis() + 15_000
+            while (System.currentTimeMillis() < end && _state.value.live != LiveState.LISTENING) Thread.sleep(200)
+            live?.userText(t)
+        }
+        return org.json.JSONObject().put("msg", "je le réveille…").toString()
+    }
+
+    @Volatile private var tabletDriving = false
+
+    private fun tabletCmd(q: Map<String, String>): String {
+        val r = roomba
+        val msg: String = when (q["c"]) {
+            "drive" -> {
+                val f = q["f"]?.toDoubleOrNull() ?: 0.0
+                val t = q["t"]?.toDoubleOrNull() ?: 0.0
+                if (r == null) "roues non branchées" else {
+                    if (kotlin.math.abs(f) > 0.05 || kotlin.math.abs(t) > 0.05) {
+                        if (!tabletDriving) { tabletDriving = true; following = false; wheelGen.incrementAndGet(); if (_state.value.busy) motionJob?.cancel(true); r.stop() }
+                        r.manual(f * f * kotlin.math.sign(f) * 0.45, t * kotlin.math.abs(t) * 120.0)
+                    } else if (tabletDriving) { tabletDriving = false; r.manual(0.0, 0.0) }
+                    ""
+                }
+            }
+            "head" -> { manualStick((q["x"]?.toFloatOrNull() ?: 0f), (q["y"]?.toFloatOrNull() ?: 0f)); "" }
+            "stop" -> { padButton(com.joey.app.remote.Gamepad.Button.B); "arrêté" }
+            "vacuum" -> { if (r == null) "roues non branchées" else { thread(isDaemon = true) { log("🧹 " + r.vacuum(!r.vacuuming)) }; "" } }
+            "dock" -> { if (r == null) "roues non branchées" else { thread(isDaemon = true) { following = false; log("🛞 " + r.seekDock()) }; "il rentre à sa base" } }
+            "center" -> { recenter(); "" }
+            "come" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 3000) { comeHere() }; "il vient vers toi (vers la personne qu'il voit)" } }
+            "explore" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 3000) { explore(null, 120) }; "il explore (2 min)" } }
+            "map" -> { if (!canTurnGaze) "ni nacelle ni roues" else { moveAsync(holdMs = 2000) { if (roomba != null) mapHouse() else mapHere("ici") }; "il cartographie" } }
+            "autonomy" -> { val on = !flag("autonomy", false); setFlagValue("autonomy", on); log(if (on) "🤖 Mode autonome activé (tablette)" else "🤖 Mode autonome arrêté (tablette)"); if (on) "mode autonome" else "mode autonome arrêté" }
+            "sleep" -> { if (live != null) stopLive(); "il dort (dis « Joey » pour le réveiller)" }
+            else -> "commande inconnue"
+        }
+        return org.json.JSONObject().put("msg", msg).toString()
+    }
 
     private fun headsetState(): String {
         val s = _state.value

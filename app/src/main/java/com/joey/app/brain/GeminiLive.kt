@@ -392,6 +392,9 @@ class GeminiLive(
     /** Signale un événement à l'IA ; [reply] : elle doit y répondre. */
     fun event(text: String, reply: Boolean) = clientText("[Message de l'application, pas de la personne] $text", reply)
 
+    /** Ce que la personne écrit (depuis la tablette) : comme si elle le disait. */
+    fun userText(text: String) = clientText(text, true)
+
     // ---- image de la caméra, 1 par seconde (le maximum de Gemini Live) ----------------------
     @Volatile private var lastFrameAt = 0L
     private val frameLock = Any()

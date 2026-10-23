@@ -116,8 +116,11 @@ class NavGrid(val cell: Double = 0.1) {
     fun occupied(i: Int, j: Int) = (value(i, j) ?: 0f) > OCC
     fun free(i: Int, j: Int) = (value(i, j) ?: 0f) < CLEAR
 
-    /** Marge autour des obstacles, en carreaux : au moins le rayon de son corps (sinon il frôle et accroche). */
-    private fun inflation() = Math.ceil((ROBOT_RADIUS + 0.02) / cell).toInt()
+    /**
+     * Marge autour des obstacles, en carreaux : son rayon et une marge (≈ 30 cm). Avec moins, le chemin frôlait les
+     * angles de meubles : la caméra les voyait dans son couloir et l'arrêtait sans fin (vu dans le simulateur).
+     */
+    private fun inflation() = Math.ceil((ROBOT_RADIUS + 0.10) / cell).toInt()
 
     /** Un carreau trop près d'un obstacle pour que son corps y passe. */
     private fun blocked(i: Int, j: Int, inflate: Int): Boolean {

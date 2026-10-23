@@ -399,6 +399,7 @@ private fun SettingsDialog(vm: MainViewModel, s: com.joey.app.UiState, close: ()
                 Toggle("Tablette : voir, piloter et parler à Joey depuis https://<adresse>:8443/tablette (même Wi-Fi)", vm.flagValue("tablet", true)) {
                     vm.setFlagValue("tablet", it); vm.setHeadset(it, quiet = true)
                 }
+                Text("🔑 Code pilote (tests depuis le PC, tools/joey-pilot) : ${vm.pilotToken()}", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
                 Toggle("Mode autonome (il explore, va voir qui arrive, rentre à sa base ; 8 h - 22 h)", vm.flagValue("autonomy", false)) { vm.setFlagValue("autonomy", it) }
                 Toggle("Garder le Roomba éveillé (sinon il s'endort au bout de 5 min)", vm.flagValue("roomba_awake", true)) { vm.setFlagValue("roomba_awake", it) }
                 Toggle("Le Roomba bipe quand Joey parle (babil de robot)", vm.flagValue("roomba_babble", true)) { vm.setFlagValue("roomba_babble", it) }

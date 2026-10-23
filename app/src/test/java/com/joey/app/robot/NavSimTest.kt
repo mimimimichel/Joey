@@ -27,7 +27,7 @@ class NavSimTest {
         r.connect()
         Thread.sleep(200)
         val g = NavGrid()
-        val n = Navigator(r, g)
+        val n = Navigator(r, g) { println("[nav] %.2f,%.2f cap %.0f : %s".format(f.x, f.y, f.h, it)) }
         r.onContact = { k, s -> n.contact(k, s) }
         val sim = Sim(f, r, g, n)
         // La carte suit ses passages (comme le fil « câble » de l'app).
@@ -41,10 +41,14 @@ class NavSimTest {
                 return Double.POSITIVE_INFINITY
             }
             var last = listOf<Pair<Double, Double>>()
-            r.visionClear = { last.filter { kotlin.math.abs(it.first) <= 10 }.minOfOrNull { it.second } }
+            // Comme la vraie : une direction tous les 4° sur ±30°, et la place libre dans le couloir de son corps.
+            r.visionClear = {
+                last.filter { (b, d) -> kotlin.math.abs(b) < 8 || kotlin.math.abs(kotlin.math.tan(Math.toRadians(b))) * minOf(d, 3.0) <= 0.19 }
+                    .minOfOrNull { it.second }
+            }
             thread(isDaemon = true) {
                 while (sim.running) {
-                    last = (-30..30 step 10).map { b -> b.toDouble() to ray(b.toDouble()) }
+                    last = (-30..30 step 4).map { b -> b.toDouble() to ray(b.toDouble()) }
                     n.vision(r.heading, last)
                     Thread.sleep(150)
                 }

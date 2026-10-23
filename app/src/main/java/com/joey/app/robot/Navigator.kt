@@ -48,11 +48,29 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
      */
     fun vision(baseHeading: Double, rays: List<Pair<Double, Double>>) {
         val x = robot.x; val y = robot.y
-        for ((bearing, dist) in rays) {
+        var prev: Pair<Double, Double>? = null // bout du rayon précédent (x, y), s'il touchait un obstacle
+        for ((bearing, dist) in rays.sortedBy { it.first }) {
             val b = baseHeading + bearing
             val d = if (dist.isInfinite()) 2.5 else dist.coerceAtMost(2.5)
             if (d > 0.3) grid.markFreeRay(x, y, b, d - 0.08)
-            if (!dist.isInfinite() && dist < 2.0) grid.markSeenObstacle(x, y, b, dist + 0.05)
+            if (!dist.isInfinite() && dist < 2.0) {
+                val t = Math.toRadians(b)
+                val px = x + (dist + 0.05) * kotlin.math.cos(t); val py = y + (dist + 0.05) * kotlin.math.sin(t)
+                grid.markSeenObstacle(x, y, b, dist + 0.05)
+                // Deux directions voisines qui touchent un obstacle à peu près à la même distance : c'est le même bord
+                // (le devant d'un meuble) : on le trace en entier, sinon le chemin passait entre les points.
+                prev?.let { (qx, qy) ->
+                    val gap = hypot(px - qx, py - qy)
+                    if (gap in 0.05..0.45) {
+                        val n = (gap / (grid.cell / 2)).toInt()
+                        for (k in 1 until n) {
+                            val ex = qx + (px - qx) * k / n; val ey = qy + (py - qy) * k / n
+                            grid.markSeenObstacle(x, y, Math.toDegrees(atan2(ey - y, ex - x)), hypot(ex - x, ey - y))
+                        }
+                    }
+                }
+                prev = px to py
+            } else prev = null
         }
     }
 
@@ -65,6 +83,8 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
         val startM = r.x to r.y
         var travelled = 0.0
         var unsticks = 0
+        var lastStop: Pair<Double, Double>? = null
+        var dodge = 0
         for (attempt in 0 until tries) {
             if (hypot(tx - r.x, ty - r.y) < 0.3) return "arrivé"
             val path = grid.plan(r.x, r.y, tx, ty) ?: return "pas de chemin sur ma carte (tout est bouché par là)"
@@ -74,10 +94,21 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
                 grid.speedFactor(x, y, h + if (r.reversed) 180.0 else 0.0).let { if (r.reversed) minOf(it, 0.6) else it }
             }
             travelled += hypot(r.x - before.first, r.y - before.second)
+            log("🧭 trajet ${attempt + 1} : ${path.size - 1} segment(s) vers (%.1f ; %.1f) -> $res".format(tx, ty))
             when {
                 res.contains("liaison") || res.contains("vide") || res.startsWith("je ne roule pas") || res == "interrompu" ||
                     res.contains("roue soulevée") || res.startsWith("arrêté") -> return "arrêté : $res"
-                res.startsWith("obstacle vu") -> log("👁️ $res") // vu à temps, noté sur la carte : on recalcule le chemin
+                res.startsWith("obstacle vu") -> {
+                    log("👁️ $res") // vu à temps, noté sur la carte : on recalcule le chemin
+                    // Arrêté deux fois au même endroit : il recule un peu et pivote avant de recalculer (sinon impasse).
+                    val here = r.x to r.y
+                    val again = lastStop?.let { hypot(it.first - here.first, it.second - here.second) < 0.06 } == true
+                    lastStop = here
+                    if (again) {
+                        r.drive(-0.12)
+                        r.turn(if (dodge++ % 2 == 0) 35.0 else -70.0)
+                    }
+                }
                 res.contains("obstacle") || res.contains("bloqué") -> log("🛞 ${r.unstick(unsticks++ % 3)}")
             }
             if (hypot(tx - r.x, ty - r.y) < 0.35) return "arrivé"

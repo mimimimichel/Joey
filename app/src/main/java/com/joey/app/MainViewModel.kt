@@ -3923,6 +3923,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(headsetUrl = url ?: "") }
         val tabletUrl = h.urls().firstOrNull { it.startsWith("https") }?.trimEnd('/')?.plus("/tablette")
         log("📱 Tablette : ouvre " + (tabletUrl ?: "https://<adresse du téléphone>:8443/tablette") + " (même Wi-Fi)")
+        log("🔑 Code pilote (tests depuis le PC, tools/joey-pilot) : ${pilotToken()}")
         if (quiet) return
         message(if (url == null) "Vue casque prête, mais le téléphone n'est sur aucun Wi-Fi : connecte-le au même Wi-Fi que le casque."
             else "Dans le navigateur du Quest (même Wi-Fi), ouvre :\n$url\n\nAccepte l'avertissement (Avancé → Continuer), puis « 🥽 Entrer en VR » : " +
@@ -4054,6 +4055,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             path.startsWith("/tab/map") -> tabletMap()
             path.startsWith("/tab/say") -> tabletSay(q["t"].orEmpty())
             path.startsWith("/tab/cmd") -> tabletCmd(q)
+            path.startsWith("/tab/tool") -> pilotTool(q)
             else -> org.json.JSONObject().put("msg", "?").toString()
         }
     }
@@ -4118,6 +4120,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             live?.userText(t)
         }
         return org.json.JSONObject().put("msg", "je le réveille…").toString()
+    }
+
+    /** Code pour lancer ses outils depuis le PC (session Claude Code de test) : créé une fois, gardé. */
+    fun pilotToken(): String = prefs.getString("pilot_token", null) ?: java.util.UUID.randomUUID().toString().replace("-", "").take(10)
+        .also { prefs.edit().putString("pilot_token", it).apply() }
+
+    /**
+     * Le PC lance un de ses outils (comme Gemini le ferait) et attend le résultat : pour les tests en autonomie.
+     * Protégé par le code pilote (n'importe qui sur le Wi-Fi ne peut pas lui faire faire n'importe quoi).
+     */
+    private fun pilotTool(q: Map<String, String>): String {
+        if (q["k"] != pilotToken()) return org.json.JSONObject().put("erreur", "code pilote faux ou absent (k=…)").toString()
+        val name = q["name"].orEmpty()
+        val args = runCatching { org.json.JSONObject(q["args"] ?: "{}") }.getOrNull()
+            ?: return org.json.JSONObject().put("erreur", "args : JSON invalide").toString()
+        val map = HashMap<String, Any?>()
+        args.keys().forEach { k -> map[k] = args.get(k).let { v -> if (v == org.json.JSONObject.NULL) null else v } }
+        val t0 = System.currentTimeMillis()
+        journal.write("outil", "(pilote PC) $name $map")
+        val res = runCatching { runTool(name, map) }.getOrElse { mapOf("erreur" to (it.message ?: it.toString())) }
+        journal.write("outil", "(pilote PC) $name -> $res (${System.currentTimeMillis() - t0} ms)")
+        val o = org.json.JSONObject().put("outil", name).put("ms", System.currentTimeMillis() - t0)
+        res.forEach { (k, v) -> o.put(k, v?.toString() ?: org.json.JSONObject.NULL) }
+        return o.toString()
     }
 
     @Volatile private var tabletDriving = false

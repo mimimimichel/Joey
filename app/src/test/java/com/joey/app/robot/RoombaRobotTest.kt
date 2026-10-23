@@ -260,6 +260,33 @@ class RoombaRobotTest {
         r.disconnect()
     }
 
+    @Test fun getsAllSensorsBackAfterACableGlitch() {
+        val (f, r) = connected()
+        r.extendedRetryMs = 500
+        assertTrue("tous les capteurs au départ", r.extended)
+        f.mute = true // le fil bouge : plus rien
+        val t0 = System.currentTimeMillis()
+        while (r.extended && System.currentTimeMillis() - t0 < 8000) Thread.sleep(50)
+        assertTrue("repassé aux capteurs de base", !r.extended)
+        f.mute = false
+        val t1 = System.currentTimeMillis()
+        while (!r.extended && System.currentTimeMillis() - t1 < 8000) Thread.sleep(50)
+        assertTrue("de nouveau tous ses capteurs", r.extended)
+        r.disconnect()
+    }
+
+    @Test fun keepsAwakeButLetsItSeekItsDock() {
+        val (f, r) = connected()
+        r.awakeAfterMs = 300
+        f.mode = 1 // il est retombé en mode passif (au repos) : il s'endormirait au bout de 5 min
+        Thread.sleep(1200)
+        assertEquals("gardé éveillé (mode sécurité)", 2, f.mode)
+        r.seekDock() // il cherche sa base en mode passif : on ne doit pas l'interrompre
+        Thread.sleep(1200)
+        assertEquals("laissé chercher sa base", 1, f.mode)
+        r.disconnect()
+    }
+
     @Test fun seesItIsStuckAndGetsFree() {
         val (f, r) = connected()
         f.blocked = true

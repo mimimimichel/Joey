@@ -128,6 +128,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val gridFile = File(app.filesDir, "carte_grille.json")
     /** Repère de la carte = sa base (gardé d'une fois sur l'autre) ; sinon carte de la séance seulement. */
     @Volatile private var gridAnchored = false
+    /**
+     * Le repère des positions de sa carte : « base » s'il est parti de sa base (valable d'une fois sur l'autre), sinon
+     * celui de cette séance. Une pièce notée dans un autre repère n'a pas de position ici (journal du 23/10 : le « salon »
+     * d'une autre séance l'envoyait au fond de la cuisine).
+     */
+    @Volatile private var gridFrame = "seance-" + System.currentTimeMillis()
     /** Ce qu'il apprend de ce qu'on lui dit : réglages ajustés, règles de conduite. */
     private val tuning = com.joey.app.life.Tuning(File(app.filesDir, "reglages.json"))
     private val people = com.joey.app.brain.People(File(app.filesDir, "personnes.json"))
@@ -801,7 +807,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 lastSeenPan = Head.wrap(abs + dPan); lastSeenTilt = (pose.second + dTilt).coerceIn(-60.0, 60.0)
                 lastSeenAt = now
             }
-            if (!follower.enabled || !gimbal.ready || now < follower.pausedUntil || calibrating) { aimTarget = null; return }
+            if (!follower.enabled || !gimbal.ready || now < follower.pausedUntil || calibrating || roadGazeDepth.get() > 0) {
+                aimTarget = null; return
+            }
             val prev = aimTarget?.takeIf { now - aimTargetAt < 1000 }
             // Petite zone morte (4°) : la tête ne tremble pas pour un visage presque centré.
             var tp = pose.first + dPan
@@ -823,7 +831,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             head.aim(t.first, t.second)
         } else {
             val t = aimTarget ?: return
-            if (now < follower.pausedUntil || !follower.enabled) { aimTarget = null; return }
+            if (now < follower.pausedUntil || !follower.enabled || roadGazeDepth.get() > 0) { aimTarget = null; return }
             // Juste perdu : il finit d'aller là où il l'a vue (elle est sûrement là, un peu plus loin).
             if (now - aimTargetAt < 1200) { lastTrackAimAt = now; head.aim(t.first, t.second) } else aimTarget = null
         }
@@ -874,6 +882,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun conversationGaze(now: Long, s: UiState) {
         if (live == null || s.busy || !gimbal.ready || !follower.enabled || !flag("camera", true)) return
         if (follower.sees || now < follower.pausedUntil || trackLabels != null || dancing || questFollowing) return
+        if (now < gazeDirectedUntil) return
         if (now - lastTalkAt > 20_000 || now - lastGazeBack < 6000) return
         val since = now - follower.seenAt
         if (since < 2500 || now - lastSeenAt > 10 * 60_000L || lastSeenPan == null) return
@@ -1524,7 +1533,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val r = roomba ?: return noWheels
         missionStart = r.x to r.y
         // Il sait où c'est (vu en cartographiant) et c'est loin : il y va d'abord par sa carte, puis s'approche à vue.
-        if (gridAnchored) houseMap.find(what).firstOrNull { it.second.x != null }?.let { (place, item) ->
+        houseMap.find(what).firstOrNull { it.second.x != null && it.first.frame == gridFrame }?.let { (place, item) ->
             val ix = item.x!!; val iy = item.y!!
             val d = kotlin.math.hypot(ix - r.x, iy - r.y)
             if (d > 1.3) {
@@ -1982,6 +1991,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    @Volatile private var wheelFlipAskedAt = 0L
+
+    /**
+     * « Tu avances à l'envers » : on vérifie d'abord avec la caméra (le monde grossit-il en avançant ?). Journal du 23/10 :
+     * « tu vas dans le mauvais sens » (= pas au bon endroit) a fait inverser les roues, et il est reparti en reculant.
+     * Sans vérification possible, on n'inverse qu'à la deuxième demande (confirmée).
+     */
+    private fun adjustWheelDirection(how: String): String {
+        if (how == "normal") {
+            setFlagValue("roomba_reversed", false)
+            return "sens des roues : réglage d'origine (visage vers l'avant du Roomba)"
+        }
+        if (how != "inverse") return "pour sens_roues : « inverse » ou « normal »"
+        val r = roomba
+        if (r != null && flag("camera", true)) {
+            val test = moveSync(holdMs = 1000, timeoutMs = 20_000) { selfTestDirection(r) }
+            if (test.startsWith("sens : bon")) return "$test. Je n'ai RIEN changé. « Tu vas dans le mauvais sens » voulait sûrement " +
+                "dire « pas au bon endroit » : demande où aller, ou tourne-toi (tourner_corps)."
+            if (test.startsWith("sens : FAUX")) return test
+        }
+        val now = System.currentTimeMillis()
+        if (now - wheelFlipAskedAt > 3 * 60_000L) {
+            wheelFlipAskedAt = now
+            return "pas pu vérifier avec la caméra, rien changé. Demande d'abord : « quand je dois avancer, est-ce que je pars " +
+                "en arrière ? » ; ne rappelle cet outil que si on te répond oui."
+        }
+        wheelFlipAskedAt = 0L
+        val rev = !flag("roomba_reversed", false)
+        setFlagValue("roomba_reversed", rev)
+        return "sens des roues inversé (confirmé) : " + if (rev) "visage vers l'arrière du Roomba" else "visage vers l'avant du Roomba"
+    }
+
     /** Auto-test des angles : un quart de tour d'après les roues, mesuré par les capteurs du téléphone (sans nacelle). */
     private fun selfTestRotation(r: com.joey.app.robot.RoombaRobot): String {
         if (gimbal.ready) return "angles : pas mesurés (la nacelle stabilise le téléphone)"
@@ -2018,11 +2059,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             houseMap.place(tmp)?.let { p ->
                 // Son nom : ce qu'il y a vu (« chambre »), ou « chambre 2 » si une autre chambre est déjà ailleurs.
                 var name = p.kind.ifBlank { "pièce" }
-                val near = { q: com.joey.app.brain.HouseMap.Place -> q.x != null && p.x != null &&
+                val near = { q: com.joey.app.brain.HouseMap.Place -> q.x != null && p.x != null && q.frame == p.frame &&
                     kotlin.math.hypot(q.x!! - p.x!!, q.y!! - p.y!!) < 2.5 }
                 var k = 2
                 while (houseMap.place(name)?.let { it.name != tmp && !near(it) } == true) name = "${p.kind} ${k++}"
-                houseMap.put(name, p.kind, p.description, p.items, p.x, p.y)
+                houseMap.put(name, p.kind, p.description, p.items, p.x, p.y, p.frame)
                 houseMap.remove(tmp)
                 currentPlace = name
                 if (name !in done) done.add(name)
@@ -2047,6 +2088,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         var lastExploreAt = System.currentTimeMillis() - 25 * 60_000L
         var lastVisitAt = 0L
         var seenSince = 0L
+        var lastChargeTry = 0L
         while (!cleared) {
             Thread.sleep(15_000)
             runCatching {
@@ -2055,9 +2097,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val s = _state.value
                 val now = System.currentTimeMillis()
                 val h = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
-                if (h !in 8..21 || s.busy || following || dancing) return@runCatching
-                if (s.live == LiveState.SPEAKING || now - lastPersonTalkAt < 120_000) return@runCatching // on lui parle : il reste là
+                if (s.busy || following || dancing || s.live == LiveState.SPEAKING) return@runCatching
                 val battery = r.battery ?: 100
+                // Batterie faible, loin de sa base : il y rentre de lui-même se recharger (comme un aspirateur robot), à
+                // toute heure ; s'il n'y arrive pas, il réessaie dans 10 minutes.
+                if (battery < 25 && !r.charging && !r.onBase && now - lastChargeTry > 10 * 60_000L) {
+                    lastChargeTry = now
+                    log("🤖 Autonome : batterie à $battery %, je rentre me recharger")
+                    remark("La batterie de tes roues est à $battery % : dis-le en quelques mots, tu rentres te recharger à ta base.",
+                        minGapMs = 0)
+                    log("🔋 " + moveSync(holdMs = 1000, timeoutMs = 4 * 60_000L) { goHome() })
+                    return@runCatching
+                }
+                if (h !in 8..21) return@runCatching
+                if (now - lastPersonTalkAt < 120_000) return@runCatching // on lui parle : il reste là
                 if (battery < 30 || (r.charging && battery < 80)) return@runCatching
                 // Quelqu'un est là depuis peu (pas encore salué) : il va le voir.
                 if (follower.sees) { if (seenSince == 0L) seenSince = now } else seenSince = 0L
@@ -2099,9 +2152,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             r.resetOdometry()
             if (!gridAnchored) { grid.clear(); grid.load(gridFile) }
             gridAnchored = true
+            if (gridFrame != "base") personSeenAt.clear()
+            gridFrame = "base"
             log("🗺 Sur ma base : ma carte part d'ici (%.0f m² connus)".format(grid.knownArea()))
-        } else if (!gridAnchored) {
+        } else {
+            // Branché ailleurs que sur sa base : ses roues repartent de zéro ici, c'est une nouvelle carte (celle gardée
+            // part de la base : elle reviendra quand il y retournera).
             grid.clear()
+            gridAnchored = false
+            gridFrame = "seance-" + System.currentTimeMillis()
+            personSeenAt.clear()
         }
         wasOnBase = r.onBase
         nav?.resetTrack()
@@ -2145,9 +2205,58 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Va au point (x, y) de sa carte (voir [com.joey.app.robot.Navigator.navigateTo]) ; la tête regarde le sol devant. */
     private fun navigateTo(tx: Double, ty: Double, tries: Int = 8, budget: Double = 25.0): String {
         val n = nav ?: return noWheels
-        return n.navigateTo(tx, ty, tries, budget) { attempt ->
-            // La tête droit devant, un peu vers le sol : la caméra voit les obstacles avant le choc.
-            if (gimbal.ready && attempt == 0) { head.center(); head.look(null, -22.0) }
+        return withRoadGaze { n.navigateTo(tx, ty, tries, budget) { attempt -> roadLegStart(attempt) } }
+    }
+
+    // ---- la tête regarde la route pendant qu'il roule ------------------------------------------------------------
+    /**
+     * Pendant un trajet, la tête (nacelle) garde l'axe du corps, un peu vers le sol : la caméra voit les obstacles avant
+     * le choc. (Journal du 23/10 : la nacelle restait tournée vers là où elle regardait ; après chaque virage du Roomba
+     * la caméra regardait de côté, la vision du sol se coupait et il touchait les murs 13 fois de suite.)
+     */
+    private val roadGazeDepth = AtomicInteger(0)
+    @Volatile private var roadRecentering = false
+    private val ROAD_TILT = -22.0
+
+    private fun <T> withRoadGaze(body: () -> T): T {
+        if (!gimbal.ready || roomba == null) return body()
+        if (roadGazeDepth.getAndIncrement() == 0) {
+            follower.pause(Long.MAX_VALUE / 4) // ni suivi de visage, ni recherche de qui parle : la route d'abord
+            if (bodyRef == null) recenterForRoad()
+        }
+        try { return body() } finally {
+            if (roadGazeDepth.decrementAndGet() == 0) { head.stopAim(); follower.pausedUntil = System.currentTimeMillis() + 2000 }
+        }
+    }
+
+    /** La nacelle se remet droit devant le corps (sa propre commande, sans dérive) et on reprend le repère du corps. */
+    private fun recenterForRoad() {
+        roadRecentering = true
+        try { head.stopAim(); calibrateBody() } finally { roadRecentering = false }
+    }
+
+    /** Dans la boucle de la tête (25 fois par seconde) : vise l'avant du corps. */
+    private fun roadAim() {
+        if (roadGazeDepth.get() == 0 || roadRecentering || !gimbal.ready) return
+        val bp = bodyPan() ?: return
+        val p = head.pose() ?: return
+        head.aim(Head.wrap(p.first - bp), ROAD_TILT)
+    }
+
+    /**
+     * Avant chaque essai d'un trajet : après un choc et un dégagement (le corps a tourné), la tête se recentre ; puis on
+     * attend (2,5 s au plus) qu'elle regarde bien devant, pour ne pas repartir à l'aveugle.
+     */
+    private fun roadLegStart(attempt: Int) {
+        if (!gimbal.ready || roadGazeDepth.get() == 0) return
+        val ref = bodyRef
+        if (attempt > 0 || ref == null || System.currentTimeMillis() - ref.third > 120_000) recenterForRoad()
+        val end = System.currentTimeMillis() + 2500
+        while (System.currentTimeMillis() < end) {
+            val bp = bodyPan() ?: break
+            val tilt = head.pose()?.second ?: break
+            if (kotlin.math.abs(bp) < 12 && kotlin.math.abs(tilt - ROAD_TILT) < 10) break
+            Thread.sleep(100)
         }
     }
 
@@ -2163,7 +2272,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (gridAnchored && n != null && n.distanceTo(0.0, 0.0) > 1.0) {
             log("🏠 Je rentre à ma base par ma carte")
             // La base est à l'origine ; il s'arrête 50 cm devant (le Roomba recule de ~30 cm en la quittant).
-            val res = n.navigateTo(0.5, 0.0, tries = 6, budget = 30.0)
+            val res = navigateTo(0.5, 0.0, tries = 6, budget = 30.0)
             log("🏠 $res")
         }
         return r.seekDock()
@@ -2229,7 +2338,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * direction de temps en temps, et regarde à chaque arrêt si [goal] est en vue : le détecteur du téléphone (gratuit)
      * pour ce qu'il connaît (une chambre = un lit…), sinon Gemini Robotics-ER une fois sur trois. Bloquant, [maxSec] au plus.
      */
-    private fun explore(goal: String?, maxSec: Int = 120): String {
+    private fun explore(goal: String?, maxSec: Int = 120): String = withRoadGaze { exploreLoop(goal, maxSec) }
+
+    private fun exploreLoop(goal: String?, maxSec: Int): String {
         val r = roomba ?: return noWheels
         following = false
         followGen.incrementAndGet()
@@ -2244,10 +2355,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         var stuckInRow = 0
         var doors = 0
         log("🧭 J'explore" + (goal?.let { " : je cherche $it" + (if (clue != it) " (un $clue)" else "") } ?: ""))
-        if (gimbal.ready) { head.center(); head.look(null, -20.0) } // la tête droit devant, vers le sol (voir les obstacles)
+        roadLegStart(0) // la tête droit devant, vers le sol (voir les obstacles)
+        var turned = false
         fun summary() = "%.1f m parcourus, %.0f m² de plus sur ma carte%s".format(travelled, grid.knownArea() - area0,
             if (doors > 0) ", $doors porte(s) passée(s)" else "")
         while (System.currentTimeMillis() - t0 < maxSec * 1000L) {
+            // Le corps a tourné : la tête se recentre avant de regarder où aller (sinon l'image montre le côté).
+            if (turned) { roadLegStart(1); turned = false }
             // 1. Regarder : le détecteur du téléphone (gratuit) pour ce qu'il connaît.
             if (clue != null && labels != null) {
                 bestSeen(labels)?.let { seen ->
@@ -2287,7 +2401,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val n = nav
                 if (n != null && stops % 4 != 0) {
                     val before = r.x to r.y
-                    val step = n.frontierStep(budget = 3.0)
+                    val step = n.frontierStep(budget = 3.0) { attempt -> roadLegStart(attempt) }
                     travelled += kotlin.math.hypot(r.x - before.first, r.y - before.second)
                     if (step != null) {
                         if (step.startsWith("arrêté")) return "exploration arrêtée : $step (${summary()})"
@@ -2307,16 +2421,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // Vu à temps : pas de choc, il part simplement d'un autre côté.
                     log("👁️ $res")
                     r.turn(if (stops % 2 == 0) 60.0 else -60.0)
-                    sinceTurn = 0.0
+                    sinceTurn = 0.0; turned = true
                 }
                 res.contains("obstacle") || res.contains("bloqué") -> {
                     if (++stuckInRow > 4) return "je n'arrive plus à avancer (coincé) : aide-moi (${summary()})"
                     log("🧭 ${r.unstick(stuckInRow - 1)}")
-                    sinceTurn = 0.0
+                    sinceTurn = 0.0; turned = true
                 }
                 else -> {
                     stuckInRow = 0
-                    if (wp == null && sinceTurn > 2.5) { r.turn(if (stops % 2 == 0) 70.0 else -100.0); sinceTurn = 0.0 }
+                    if (wp == null && sinceTurn > 2.5) { r.turn(if (stops % 2 == 0) 70.0 else -100.0); sinceTurn = 0.0; turned = true }
                 }
             }
         }
@@ -2632,7 +2746,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     kotlin.math.abs(Head.wrap(k.heading - it.heading)) < 25) }) kept.add(it)
         }
         val kind = kinds.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key ?: "pièce"
-        houseMap.put(name, kind, descs.joinToString(" ").take(700), kept, roomba?.x, roomba?.y)
+        houseMap.put(name, kind, descs.joinToString(" ").take(700), kept, roomba?.x, roomba?.y, roomba?.let { gridFrame })
         currentPlace = houseMap.place(name)?.name ?: name
         log("🗺 $name relevé : ${kept.size} éléments ($kind)")
         return "lieu « $name » relevé ($kind) : ${kept.size} éléments, dont " + kept.take(12).joinToString(", ") { it.name } +
@@ -2716,6 +2830,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         motionJob = job
         return try {
             job.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: java.util.concurrent.TimeoutException) {
+            // Trop long : on arrête vraiment (sinon il continuait à rouler après avoir répondu « » à Gemini).
+            job.cancel(true)
+            roomba?.stop()
+            "pas fini à temps (${timeoutMs / 1000} s) : je me suis arrêté"
         } catch (e: Exception) {
             "interrompu"
         } finally {
@@ -3062,10 +3181,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** On lui parle et il ne voit personne : il cherche du regard, tout seul (au plus toutes les 20 s). */
     /** Il regarde ce qu'il vient de trouver : pas de recherche de qui parle jusque-là. */
     @Volatile private var showingFoundUntil = 0L
+    /**
+     * On guide son regard (« regarde à droite… encore… ») : il ne repart pas tout seul vers la personne entre deux
+     * consignes. (Journal du 23/10 : « plus à droite » partait de là où il avait cherché Michael, pas de là où on l'avait mis.)
+     */
+    @Volatile private var gazeDirectedUntil = 0L
 
     private fun maybeSearchSpeaker() {
         val now = System.currentTimeMillis()
-        if (now < showingFoundUntil || now < follower.pausedUntil) return
+        if (now < showingFoundUntil || now < follower.pausedUntil || now < gazeDirectedUntil) return
         if (!gimbal.ready || !follower.enabled || !flag("camera", true) || follower.sees) return
         // On ne cherche que si personne n'est vu depuis un moment (sinon la tête bouge « toute seule » sans raison).
         if (_state.value.busy || now - follower.seenAt < 8000 || now - lastAutoSearch < 30_000) return
@@ -3184,20 +3308,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- outils longs en arrière-plan : la conversation continue pendant qu'il cherche ou se déplace ----------
     /** Outils qui peuvent durer (recherche, déplacement, relevé) : Gemini n'attend pas, il reçoit le résultat après. */
     private val longTools = setOf("chercher", "aller_vers", "viens_ici", "cartographier", "regarder_ce_que_je_montre", "tester_roues",
-        "explorer", "se_degager", "aller_a", "revenir", "aller_voir", "rentrer_base")
+        "explorer", "se_degager", "aller_a", "revenir", "aller_voir", "rentrer_base", "ajuster")
     private val toolPool = Executors.newCachedThreadPool()
     @Volatile private var longToolGen = 0
+    /** L'outil long en cours (nom + paramètres). */
+    @Volatile private var runningLong: String? = null
+    /** Des actions (bouger, regarder, allumer…) : refusées si elles ne viennent que de bruit. « arrete » passe toujours. */
+    private val actionTools = setOf("regarder", "chercher", "tester_roues", "dormir", "regarder_autour", "maison_commande",
+        "avancer", "tourner_corps", "viens_ici", "suis_moi", "aller_vers", "aller_a", "rentrer_base", "cartographier",
+        "mode_garde", "danser", "prendre_photo", "ajuster", "se_degager", "explorer", "mode_autonome", "aller_voir", "revenir",
+        "changer_voix", "aspirer")
 
     private fun onTool(name: String, args: Map<String, Any?>): Map<String, Any?> {
+        val heard = synchronized(heardTurn) { heardTurn.toString() }
         flushTurn()
         val t0 = System.currentTimeMillis()
         journal.write("outil", "$name ${args}")
+        // Une action déclenchée par du bruit (télé, voix lointaine en coréen…) : personne ne l'a demandée.
+        // (Journal du 23/10 : « <noise> » -> demi-tour, « 가 가 » -> exploration relancée.)
+        if (name in actionTools && heard.isNotBlank() && isNoise(heard)) {
+            log("🔇 « $name » ignoré : déclenché par du bruit (« ${heard.take(30)} »)")
+            return mapOf("result" to "personne ne t'a rien demandé : ce que tu as entendu n'était que du bruit (« ${heard.take(40)} »). " +
+                "Ne fais rien et ne réponds pas.").also { journal.write("outil", "$name -> $it") }
+        }
+        // La même demande, encore en cours : on ne la relance pas (sinon elle repartait de zéro).
+        val key = name + args.toString()
+        if (name in longTools && runningLong == key) {
+            return mapOf("result" to "déjà en cours (même demande) : attends son résultat, ne relance pas l'outil")
+                .also { journal.write("outil", "$name -> $it") }
+        }
         if (name in wheelTools) return wheelTool(name, args, t0)
         if (name !in longTools) return runTool(name, args).also {
             journal.write("outil", "$name -> $it (${System.currentTimeMillis() - t0} ms)")
         }
         val gen = ++longToolGen
-        val job = toolPool.submit<Map<String, Any?>> { runTool(name, args) }
+        runningLong = key
+        val job = toolPool.submit<Map<String, Any?>> { try { runTool(name, args) } finally { if (runningLong == key) runningLong = null } }
         // Réponse rapide (refus, déjà vu…) : on la donne tout de suite. Pas plus de 0,4 s : au-delà, Gemini attendait
         // pour rien avant de dire « j'arrive » (réponses à 4-5 s dans le journal du 23/10).
         runCatching { return job.get(400, TimeUnit.MILLISECONDS) }
@@ -3275,6 +3421,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     return mapOf("result" to res, "visage_dans_l_image" to ((faces.lastSize ?: 0f) > 0f))
                 }
                 log("👀 regarder $dir${deg?.let { " ${it.toInt()}°" } ?: ""}")
+                gazeDirectedUntil = System.currentTimeMillis() + 60_000
                 // Il garde ce regard quelques secondes avant de revenir te suivre.
                 val r = moveSync(holdMs = if (dir == "devant") 1000 else 7000) { head.lookDirection(dir, deg) }
                 live?.sendFrameNow()
@@ -3316,7 +3463,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     if (!(r.startsWith("trouvé") || r.startsWith("je te vois")) && roomba != null) {
                         var e = ""
-                        moveSync(holdMs = 3000, timeoutMs = 120_000) { e = explore("personne", 90); e }
+                        e = moveSync(holdMs = 3000, timeoutMs = 120_000) { explore("personne", 90) }
                         r = "pas en vue d'ici, alors tu es parti chercher : $e"
                     }
                     live?.sendFrameNow()
@@ -3331,7 +3478,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // Pas ici : avec ses roues, il part le chercher ailleurs (au lieu d'abandonner sur place).
                 if (sp == null && roomba != null) {
                     var res = ""
-                    moveSync(holdMs = 8000, timeoutMs = 120_000) { res = explore(what, 90); res }
+                    res = moveSync(holdMs = 8000, timeoutMs = 120_000) { explore(what, 90) }
                     live?.sendFrameNow()
                     return mapOf("result" to "pas en vue d'ici, alors tu es parti explorer : $res")
                 }
@@ -3369,13 +3516,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "ajuster" -> {
                 val what = (args["reglage"] as? String)?.trim()?.lowercase().orEmpty()
                 val how = (args["sens"] as? String)?.trim()?.lowercase().orEmpty()
-                val res = if (what == "sens_roues") {
-                    val rev = when (how) { "inverse" -> !flag("roomba_reversed", false); "normal" -> false; else -> null }
-                    if (rev == null) "pour sens_roues : « inverse » ou « normal »" else {
-                        setFlagValue("roomba_reversed", rev)
-                        "sens des roues : " + if (rev) "visage vers l'arrière du Roomba" else "visage vers l'avant du Roomba"
-                    }
-                } else tuning.adjust(what, how).also { roomba?.let { applyTuning(it) } }
+                val res = if (what == "sens_roues") adjustWheelDirection(how)
+                else tuning.adjust(what, how).also { roomba?.let { applyTuning(it) } }
                 log("🎛️ $res")
                 mapOf("result" to res)
             }
@@ -3608,10 +3750,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val r = roomba ?: return mapOf("result" to noWheels)
                 val m = ((args["metres"] as? Number)?.toDouble() ?: 0.5).coerceIn(-2.0, 3.0)
                 log("🛞 avancer ${"%.2f".format(m)} m")
-                mapOf("result" to busyLearn { r.drive(m) })
+                // Plus de 30 cm devant : la tête regarde la route (la caméra voit l'obstacle avant le choc).
+                mapOf("result" to busyLearn { if (m > 0.3 && gimbal.ready) withRoadGaze { roadLegStart(0); r.drive(m) } else r.drive(m) })
             }
             "tourner_corps" -> {
                 val r = roomba ?: return mapOf("result" to noWheels)
+                if (args["vers_le_regard"] == true) {
+                    // « C'est par là » après lui avoir fait tourner la tête : le corps se tourne là où elle regarde.
+                    if (!gimbal.ready) return mapOf("result" to "sans nacelle ta tête est ton corps : tu regardes déjà devant toi")
+                    val turned = busyLearn { alignBodyWithHead() }
+                    return mapOf("result" to if (kotlin.math.abs(turned) < 1) "déjà tourné vers là où tu regardes"
+                        else "tourné de %.0f° : ton corps fait face à là où tu regardais".format(turned))
+                }
                 val d = ((args["degres"] as? Number)?.toDouble() ?: 90.0).coerceIn(-360.0, 360.0)
                 mapOf("result" to busyLearn { r.turn(d) })
             }
@@ -3619,13 +3769,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (roomba == null) return mapOf("result" to noWheels)
                 log("🛞 J'arrive")
                 var res = ""
-                moveSync(holdMs = 0, timeoutMs = 90_000) { res = comeHere(); res }
+                res = moveSync(holdMs = 0, timeoutMs = 90_000) { comeHere() }
                 mapOf("result" to res)
             }
             "suis_moi" -> {
                 if (roomba == null) return mapOf("result" to noWheels)
                 followMe(((args["minutes"] as? Number)?.toDouble() ?: 3.0).coerceIn(0.5, 15.0))
                 mapOf("result" to "tu suis la personne (dis-lui de marcher doucement) ; « arrete » pour t'arrêter")
+            }
+            "aspirer" -> {
+                val r = roomba ?: return mapOf("result" to noWheels)
+                val res = r.vacuum(args["marche"] != false)
+                log("🧹 $res")
+                mapOf("result" to res)
             }
             "mode_autonome" -> {
                 val on = args["actif"] != false
@@ -3639,7 +3795,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val who = (args["qui"] as? String)?.trim().orEmpty()
                 log("🛞 Je vais voir ${who.ifEmpty { "quelqu'un" }}")
                 var res = ""
-                moveSync(holdMs = 3000, timeoutMs = 240_000) { res = goSee(who); res }
+                res = moveSync(holdMs = 3000, timeoutMs = 240_000) { goSee(who) }
                 mapOf("result" to res)
             }
             "revenir" -> {
@@ -3647,7 +3803,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val back = missionStart ?: return mapOf("result" to "tu n'es parti de nulle part : tu es déjà là")
                 log("🛞 Je reviens")
                 var res = ""
-                moveSync(holdMs = 1000, timeoutMs = 180_000) { res = navigateTo(back.first, back.second); res }
+                res = moveSync(holdMs = 1000, timeoutMs = 180_000) { navigateTo(back.first, back.second) }
                 if (res.startsWith("arrivé") || res.startsWith("presque")) missionStart = null
                 mapOf("result" to "retour : $res")
             }
@@ -3672,7 +3828,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val goal = (args["objectif"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
                 val secs = ((args["secondes"] as? Number)?.toInt() ?: 120).coerceIn(20, 300)
                 var res = ""
-                moveSync(holdMs = 3000, timeoutMs = secs * 1000L + 30_000) { res = explore(goal, secs); res }
+                res = moveSync(holdMs = 3000, timeoutMs = secs * 1000L + 30_000) { explore(goal, secs) }
                 live?.sendFrameNow()
                 mapOf("result" to res + ". Si c'est une pièce que tu ne connais pas, propose de la cartographier.")
             }
@@ -3689,7 +3845,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (roomba == null) return mapOf("result" to noWheels)
                 following = false
                 var res = ""
-                moveSync(holdMs = 1000, timeoutMs = 240_000) { res = goHome(); res }
+                res = moveSync(holdMs = 1000, timeoutMs = 240_000) { goHome() }
                 mapOf("result" to res)
             }
             "aller_vers" -> {
@@ -3698,7 +3854,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (what.isEmpty()) return mapOf("result" to "vers quoi ?")
                 log("🛞 Je vais vers : $what")
                 var res = ""
-                moveSync(holdMs = 3000, timeoutMs = 150_000) { res = goToward(what); res }
+                res = moveSync(holdMs = 3000, timeoutMs = 150_000) { goToward(what) }
                 live?.sendFrameNow()
                 mapOf("result" to res)
             }
@@ -3708,17 +3864,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val p = houseMap.place(lieu) ?: run {
                     // Pas sur la carte : il part la chercher.
                     var e = ""
-                    moveSync(holdMs = 3000, timeoutMs = 150_000) { e = explore(lieu, 120); e }
+                    e = moveSync(holdMs = 3000, timeoutMs = 150_000) { explore(lieu, 120) }
                     return mapOf("result" to "« $lieu » n'était pas sur ta carte, alors tu es parti la chercher : $e. Si tu l'as " +
                         "trouvée, propose de la cartographier.")
                 }
-                val px = p.x; val py = p.y
-                if (px == null || py == null) return mapOf("result" to "je ne connais pas la position de « $lieu » (relevé fait sans les roues) : " +
-                    "il faudra le relever à nouveau en y étant, avec les roues branchées")
+                val xy = p.xyIn(gridFrame) ?: run {
+                    // Position inconnue sur la carte actuelle (relevé sans les roues, ou noté sur la carte d'une autre
+                    // séance) : il la cherche en explorant, au lieu de foncer vers un point qui ne veut rien dire ici.
+                    val why = if (p.x == null) "relevé fait sans les roues" else "position notée sur une autre carte (je n'étais " +
+                        "pas parti de ma base)"
+                    log("🗺 « ${p.name} » : $why, je le cherche")
+                    var e = ""
+                    e = moveSync(holdMs = 3000, timeoutMs = 150_000) { explore(p.name, 120) }
+                    return mapOf("result" to "« ${p.name} » : $why, alors tu l'as cherché en explorant : $e. Si tu y es, " +
+                        "relève-le (cartographier) pour noter sa position. Astuce à dire : si je pars de ma base, ma carte et " +
+                        "les positions des pièces restent valables d'une fois sur l'autre.")
+                }
+                val px = xy.first; val py = xy.second
                 log("🛞 Je vais : ${p.name}")
                 var res = ""
                 missionStart = r.x to r.y
-                moveSync(holdMs = 1000, timeoutMs = 180_000) { res = navigateTo(px, py); res }
+                res = moveSync(holdMs = 1000, timeoutMs = 180_000) { navigateTo(px, py) }
                 if (!res.contains("obstacle") && !res.contains("interrompu")) currentPlace = p.name
                 mapOf("result" to res)
             }
@@ -3729,11 +3895,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 var r = ""
                 val wholeHouse = Regex("(?i)(maison|appartement|toutes les pi|les pièces|partout|tout l'étage)").containsMatchIn(lieu)
                 if (wholeHouse && roomba != null) {
-                    moveSync(holdMs = 2000, timeoutMs = 9 * 60_000L) { r = mapHouse(); r }
+                    r = moveSync(holdMs = 2000, timeoutMs = 9 * 60_000L) { mapHouse() }
                     live?.sendFrameNow()
                     return mapOf("result" to r)
                 }
-                moveSync(holdMs = 2000, timeoutMs = 150_000) { r = mapHere(lieu); r }
+                r = moveSync(holdMs = 2000, timeoutMs = 150_000) { mapHere(lieu) }
                 live?.sendFrameNow()
                 mapOf("result" to r)
             }
@@ -4012,6 +4178,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     mood = st.mood, moodSince = exprMoodSince,
                 ).let { if (flag("body_language", true)) it else com.joey.app.life.Expressive.Pose(0.0, 0.0, 0f) }
             }
+            runCatching { roadAim() }
             runCatching { head.aimStep() }
         }
     }
@@ -4121,7 +4288,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         o.put("cells", org.json.JSONArray().also { a -> cells.forEach { c -> a.put(org.json.JSONArray().put(c.first).put(c.second).put(c.third.toDouble())) } })
         o.put("cliffs", org.json.JSONArray().also { a -> cliffs.forEach { c -> a.put(org.json.JSONArray().put(c.first).put(c.second)) } })
         val places = org.json.JSONArray(); val items = org.json.JSONArray()
-        if (gridAnchored) houseMap.all().forEach { p ->
+        houseMap.all().forEach { p ->
+            if (p.frame != gridFrame) return@forEach
             if (p.x != null && p.y != null) places.put(org.json.JSONObject().put("n", p.name).put("x", p.x).put("y", p.y))
             p.items.filter { it.x != null }.take(30).forEach { items.put(org.json.JSONObject().put("n", it.name).put("x", it.x).put("y", it.y)) }
         }

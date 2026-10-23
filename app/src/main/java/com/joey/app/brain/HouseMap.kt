@@ -24,7 +24,18 @@ class HouseMap(private val file: File) {
         /** Position sur le plan (mètres), quand le Roomba saura où il est. */
         var x: Double? = null,
         var y: Double? = null,
-    )
+        /**
+         * Le repère de cette position (et de celles de ses éléments) : « base » (sa carte part de sa base, valable d'une
+         * fois sur l'autre) ou celui d'une séance (valable seulement pendant celle-ci). null = inconnu (ancien relevé).
+         */
+        var frame: String? = null,
+    ) {
+        /** Sa position, si elle a été notée dans le repère [f] (sinon elle ne veut rien dire sur la carte actuelle). */
+        fun xyIn(f: String): Pair<Double, Double>? {
+            val px = x; val py = y
+            return if (px != null && py != null && frame == f) px to py else null
+        }
+    }
 
     private val places = ArrayList<Place>()
 
@@ -42,7 +53,8 @@ class HouseMap(private val file: File) {
                         if (it.has("x") && !it.isNull("x")) it.getDouble("x") else null, if (it.has("y") && !it.isNull("y")) it.getDouble("y") else null))
                 }
                 places.add(Place(o.getString("name"), o.optString("description"), o.optString("kind"), list, o.getLong("updated"),
-                    if (o.isNull("x")) null else o.optDouble("x"), if (o.isNull("y")) null else o.optDouble("y")))
+                    if (o.isNull("x")) null else o.optDouble("x"), if (o.isNull("y")) null else o.optDouble("y"),
+                    if (o.has("frame") && !o.isNull("frame")) o.getString("frame") else null))
             }
         }
     }
@@ -55,7 +67,8 @@ class HouseMap(private val file: File) {
                 .put("elevation", it.elevation).put("dist", it.distanceM ?: JSONObject.NULL).put("seen", it.seenAt)
                 .put("x", it.x ?: JSONObject.NULL).put("y", it.y ?: JSONObject.NULL)) }
             a.put(JSONObject().put("name", p.name).put("description", p.description).put("kind", p.kind).put("items", its)
-                .put("updated", p.updatedAt).put("x", p.x ?: JSONObject.NULL).put("y", p.y ?: JSONObject.NULL))
+                .put("updated", p.updatedAt).put("x", p.x ?: JSONObject.NULL).put("y", p.y ?: JSONObject.NULL)
+                .put("frame", p.frame ?: JSONObject.NULL))
         }
         runCatching {
             val tmp = File(file.path + ".tmp")
@@ -69,14 +82,16 @@ class HouseMap(private val file: File) {
     fun place(name: String): Place? = synchronized(places) { places.firstOrNull { norm(it.name) == norm(name) } }
 
     /** Enregistre (ou remplace) le relevé d'un lieu. */
-    fun put(name: String, kind: String, description: String, items: List<Item>, x: Double? = null, y: Double? = null) = synchronized(places) {
+    fun put(name: String, kind: String, description: String, items: List<Item>, x: Double? = null, y: Double? = null,
+            frame: String? = null) = synchronized(places) {
         val p = places.firstOrNull { norm(it.name) == norm(name) }
         if (p == null) {
-            places.add(Place(name.trim(), description, kind, items.toMutableList(), System.currentTimeMillis(), x, y))
+            places.add(Place(name.trim(), description, kind, items.toMutableList(), System.currentTimeMillis(), x, y,
+                frame.takeIf { x != null && y != null }))
         } else {
             p.items.clear(); p.items.addAll(items)
             p.description = description; p.kind = kind; p.updatedAt = System.currentTimeMillis()
-            if (x != null && y != null) { p.x = x; p.y = y }
+            if (x != null && y != null) { p.x = x; p.y = y; p.frame = frame }
         }
         save()
     }

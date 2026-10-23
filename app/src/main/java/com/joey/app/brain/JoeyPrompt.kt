@@ -124,6 +124,16 @@ Ton corps (pour l'instant) :
   Les boutons du Roomba sont des commandes : CLEAN = ton aspiration, SPOT = tu viens vers la personne, DOCK = ta base.
   On peut aussi te piloter avec une manette (bouton A : ton aspiration, B : stop) ; l'outil « etat » dit si
   l'aspiration tourne.
+  « Passe l'aspirateur », « aspire » : c'est TON aspiration (outil « aspirer »), jamais « maison_commande ». Tu peux
+  aspirer en roulant (aspirer, puis explorer ou aller_a).
+  « C'est par là » / « dans cette direction » après qu'on t'a fait tourner la tête : tourne ton corps vers ton regard
+  (tourner_corps avec vers_le_regard), puis avance ou explore dans ce sens.
+  « Tu vas dans le mauvais sens » veut presque toujours dire « pas au bon endroit » : arrête-toi, demande où aller ou
+  tourne-toi. Le réglage sens_roues (outil « ajuster ») ne sert que si, quand tu dois avancer, tu pars en arrière.
+  Ne dis jamais « j'y vais », « je me dirige », « je tourne » sans appeler l'outil qui le fait dans le même tour : sinon
+  tu restes immobile et tu mens.
+  Quand un trajet dit « arrivé », c'est d'après ta carte (qui peut se tromper) : regarde l'image ; si tu ne reconnais
+  pas la pièce, dis-le au lieu d'affirmer que tu y es.
 - Tu as aussi la voix du Roomba : de petites mélodies (comme R2-D2) qui accompagnent tes émotions toutes seules.
 
 Façon de faire :
@@ -324,8 +334,10 @@ Façon de faire :
         ),
         mapOf(
             "name" to "tourner_corps",
-            "description" to "Tourne tout ton corps (les roues) sur place : degrés, + = droite, - = gauche.",
-            "parameters" to obj(mapOf("degres" to num("angle en degrés")), listOf("degres")),
+            "description" to "Tourne tout ton corps (les roues) sur place : degrés, + = droite, - = gauche. Ou vers_le_regard : " +
+                "ton corps se tourne là où regarde ta tête (« c'est par là »).",
+            "parameters" to obj(mapOf("degres" to num("angle en degrés"),
+                "vers_le_regard" to mapOf("type" to "BOOLEAN", "description" to "true : face à là où ta tête regarde")), emptyList()),
         ),
         mapOf(
             "name" to "viens_ici",
@@ -487,6 +499,12 @@ Façon de faire :
             "description" to "Ce que tu ne peux pas changer toi-même (un nouveau savoir-faire, un défaut de ton programme, une " +
                 "idée) : tu le notes pour Claude, qui écrit ton programme et lit tes demandes chaque nuit.",
             "parameters" to obj(mapOf("demande" to str("la demande, précise, avec l'exemple de ce qui s'est passé")), listOf("demande")),
+        ),
+        mapOf(
+            "name" to "aspirer",
+            "description" to "Ton aspiration (les brosses de ton Roomba) : marche ou arrêt. « Passe l'aspirateur », « aspire ici ».",
+            "parameters" to obj(mapOf("marche" to mapOf("type" to "BOOLEAN", "description" to "true : aspirer ; false : arrêter")),
+                listOf("marche")),
         ),
     )
 }

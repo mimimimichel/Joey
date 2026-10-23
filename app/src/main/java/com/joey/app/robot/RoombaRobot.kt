@@ -78,6 +78,10 @@ class RoombaRobot(
     /** Le garder éveillé (mode sécurité au repos) : sinon il s'endort au bout de 5 min. */
     @Volatile var keepAwake = true
     private var passiveSince = 0L
+    /** Au bout de combien de temps de repos (mode passif) on le remet en mode sécurité pour qu'il ne s'endorme pas. */
+    @Volatile internal var awakeAfterMs = 180_000L
+    /** Il cherche sa base tout seul (mode passif, mais il roule) : on ne le dérange pas jusque-là. */
+    @Volatile private var seekingDockUntil = 0L
     private var awakeLogged = false
     /** La liaison vient de se couper (false) ou de revenir (true). */
     @Volatile var onLink: ((Boolean) -> Unit)? = null
@@ -130,16 +134,26 @@ class RoombaRobot(
     }
 
     /** Essaie la liste complète des capteurs ; si le Roomba ne la comprend pas, on reste à celle de base. */
-    private fun tryExtended() {
+    private fun tryExtended(quiet: Boolean = false) {
         extended = true
         var ok = 0
         repeat(3) { if (readSensors() != null) ok++ }
         if (ok < 2) {
             extended = false
             runCatching { sleeper(100); link.clearInput() }
-            log("Roomba : capteurs de base seulement (ce modèle ne donne pas les autres)")
-        } else log("Roomba : tous ses capteurs lus (proximité, mur, boutons, balises de la base…)")
+            if (!quiet) log("Roomba : capteurs de base seulement (ce modèle ne donne pas les autres)")
+        } else if (!quiet) log("Roomba : tous ses capteurs lus (proximité, mur, boutons, balises de la base…)")
     }
+
+    /**
+     * Repassé aux capteurs de base après une coupure (fil qui bouge) : une fois la liaison revenue et stable, on réessaie
+     * la liste complète. (Journal du 23/10 : une coupure de 38 s au démarrage, et toute la séance sans ses détecteurs de
+     * proximité : il touchait les murs au lieu de ralentir avant.)
+     */
+    @Volatile private var extendedLost = false
+    private var extendedRetries = 0
+    private var linkGoodSince = 0L
+    @Volatile internal var extendedRetryMs = 30_000L
 
     fun wakePulse() {
         lastWake = System.currentTimeMillis()
@@ -201,7 +215,10 @@ class RoombaRobot(
                 // Réveillé (par le fil de réveil, ou par quelqu'un sur CLEAN), il attend « start » pour répondre.
                 if (failures % 20 == 0) runCatching { send(RoombaOI.start()); if (driving) send(RoombaOI.safe()) }
                 // La liste complète des capteurs ne passe plus : on revient à celle de base.
-                if (extended && failures == 15) { extended = false; log("Roomba : je repasse aux capteurs de base") }
+                if (extended && failures == 15) {
+                    extended = false; extendedLost = true
+                    log("Roomba : je repasse aux capteurs de base (je réessaierai les autres quand la liaison sera revenue)")
+                }
                 // Il a pu changer de vitesse de liaison (impulsions sur le fil de réveil) : on essaie les autres.
                 if (failures % 40 == 20) {
                     val bauds = listOf(115_200, 57_600, 19_200)
@@ -218,7 +235,15 @@ class RoombaRobot(
                 continue
             }
             if (failures >= 10) runCatching { onLink?.invoke(true) }
+            if (failures > 0) linkGoodSince = now
             failures = 0
+            if (extendedLost && !extended && now - linkGoodSince > extendedRetryMs && extendedRetries < 5) {
+                extendedRetries++
+                tryExtended(quiet = true)
+                if (extended) { extendedLost = false; log("Roomba : de nouveau tous ses capteurs (proximité, mur…)") }
+                else linkGoodSince = now
+                continue
+            }
             val prev = sensors
             sensors = s
             sensorsAt = now
@@ -249,9 +274,9 @@ class RoombaRobot(
             if (s.dockInSight) dockSeenAt = now
             // En mode passif (au repos), le Roomba s'endort au bout de 5 min, et sans le fil de réveil on ne peut plus le
             // rallumer. En mode sécurité il ne s'endort pas : on l'y remet au bout de 3 min de repos (pas sur sa base).
-            if (s.oiMode == 1 && !s.onHomeBase && !s.charging && keepAwake) {
+            if (s.oiMode == 1 && !s.onHomeBase && !s.charging && keepAwake && now > seekingDockUntil) {
                 if (passiveSince == 0L) passiveSince = now
-                else if (now - passiveSince > 180_000) {
+                else if (now - passiveSince > awakeAfterMs) {
                     runCatching { send(RoombaOI.start()); sleeper(50); send(RoombaOI.safe()) }
                     driving = true
                     passiveSince = 0L
@@ -593,6 +618,8 @@ class RoombaRobot(
     fun seekDock(): String {
         stop()
         driving = false
+        // Il cherche sa base en mode passif : le maintien en éveil ne doit pas l'interrompre (8 min pour la trouver).
+        seekingDockUntil = System.currentTimeMillis() + 8 * 60_000L
         runCatching { send(RoombaOI.start()); send(RoombaOI.seekDock()) }.onFailure { return "le Roomba ne répond pas" }
         return "je rentre à ma base de charge (je la cherche tout seul, ça peut prendre une ou deux minutes)"
     }

@@ -116,6 +116,9 @@ class NavGrid(val cell: Double = 0.1) {
     fun occupied(i: Int, j: Int) = (value(i, j) ?: 0f) > OCC
     fun free(i: Int, j: Int) = (value(i, j) ?: 0f) < CLEAR
 
+    /** Marge autour des obstacles, en carreaux : au moins le rayon de son corps (sinon il frôle et accroche). */
+    private fun inflation() = Math.ceil((ROBOT_RADIUS + 0.02) / cell).toInt()
+
     /** Un carreau trop près d'un obstacle pour que son corps y passe. */
     private fun blocked(i: Int, j: Int, inflate: Int): Boolean {
         for (di in -inflate..inflate) for (dj in -inflate..inflate) {
@@ -130,7 +133,7 @@ class NavGrid(val cell: Double = 0.1) {
      * coûte plus cher que le connu (il préfère ce qu'il connaît, mais ose). Renvoie des points (m), ou null.
      */
     fun plan(x0: Double, y0: Double, x1: Double, y1: Double, maxCells: Int = 60_000): List<Pair<Double, Double>>? {
-        val inflate = (ROBOT_RADIUS / cell).toInt()
+        val inflate = inflation()
         val si = idx(x0); val sj = idx(y0); val gi = idx(x1); val gj = idx(y1)
         val start = key(si, sj); val goal = key(gi, gj)
         val g = HashMap<Long, Double>(); val from = HashMap<Long, Long>()
@@ -192,7 +195,7 @@ class NavGrid(val cell: Double = 0.1) {
 
     /** Une ligne droite sans obstacle (avec la marge du corps). */
     fun lineClear(x0: Double, y0: Double, x1: Double, y1: Double): Boolean {
-        val inflate = (ROBOT_RADIUS / cell).toInt()
+        val inflate = inflation()
         val d = hypot(x1 - x0, y1 - y0)
         val n = max(1, (d / (cell / 2)).toInt())
         for (s in 0..n) {

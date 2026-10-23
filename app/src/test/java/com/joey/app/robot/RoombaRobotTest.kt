@@ -15,6 +15,10 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
     var countsL = 1000.0; var countsR = 64000.0 // proche du passage à 0, pour tester le rebouclage
     var bump = false; var cliff = false; var onBase = false
     var blocked = false // coincé : les roues ne tournent plus
+    /** Le monde simulé : true si (x, y) est dans un obstacle (mur, meuble). Le pare-chocs s'enfonce dedans. */
+    var wall: ((Double, Double) -> Boolean)? = null
+    var bumpAuto = false
+    var bumps = 0
     var mute = false    // fil qui bouge : il n'entend plus rien
     var x = 0.0; var y = 0.0; var h = 0.0 // vraie position (m, °)
     val songs = ArrayList<Int>()
@@ -32,6 +36,20 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         countsL += dl * 1000 / RoombaOI.MM_PER_COUNT; countsR += dr * 1000 / RoombaOI.MM_PER_COUNT
         val d = (dl + dr) / 2
         val dth = Math.toDegrees((dl - dr) / 0.235)
+        val w = wall
+        if (w != null) {
+            // Le pare-chocs (à 18 cm du centre, sur ±40°) touche-t-il un obstacle après ce mouvement ?
+            val nx = x + d * cos(Math.toRadians(h)); val ny = y + d * sin(Math.toRadians(h)); val nh = h + dth
+            val hit = listOf(-40.0, 0.0, 40.0).any { a -> w(nx + 0.18 * cos(Math.toRadians(nh + a)), ny + 0.18 * sin(Math.toRadians(nh + a))) }
+            if (hit && d > 0) {
+                if (!bumpAuto) bumps++
+                bumpAuto = true
+                // Il ne traverse pas : seules les roues tournent (pour l'odométrie, il a avancé : comme un vrai qui patine)
+                h = nh
+                return
+            }
+            if (!hit) bumpAuto = false
+        }
         x += d * cos(Math.toRadians(h)); y += d * sin(Math.toRadians(h)); h += dth
         if (cliff && mode >= 2) mode = 1 // le mode sécurité le rend passif
         if (onBase && x < -0.1) onBase = false
@@ -70,7 +88,7 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         val out = ArrayList<Int>()
         for (id in ids) {
             when (id) {
-                7 -> out.add(if (bump) 3 else 0)
+                7 -> out.add(if (bump || bumpAuto) 3 else 0)
                 9 -> out.add(if (cliff) 1 else 0); 10, 11, 12 -> out.add(0)
                 21 -> out.add(if (onBase) 2 else 0)
                 22 -> { out.add(0x3A); out.add(0x98) }

@@ -370,14 +370,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         floorAt = now
         if (!res.floorVisible) return
         // Sur la carte : le sol vu est libre, son bord est un obstacle (à confirmer).
-        val x = r.x; val y = r.y
-        val base = r.heading + (if (gimbal.ready) pan else 0.0)
-        for (ray in res.rays) {
-            val b = base + ray.bearing
-            val d = if (ray.distance.isInfinite()) 2.5 else ray.distance.coerceAtMost(2.5)
-            if (d > 0.3) grid.markFreeRay(x, y, b, d - 0.08)
-            if (!ray.distance.isInfinite() && ray.distance < 2.0) grid.markSeenObstacle(x, y, b, ray.distance + 0.05)
-        }
+        nav?.vision(r.heading + (if (gimbal.ready) pan else 0.0), res.rays.map { it.bearing to it.distance })
     }
 
     private fun onFrame(bmp: android.graphics.Bitmap) {
@@ -1810,15 +1803,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 roomba = r
                 applyTuning(r)
                 bodyRef = null // nouvelles roues, nouveau repère
+                val n = com.joey.app.robot.Navigator(r, grid, ::log)
+                nav = n
                 anchorGrid(r)
-                r.onContact = { kind, side -> runCatching { gridContact(r, kind, side) } }
+                r.onContact = { kind, side -> runCatching { n.contact(kind, side) } }
                 // Ses détecteurs de proximité et son capteur de mur dessinent les obstacles sur la carte avant qu'il les touche.
-                r.onProximity = { angle, d ->
-                    runCatching {
-                        val h = r.heading + (if (r.reversed) 180.0 else 0.0) + angle
-                        grid.markObstacle(r.x, r.y, h, com.joey.app.robot.NavGrid.ROBOT_RADIUS + d)
-                    }
-                }
+                r.onProximity = { angle, d -> runCatching { n.proximity(angle, d) } }
                 // Ce que la caméra voit de sol libre devant (récent seulement) : il ralentit et s'arrête avant le choc.
                 r.visionClear = {
                     val c = floorClear
@@ -2092,8 +2082,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---- carte en grille, trajets ---------------------------------------------------------------------------------
-    private var lastMarkX = Double.NaN
-    private var lastMarkY = Double.NaN
+    /** La navigation (carte tenue à jour, trajets) : créée quand les roues se branchent. */
+    @Volatile private var nav: com.joey.app.robot.Navigator? = null
     private var gridSavedAt = 0L
     private var wasOnBase = false
 
@@ -2108,7 +2098,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             grid.clear()
         }
         wasOnBase = r.onBase
-        lastMarkX = Double.NaN
+        nav?.resetTrack()
     }
 
     /** 10 fois par seconde : là où il passe est libre ; revenu sur sa base, il recale sa position (fini la dérive). */
@@ -2117,23 +2107,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!r.linkOk) return
         if (r.onBase && !wasOnBase) anchorGrid(r)
         wasOnBase = r.onBase
-        val x = r.x; val y = r.y
-        if (lastMarkX.isNaN() || kotlin.math.hypot(x - lastMarkX, y - lastMarkY) > 0.05) {
-            grid.markRobot(x, y); lastMarkX = x; lastMarkY = y
-        }
+        nav?.tick()
         val now = System.currentTimeMillis()
         if (gridAnchored && now - gridSavedAt > 30_000) { gridSavedAt = now; grid.save(gridFile) }
-    }
-
-    /** Un contact sur la carte (le pare-chocs regarde vers l'arrière de Joey s'il est monté à l'envers). */
-    private fun gridContact(r: com.joey.app.robot.RoombaRobot, kind: String, side: Int) {
-        val h = r.heading + if (r.reversed) 180.0 else 0.0
-        when (kind) {
-            "vide" -> { grid.markCliff(r.x, r.y, h); log("🗺 Vide noté sur ma carte") }
-            "mur virtuel" -> { grid.markCliff(r.x, r.y, h); log("🗺 Mur virtuel : je ne le franchirai pas") }
-            "proche" -> grid.markObstacle(r.x, r.y, h, 0.30, side)
-            else -> grid.markObstacle(r.x, r.y, h, side = side)
-        }
     }
 
     /** CLEAN : aspiration marche/arrêt ; SPOT : il vient vers toi ; DOCK : il rentre à sa base. */
@@ -2160,33 +2136,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Va au point (x, y) de sa carte par le plus court chemin connu : il suit les segments, et s'il touche quelque chose
      * (noté sur la carte), il se dégage et recalcule. [budget] : mètres au plus.
      */
-    private fun navigateTo(tx: Double, ty: Double, tries: Int = 6, budget: Double = 20.0): String {
-        val r = roomba ?: return noWheels
-        val startM = r.x to r.y
-        var travelled = 0.0
-        for (attempt in 0 until tries) {
-            if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.3) return "arrivé"
-            val path = grid.plan(r.x, r.y, tx, ty) ?: return "pas de chemin sur ma carte (tout est bouché par là)"
-            val before = r.x to r.y
+    /** Va au point (x, y) de sa carte (voir [com.joey.app.robot.Navigator.navigateTo]) ; la tête regarde le sol devant. */
+    private fun navigateTo(tx: Double, ty: Double, tries: Int = 8, budget: Double = 25.0): String {
+        val n = nav ?: return noWheels
+        return n.navigateTo(tx, ty, tries, budget) { attempt ->
             // La tête droit devant, un peu vers le sol : la caméra voit les obstacles avant le choc.
             if (gimbal.ready && attempt == 0) { head.center(); head.look(null, -22.0) }
-            // Un mouvement continu, en courbes, à la vitesse que permet la carte à chaque endroit.
-            val res = r.followPath(path.drop(1).ifEmpty { listOf(tx to ty) }, r.maxSpeed) { x, y, h ->
-                grid.speedFactor(x, y, h + if (r.reversed) 180.0 else 0.0).let { if (r.reversed) minOf(it, 0.6) else it }
-            }
-            travelled += kotlin.math.hypot(r.x - before.first, r.y - before.second)
-            when {
-                res.contains("liaison") || res.contains("vide") || res.startsWith("je ne roule pas") || res == "interrompu" ||
-                    res.contains("roue soulevée") || res.startsWith("arrêté") -> return "arrêté : $res"
-                res.startsWith("obstacle vu") -> log("👁️ ${res}") // vu à temps, noté sur la carte : on recalcule le chemin
-                res.contains("obstacle") || res.contains("bloqué") -> log("🛞 ${r.unstick(attempt)}") // noté sur la carte : on recalcule
-            }
-            if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.35) return "arrivé"
-            if (travelled > budget) return "trajet trop long (%.1f m), je m'arrête".format(travelled)
         }
-        return if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.6) "presque arrivé" else
-            "pas réussi à y arriver (trop d'obstacles ; %.1f m parcourus depuis %.1f m du départ)".format(travelled,
-                kotlin.math.hypot(startM.first - r.x, startM.second - r.y))
     }
 
     /** Où il a vu chacun pour la dernière fois (x, y sur la carte, heure). */

@@ -16,7 +16,11 @@ Caractère :
   Pour apprendre le visage de quelqu'un, tourne-toi d'abord vers lui ou elle (« regarder_personne »).
 - Tes deux micros se règlent tout seuls quand on te parle en face : tu n'as rien à faire pour les calibrer.
 - « Éteins-toi », « va dormir », « bonne nuit », « c'est fini » : « dormir ».
-- Quand tes roues viennent d'être branchées, ou si on te le demande : « tester_roues » (petit essai sûr : 20 cm, demi-tour).
+- Quand tes roues viennent d'être branchées, ou si on te le demande : « tester_roues » (auto-test : il vérifie aussi avec
+  ta caméra que tu avances bien du côté de ton visage, et corrige tout seul le sens et les angles).
+- Tu apprends de ce qu'on te dit. Une remarque sur ta façon de bouger : « ajuster » (ou « tester_roues » si tu pars
+  du mauvais côté). Une règle de conduite : « retenir_regle ». Ce que tu ne peux pas régler toi-même :
+  « demander_amelioration » (Claude, qui écrit ton programme, le fera). Ne réponds jamais juste « je ne peux pas ».
 - L'état de ton corps (nacelle connectée, roues, batterie) : seul l'outil « etat » dit la vérité, jamais tes souvenirs.
 - Une fois une recherche terminée, ne la relance pas si on te dit où est la chose (« à ta droite ») : « regarder ».
 - « Qu'est-ce que je tiens / je porte / je te montre ? » : la réponse est sur la personne ; regarde-la d'abord.
@@ -156,8 +160,9 @@ Façon de faire :
         ),
         mapOf(
             "name" to "tester_roues",
-            "description" to "Essai sûr de tes roues (Roomba) : avance et recule de 20 cm, tourne de 90° et revient, et donne la " +
-                "batterie. À faire quand on vient de les brancher.",
+            "description" to "Auto-test de tes roues (Roomba) : avance et recule, vérifie avec ta caméra que « avancer » va bien du " +
+                "côté de ton visage, mesure tes virages avec les capteurs du téléphone, et corrige tout seul ce qui est faux. " +
+                "À faire quand on vient de les brancher, ou quand tu pars du mauvais côté.",
             "parameters" to obj(emptyMap()),
         ),
         mapOf(
@@ -379,6 +384,35 @@ Façon de faire :
             "name" to "etat",
             "description" to "Ton état : nacelle connectée ou non, position de la tête, batterie de la nacelle.",
             "parameters" to obj(emptyMap()),
+        ),
+        mapOf(
+            "name" to "ajuster",
+            "description" to "Ajuste un de tes réglages quand on te fait une remarque sur ta façon de bouger : « tu vas trop " +
+                "vite » (vitesse moins), « viens plus près » (proximite plus), « tu tournes trop brusquement » (virage moins), " +
+                "« tes 90° font plus qu'un quart de tour » (echelle_rotation plus), « tu avances à l'envers / du mauvais côté » " +
+                "(sens_roues inverse). Le changement est gardé pour toujours.",
+            "parameters" to obj(mapOf(
+                "reglage" to str("le réglage", listOf("vitesse", "proximite", "virage", "echelle_rotation", "sens_roues")),
+                "sens" to str("plus, moins, normal (réglage d'origine) ; pour sens_roues : inverse ou normal",
+                    listOf("plus", "moins", "normal", "inverse")),
+            ), listOf("reglage", "sens")),
+        ),
+        mapOf(
+            "name" to "retenir_regle",
+            "description" to "Retient une règle de conduite qu'on t'apprend (« quand je dis X, fais Y », « ne fais plus jamais Z », " +
+                "« quand tu n'as pas ta nacelle, tourne les roues ») : elle s'applique tout de suite et à chaque conversation.",
+            "parameters" to obj(mapOf("regle" to str("la règle, formulée clairement, à la 2e personne")), listOf("regle")),
+        ),
+        mapOf(
+            "name" to "oublier_regle",
+            "description" to "Oublie une règle apprise (quand on te dit qu'elle ne vaut plus).",
+            "parameters" to obj(mapOf("mots" to str("quelques mots de la règle à oublier")), listOf("mots")),
+        ),
+        mapOf(
+            "name" to "demander_amelioration",
+            "description" to "Ce que tu ne peux pas changer toi-même (un nouveau savoir-faire, un défaut de ton programme, une " +
+                "idée) : tu le notes pour Claude, qui écrit ton programme et lit tes demandes chaque nuit.",
+            "parameters" to obj(mapOf("demande" to str("la demande, précise, avec l'exemple de ce qui s'est passé")), listOf("demande")),
         ),
     )
 }

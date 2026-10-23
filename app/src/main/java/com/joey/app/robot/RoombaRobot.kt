@@ -48,6 +48,10 @@ class RoombaRobot(
     /** Le visage (téléphone) regarde vers l'arrière du Roomba : « avancer » = rouler côté visage. */
     @Volatile var reversed = false
         set(v) { field = v; odo.reversed = v }
+    /** Correction des angles mesurés par les roues. */
+    var turnScale: Double
+        get() = odo.turnScale
+        set(v) { odo.turnScale = v }
 
     /** Vitesse max en intérieur (m/s). */
     var maxSpeed = 0.25

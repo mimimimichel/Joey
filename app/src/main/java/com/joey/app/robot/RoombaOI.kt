@@ -164,6 +164,8 @@ class Odometry {
     var travelledM = 0.0; private set
     /** Le visage regarde vers l'arrière du Roomba : « devant » pour Joey = derrière pour le Roomba. */
     @Volatile var reversed = false
+    /** Correction des angles (auto-test : « 90° » des roues = combien en vrai). */
+    @Volatile var turnScale = 1.0
     private var lastL: Int? = null
     private var lastR: Int? = null
 
@@ -180,7 +182,7 @@ class Odometry {
         if (kotlin.math.abs(dl) > 0.3 || kotlin.math.abs(dr) > 0.3) return 0.0 to 0.0
         val d = (dl + dr) / 2 * (if (reversed) -1 else 1)
         // Roue gauche plus loin que la droite : le robot tourne à droite
-        val dth = Math.toDegrees((dl - dr) / (RoombaOI.WHEEL_BASE_MM / 1000.0))
+        val dth = Math.toDegrees((dl - dr) / (RoombaOI.WHEEL_BASE_MM / 1000.0)) * turnScale
         val mid = Math.toRadians(headingDeg + dth / 2)
         x += d * kotlin.math.cos(mid)
         y += d * kotlin.math.sin(mid)

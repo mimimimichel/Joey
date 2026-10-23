@@ -110,6 +110,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<UiState> = _state
 
     val memory = Memory(File(app.filesDir, "memoire.json"))
+    /** Ce qu'il apprend de ce qu'on lui dit : réglages ajustés, règles de conduite. */
+    private val tuning = com.joey.app.life.Tuning(File(app.filesDir, "reglages.json"))
     private val people = com.joey.app.brain.People(File(app.filesDir, "personnes.json"))
 
     /** Code du foyer : celui des réglages, sinon celui de la compilation (le même sur tous les téléphones). */
@@ -1718,7 +1720,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val r = com.joey.app.robot.RoombaRobot(link, ::log)
                 r.connect()
                 roomba = r
-                r.reversed = flag("roomba_reversed", false)
+                applyTuning(r)
                 bodyRef = null // nouvelles roues, nouveau repère
                 log("🛞 Roomba branché : j'ai des roues !")
                 refreshRoomba()
@@ -1813,6 +1815,82 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             Thread.sleep(500)
         }
         return null
+    }
+
+    // ---- il apprend : réglages, auto-tests des roues ------------------------------------------------------------
+    private fun applyTuning(r: com.joey.app.robot.RoombaRobot) {
+        r.reversed = flag("roomba_reversed", false)
+        r.maxSpeed = tuning.get("vitesse")
+        r.turnScale = tuning.get("echelle_rotation")
+    }
+
+    /** Petite image en niveaux de gris de la caméra, prise après [after] (ms), ou null. */
+    private fun grayAfter(after: Long, timeoutMs: Long = 2500): Triple<FloatArray, Int, Int>? {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            if (camera.frameAt > after) {
+                val b = camera.frame() ?: break
+                val (w, h) = if (b.width >= b.height) 80 to 60 else 60 to 80
+                val small = android.graphics.Bitmap.createScaledBitmap(b, w, h, true)
+                val px = IntArray(w * h)
+                small.getPixels(px, 0, w, 0, 0, w, h)
+                return Triple(FloatArray(w * h) { i ->
+                    val c = px[i]
+                    (0.299f * ((c shr 16) and 255) + 0.587f * ((c shr 8) and 255) + 0.114f * (c and 255)) / 255f
+                }, w, h)
+            }
+            Thread.sleep(50)
+        }
+        return null
+    }
+
+    /**
+     * Auto-test du sens : une image, 30 cm « en avant », une image, retour. Si la scène a rapetissé, « avancer »
+     * l'éloigne de ce que voit son visage : le visage regarde vers l'arrière du Roomba, il corrige le réglage.
+     */
+    private fun selfTestDirection(r: com.joey.app.robot.RoombaRobot): String {
+        if (!flag("camera", true)) return "sens : caméra coupée, pas vérifié"
+        if (gimbal.ready) head.center() // la tête droit devant, sinon l'image ne dit rien du sens des roues
+        Thread.sleep(500)
+        val a = grayAfter(System.currentTimeMillis()) ?: return "sens : pas d'image, pas vérifié"
+        val go = r.drive(0.3)
+        if (!go.startsWith("avancé")) return "sens : pas pu avancer ($go)"
+        Thread.sleep(300)
+        val b = grayAfter(System.currentTimeMillis())
+        r.drive(-0.3)
+        b ?: return "sens : pas d'image, pas vérifié"
+        val z = com.joey.app.senses.ImageZoom.estimate(a.first, b.first, a.second, a.third)
+        journal.write("roues", "auto-test du sens : zoom %.3f (erreur %.4f, sans zoom %.4f)".format(z.scale, z.error, z.errorAtOne))
+        return when {
+            !z.confident -> "sens : pas sûr (rien de net devant la caméra ?), rien changé"
+            z.scale > 1 -> "sens : bon (avancer va bien du côté de ton visage)"
+            else -> {
+                val now = !r.reversed
+                setFlagValue("roomba_reversed", now)
+                log("🛞 Auto-test : j'avançais du mauvais côté, j'ai inversé le sens de mes roues")
+                "sens : FAUX, corrigé (avancer allait à l'opposé de ton visage ; réglage sens_roues inversé)"
+            }
+        }
+    }
+
+    /** Auto-test des angles : un quart de tour d'après les roues, mesuré par les capteurs du téléphone (sans nacelle). */
+    private fun selfTestRotation(r: com.joey.app.robot.RoombaRobot): String {
+        if (gimbal.ready) return "angles : pas mesurés (la nacelle stabilise le téléphone)"
+        val h0 = sensors.read()?.first ?: return "angles : pas de capteur d'orientation, pas mesurés"
+        r.turn(90.0)
+        Thread.sleep(500)
+        val h1 = sensors.read()?.first
+        r.turn(-90.0)
+        h1 ?: return "angles : mesure perdue"
+        val measured = Head.wrap(h1 - h0)
+        journal.write("roues", "auto-test des angles : 90° des roues = %.0f° mesurés".format(measured))
+        if (measured < 45 || measured > 140) return "angles : mesure bizarre (%.0f°), rien changé".format(measured)
+        val ratio = measured / 90.0
+        if (kotlin.math.abs(ratio - 1) < 0.05) return "angles : justes (%.0f° pour 90°)".format(measured)
+        val scale = (tuning.get("echelle_rotation") * ratio)
+        tuning.set("echelle_rotation", scale)
+        r.turnScale = tuning.get("echelle_rotation")
+        return "angles : corrigés (%.0f° en vrai pour 90° annoncés)".format(measured)
     }
 
     /** « Viens ici » sans nacelle : les roues font le cou (il tourne pour te trouver et te garder en face). */
@@ -1915,13 +1993,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     when {
                         seenAt > 0 && lost < 1500 -> {
                             val a = Head.wrap(seenAngle - Head.wrap(r.heading - seenHeading))
-                            if (untilClose && kotlin.math.abs(a) < 20 && (seenH >= 0.85 || (faces.lastSize ?: 0f) >= 0.12f))
+                            val near = tuning.get("proximite")
+                            if (untilClose && kotlin.math.abs(a) < 20 && (seenH >= near + 0.1 || (faces.lastSize ?: 0f) >= 0.12f))
                                 return "je suis arrivé près de toi"
-                            val wantYaw = if (kotlin.math.abs(a) < 6) 0.0 else (a * 1.8).coerceIn(-70.0, 70.0)
+                            val wantYaw = if (kotlin.math.abs(a) < 6) 0.0 else (a * tuning.get("virage")).coerceIn(-70.0, 70.0)
                             // Caméra au ras du sol : quelqu'un de proche remplit l'image. Il avance tant que la silhouette
                             // est petite, s'arrête quand elle remplit l'image, ne recule que si on est tout contre lui.
                             var wantFwd = when {
-                                seenH < 0.75 -> ((0.75 - seenH) * 0.9).coerceIn(0.06, r.maxSpeed)
+                                seenH < near -> ((near - seenH) * 0.9).coerceIn(0.06, r.maxSpeed)
                                 seenH > 0.97 && (faces.lastSize ?: 0f) > 0.25f -> -0.05
                                 else -> 0.0
                             }
@@ -2270,7 +2349,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             apiKey = geminiKey,
             network = { null },
             eyes = camera,
-            systemPrompt = JoeyPrompt.SYSTEM + (if (robot) JoeyPrompt.ROBOT_STYLE else "") + memory.promptText(),
+            systemPrompt = JoeyPrompt.SYSTEM + (if (robot) JoeyPrompt.ROBOT_STYLE else "") + memory.promptText() + tuning.promptText(),
             tools = GeminiLive.toJson(JoeyPrompt.TOOLS) as JSONArray,
             onTool = ::onTool,
             onTranscript = ::onTranscript,
@@ -2635,7 +2714,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Appelé sur un fil à part par Gemini Live ; peut bloquer le temps du mouvement. */
     // ---- outils longs en arrière-plan : la conversation continue pendant qu'il cherche ou se déplace ----------
     /** Outils qui peuvent durer (recherche, déplacement, relevé) : Gemini n'attend pas, il reçoit le résultat après. */
-    private val longTools = setOf("chercher", "aller_vers", "viens_ici", "cartographier", "regarder_ce_que_je_montre")
+    private val longTools = setOf("chercher", "aller_vers", "viens_ici", "cartographier", "regarder_ce_que_je_montre", "tester_roues")
     private val toolPool = Executors.newCachedThreadPool()
     @Volatile private var longToolGen = 0
 
@@ -2781,14 +2860,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val r = roomba ?: return mapOf("result" to noWheels)
                 log("🛞 Test des roues")
                 var res = ""
-                moveSync(holdMs = 1000, timeoutMs = 40_000) {
+                moveSync(holdMs = 1000, timeoutMs = 60_000) {
                     val steps = ArrayList<String>()
                     r.ready()?.let { steps.add("pas prêt : $it") }
                     if (steps.isEmpty()) {
                         steps.add("avance 20 cm : " + r.drive(0.2))
                         steps.add("recule 20 cm : " + r.drive(-0.2))
-                        steps.add("tourne de 90° : " + r.turn(-90.0))
-                        steps.add("revient : " + r.turn(90.0))
+                        steps.add(selfTestDirection(r))
+                        steps.add(selfTestRotation(r))
                     }
                     steps.add("batterie des roues : ${r.battery} %" + (if (r.onBase) ", sur la base" else ""))
                     res = steps.joinToString(" ; ")
@@ -2796,6 +2875,39 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 journal.write("roues", res)
                 mapOf("result" to res)
+            }
+            "ajuster" -> {
+                val what = (args["reglage"] as? String)?.trim()?.lowercase().orEmpty()
+                val how = (args["sens"] as? String)?.trim()?.lowercase().orEmpty()
+                val res = if (what == "sens_roues") {
+                    val rev = when (how) { "inverse" -> !flag("roomba_reversed", false); "normal" -> false; else -> null }
+                    if (rev == null) "pour sens_roues : « inverse » ou « normal »" else {
+                        setFlagValue("roomba_reversed", rev)
+                        "sens des roues : " + if (rev) "visage vers l'arrière du Roomba" else "visage vers l'avant du Roomba"
+                    }
+                } else tuning.adjust(what, how).also { roomba?.let { applyTuning(it) } }
+                log("🎛️ $res")
+                mapOf("result" to res)
+            }
+            "retenir_regle" -> {
+                val rule = (args["regle"] as? String)?.trim().orEmpty()
+                val isNew = tuning.addRule(rule)
+                if (isNew) log("📏 Règle apprise : $rule")
+                mapOf("result" to if (isNew) "règle retenue (appliquée dès maintenant et à chaque conversation)" else "tu la connaissais déjà")
+            }
+            "oublier_regle" -> {
+                val gone = tuning.removeRule((args["mots"] as? String).orEmpty())
+                gone.forEach { log("📏 Règle oubliée : $it") }
+                mapOf("result" to if (gone.isEmpty()) "aucune règle ne correspond (tes règles : ${tuning.rules().joinToString(" | ")})"
+                    else "oublié : ${gone.joinToString(" | ")}")
+            }
+            "demander_amelioration" -> {
+                val ask = (args["demande"] as? String)?.trim().orEmpty()
+                if (ask.isEmpty()) return mapOf("result" to "quelle demande ?")
+                journal.write("demande", ask)
+                log("📝 Demande pour Claude : $ask")
+                mapOf("result" to "noté pour Claude (il lit tes demandes chaque nuit et améliore ton programme ; Michael " +
+                    "recevra une nouvelle version)")
             }
             "dormir" -> {
                 // Il dit au revoir, puis la conversation s'arrête ; « Joey » le réveille.
@@ -3097,9 +3209,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "batterie_nacelle_pourcent" to gimbal.battery.takeIf { it >= 0 },
                     "roues" to (roomba?.let { r -> "branchées, batterie ${r.battery ?: "?"} %" + (if (r.onBase) ", sur ta base" else "") +
                         (if (r.charging) ", en charge" else "") + (if (r.vacuuming) ", aspiration en marche" else "") +
+                        (if (r.reversed) ", visage vers l'arrière du Roomba" else "") +
                         (r.safetyNote?.let { n -> ", dernier arrêt de sécurité : $n" } ?: "") }
                         ?: "pas branchées (Roomba)"),
                     "souvenirs" to memory.size,
+                    "reglages_appris" to tuning.describe(),
+                    "regles_apprises" to tuning.rules().size,
                     "visage_vu" to follower.sees,
                     "personne_reconnue" to (seeing() ?: "personne de connu en vue"),
                     "visages_visibles" to chooser.count,

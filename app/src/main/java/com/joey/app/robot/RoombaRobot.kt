@@ -73,7 +73,7 @@ class RoombaRobot(
         set(v) { odo.turnScale = v }
 
     /** Vitesse max en intérieur (m/s). */
-    var maxSpeed = 0.25
+    var maxSpeed = 0.4
 
     val x get() = odo.x
     val y get() = odo.y
@@ -300,6 +300,7 @@ class RoombaRobot(
         val t0 = System.currentTimeMillis()
         var progM = 0.0
         var progAt = t0
+        var rampV = 0.08
         try {
             while (!cancel && System.currentTimeMillis() < end) {
                 val done = odo.travelledM - start
@@ -340,9 +341,80 @@ class RoombaRobot(
                 }
                 // Un obstacle tout près (détecteurs de proximité) : il ralentit pour le toucher en douceur, ou l'éviter.
                 val vmax = if ((sign > 0) != reversed && obstacleNear) 0.08 else maxSpeed
-                val v = (left * 1.5).coerceIn(0.06, maxOf(0.06, vmax)) * sign
+                // Accélère en douceur (pas de saut de 0 à la vitesse max), ralentit à l'approche.
+                rampV = minOf(rampV + 0.035, (left * 1.5).coerceIn(0.06, maxOf(0.06, vmax)))
+                val v = rampV * sign
                 val yaw = (Head.wrap(h0 - odo.headingDeg) * 2).coerceIn(-20.0, 20.0)
                 wheels(v, yaw)
+                sleeper(50)
+            }
+        } finally {
+            wheels(0.0, 0.0)
+        }
+        return if (cancel) safetyNote?.let { "arrêté : $it" } ?: "interrompu" else result
+    }
+
+    /**
+     * Suit un trajet (points de l'odométrie) d'un mouvement continu, en courbes : il vise un point un peu devant lui
+     * sur le trajet et corrige sa direction en roulant (pas d'arrêt à chaque virage ; il ne tourne sur place que si le
+     * virage est franc). Vitesse modulée : [cruise] en ligne droite là où [speedFactor] (0..1, ce que dit la carte à cet
+     * endroit) le permet, plus lent dans les virages, près d'un obstacle et à l'arrivée ; accélérations douces.
+     */
+    fun followPath(path: List<Pair<Double, Double>>, cruise: Double = maxSpeed,
+                   speedFactor: (Double, Double, Double) -> Double = { _, _, _ -> 1.0 }): String {
+        ready()?.let { return it }
+        cancel = false
+        if (path.isEmpty()) return "rien à faire"
+        val goal = path.last()
+        val total = path.zipWithNext().sumOf { (a, b) -> hypot(b.first - a.first, b.second - a.second) } +
+            hypot(path.first().first - odo.x, path.first().second - odo.y)
+        val start = odo.travelledM
+        val t0 = System.currentTimeMillis()
+        val end = t0 + ((total / 0.06 + 6) * 1000).toLong()
+        var v = 0.0
+        var seg = 0
+        var progM = 0.0; var progAt = t0
+        var result = "arrivé"
+        try {
+            while (!cancel && System.currentTimeMillis() < end) {
+                val x = odo.x; val y = odo.y; val h = odo.headingDeg
+                val toGoal = hypot(goal.first - x, goal.second - y)
+                if (toGoal < 0.08 || (seg >= path.size - 1 && toGoal < 0.12)) break
+                if (!linkOk) { result = "arrêté : je ne sens plus mes roues (liaison avec le Roomba coupée)"; break }
+                val s = sensors
+                if (s != null && s.oiMode == 1 && System.currentTimeMillis() - t0 > 400) {
+                    result = "arrêté : " + (safetyNote ?: if (s.cliff) "vide détecté sous moi (bord de marche ?)" else "le Roomba a repris la main")
+                    break
+                }
+                if (s != null && s.bump) {
+                    wheels(0.0, 0.0)
+                    val side = if (s.bumpLeft && s.bumpRight) "devant" else if (s.bumpLeft) "à gauche" else "à droite"
+                    log("Roomba : pare-chocs touché $side")
+                    result = "obstacle touché $side après %.2f m".format(odo.travelledM - start)
+                    break
+                }
+                // Coincé : plus d'avance depuis 1,5 s.
+                val now = System.currentTimeMillis()
+                val done = odo.travelledM - start
+                if (done - progM > 0.01) { progM = done; progAt = now }
+                else if (now - progAt > 1500 && v > 0.05) { stalledAt = now; result = "bloqué après %.2f m : mes roues n'avancent plus".format(done); break }
+                // Point visé : le premier point du trajet à plus de 35 cm (on avance d'un segment quand on l'a dépassé).
+                while (seg < path.size - 1 && hypot(path[seg].first - x, path[seg].second - y) < 0.35) seg++
+                val target = path[seg]
+                val err = Head.wrap(Math.toDegrees(atan2(target.second - y, target.first - x)) - h)
+                if (abs(err) > 65 && v < 0.12) {
+                    // Virage franc : il pivote sur place, puis repart.
+                    v = 0.0
+                    wheels(0.0, (err * 2.5).coerceIn(-100.0, 100.0).let { if (abs(it) < 25) Math.signum(it) * 25 else it })
+                    progAt = now
+                    sleeper(50)
+                    continue
+                }
+                var want = cruise * speedFactor(x, y, h).coerceIn(0.2, 1.0) * (1 - abs(err) / 100).coerceAtLeast(0.25)
+                want = minOf(want, 0.06 + toGoal * 0.9)                 // ralentit à l'approche du but
+                if (obstacleNear) want = minOf(want, 0.08)              // un obstacle tout près : doucement
+                v = if (want > v) minOf(want, v + 0.035) else maxOf(want, v - 0.06) // ~0,7 m/s² pour accélérer
+                wheels(v, (err * 2.2).coerceIn(-110.0, 110.0))
                 sleeper(50)
             }
         } finally {

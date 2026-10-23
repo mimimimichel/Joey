@@ -14,18 +14,18 @@ class TuningTest {
     @Test fun ajusteEtRetient() {
         val f = fresh()
         val t = Tuning(f)
-        assertEquals(0.25, t.get("vitesse"), 1e-9)
+        assertEquals(0.40, t.get("vitesse"), 1e-9)
         t.adjust("vitesse", "moins")
-        assertEquals(0.20, t.get("vitesse"), 1e-9)
+        assertEquals(0.40 / 1.2, t.get("vitesse"), 1e-9)
         t.adjust("proximite", "plus")
         assertEquals(0.82, t.get("proximite"), 1e-9)
         repeat(10) { t.adjust("vitesse", "plus") }
-        assertEquals(0.45, t.get("vitesse"), 1e-9) // borné
+        assertEquals(0.50, t.get("vitesse"), 1e-9) // borné
         assertTrue(t.adjust("inconnu", "plus").startsWith("réglage inconnu"))
         val t2 = Tuning(f)
-        assertEquals(0.45, t2.get("vitesse"), 1e-9)
+        assertEquals(0.50, t2.get("vitesse"), 1e-9)
         t2.adjust("vitesse", "normal")
-        assertEquals(0.25, t2.get("vitesse"), 1e-9)
+        assertEquals(0.40, t2.get("vitesse"), 1e-9)
     }
 
     @Test fun reglesApprises() {

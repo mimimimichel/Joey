@@ -2090,31 +2090,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun navigateTo(tx: Double, ty: Double, tries: Int = 6, budget: Double = 20.0): String {
         val r = roomba ?: return noWheels
+        val startM = r.x to r.y
         var travelled = 0.0
         for (attempt in 0 until tries) {
             if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.3) return "arrivé"
             val path = grid.plan(r.x, r.y, tx, ty) ?: return "pas de chemin sur ma carte (tout est bouché par là)"
-            var replan = false
-            for (wp in path.drop(1)) {
-                val dx = wp.first - r.x; val dy = wp.second - r.y
-                val d = kotlin.math.hypot(dx, dy)
-                if (d < 0.08) continue
-                r.turn(Head.wrap(Math.toDegrees(kotlin.math.atan2(dy, dx)) - r.heading))
-                val step = d.coerceAtMost(1.2)
-                val res = r.drive(step)
-                travelled += movedOf(res, step)
-                when {
-                    res.contains("liaison") || res.contains("vide") || res.startsWith("je ne roule pas") || res == "interrompu" ||
-                        res.contains("roue soulevée") -> return "arrêté : $res"
-                    res.contains("obstacle") || res.contains("bloqué") -> { log("🛞 ${r.unstick(attempt)}"); replan = true }
-                }
-                if (replan) break
-                if (travelled > budget) return "trajet trop long (%.1f m), je m'arrête".format(travelled)
-                if (d > step + 0.05) { replan = true; break } // segment long : on refait le point
+            val before = r.x to r.y
+            // Un mouvement continu, en courbes, à la vitesse que permet la carte à chaque endroit.
+            val res = r.followPath(path.drop(1).ifEmpty { listOf(tx to ty) }, r.maxSpeed) { x, y, h ->
+                grid.speedFactor(x, y, h + if (r.reversed) 180.0 else 0.0).let { if (r.reversed) minOf(it, 0.6) else it }
             }
-            if (!replan && kotlin.math.hypot(tx - r.x, ty - r.y) < 0.35) return "arrivé"
+            travelled += kotlin.math.hypot(r.x - before.first, r.y - before.second)
+            when {
+                res.contains("liaison") || res.contains("vide") || res.startsWith("je ne roule pas") || res == "interrompu" ||
+                    res.contains("roue soulevée") || res.startsWith("arrêté") -> return "arrêté : $res"
+                res.contains("obstacle") || res.contains("bloqué") -> log("🛞 ${r.unstick(attempt)}") // noté sur la carte : on recalcule
+            }
+            if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.35) return "arrivé"
+            if (travelled > budget) return "trajet trop long (%.1f m), je m'arrête".format(travelled)
         }
-        return if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.6) "presque arrivé" else "pas réussi à y arriver (trop d'obstacles)"
+        return if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.6) "presque arrivé" else
+            "pas réussi à y arriver (trop d'obstacles ; %.1f m parcourus depuis %.1f m du départ)".format(travelled,
+                kotlin.math.hypot(startM.first - r.x, startM.second - r.y))
     }
 
     /** Où il a vu chacun pour la dernière fois (x, y sur la carte, heure). */
@@ -2221,11 +2218,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (wp.doorway) { doors++; log("🚪 Un passage : ${wp.description}") }
                 // Ce que la vision voit de sol libre droit devant : noté sur la carte (sans y être passé).
                 wp.clearAhead?.let { c -> if (c > 0.3) grid.markFreeRay(r.x, r.y, r.heading + (if (gimbal.ready) bodyPan() ?: 0.0 else 0.0), c.coerceAtMost(3.0)) }
-                if (kotlin.math.abs(bearing) > 6) r.turn(bearing)
-                asked = ((wp.distance ?: 1.0) - 0.2).coerceIn(0.3, 1.5)
-                // Obstacle vu tout près dans cette direction : il avance moins (et le contourne au prochain arrêt).
-                if (kotlin.math.abs(bearing) < 15) wp.clearAhead?.let { c -> asked = asked.coerceAtMost((c - 0.15).coerceAtLeast(0.2)) }
-                res = r.drive(asked)
+                // Il roule vers ce point d'un seul mouvement (en courbe), plus loin qu'avant (moins d'arrêts pour regarder),
+                // vite si la vision voit beaucoup de sol libre, prudemment sinon.
+                asked = ((wp.distance ?: 1.2) - 0.2).coerceIn(0.4, 2.5)
+                if (kotlin.math.abs(bearing) < 15) wp.clearAhead?.let { c -> asked = asked.coerceAtMost((c - 0.15).coerceAtLeast(0.3)) }
+                val th = Math.toRadians(r.heading + bearing)
+                val target = (r.x + asked * kotlin.math.cos(th)) to (r.y + asked * kotlin.math.sin(th))
+                val open = (wp.clearAhead ?: 1.0).let { if (it > 1.5) 1.0 else if (it > 0.8) 0.75 else 0.5 }
+                res = r.followPath(listOf(target), r.maxSpeed) { x, y, h -> minOf(open, grid.speedFactor(x, y, h).coerceAtLeast(0.6)) }
+                    .let { if (it == "arrivé") "avancé de %.2f m".format(asked) else it }
             } else {
                 // 3. Sans vision : la frontière la plus proche de sa carte (bord du connu), à au moins 80 cm.
                 val f = grid.frontiers(r.x, r.y, minSize = 4).firstOrNull { kotlin.math.hypot(it.first - r.x, it.second - r.y) > 0.8 }

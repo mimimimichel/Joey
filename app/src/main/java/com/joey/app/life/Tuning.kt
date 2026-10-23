@@ -18,7 +18,8 @@ class Tuning(private val file: File) {
 
     companion object {
         val KNOBS = listOf(
-            Knob("vitesse", 0.25, 0.10, 0.45, 1.25, true, "vitesse des roues quand il se déplace seul (m/s)",
+            Knob("vitesse", 0.40, 0.10, 0.50, 1.2, true, "vitesse max des roues quand la voie est libre (m/s ; il ralentit seul " +
+                "près des obstacles, dans l'inconnu et dans les virages)",
                 "plus vite", "plus lentement"),
             Knob("proximite", 0.75, 0.55, 0.92, 0.07, false, "jusqu'où il s'approche quand il suit ou vient (taille de la " +
                 "personne dans l'image)", "plus près", "plus loin"),
@@ -34,7 +35,12 @@ class Tuning(private val file: File) {
     private val values = HashMap<String, Double>()
     private val rules = ArrayList<String>()
 
-    init { load() }
+    init {
+        load()
+        // v0.53 : la vitesse est devenue une vitesse de croisière (il ralentit seul où il faut) ; les anciens réglages
+        // prudents (0,25-0,31, « super lent ») passent à la nouvelle vitesse d'origine.
+        if ((values["vitesse"] ?: 1.0) < 0.35 && values["vitesse_v2"] == null) { values.remove("vitesse"); values["vitesse_v2"] = 1.0; save() }
+    }
 
     @Synchronized private fun load() {
         if (!file.exists()) return

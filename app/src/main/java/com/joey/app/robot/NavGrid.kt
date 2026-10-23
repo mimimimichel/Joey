@@ -224,6 +224,21 @@ class NavGrid(val cell: Double = 0.1) {
             .sortedBy { hypot(it.first - x, it.second - y) }
     }
 
+    /**
+     * À quelle allure rouler ici (0..1 de la vitesse max) : pleine vitesse si les 70 cm devant lui sont connus et libres,
+     * plus prudent dans l'inconnu, lentement si un obstacle connu est tout près sur sa route.
+     */
+    fun speedFactor(x: Double, y: Double, headingDeg: Double): Double {
+        val t = Math.toRadians(headingDeg)
+        var unknown = 0
+        for (d in listOf(0.25, 0.45, 0.7)) {
+            val i = idx(x + d * cos(t)); val j = idx(y + d * sin(t))
+            if (key(i, j) in cliffs || blocked(i, j, 1)) return if (d < 0.4) 0.3 else 0.5
+            if (value(i, j) == null || !free(i, j)) unknown++
+        }
+        return when (unknown) { 0 -> 1.0; 1 -> 0.8; else -> 0.6 }
+    }
+
     /** Part de la surface connue (m²) : pour dire « j'ai exploré 18 m² ». */
     fun knownArea(): Double = synchronized(cells) { cells.values.count { it < CLEAR } * cell * cell }
 

@@ -181,6 +181,18 @@ class RoombaRobotTest {
         r.disconnect()
     }
 
+    @Test fun followsAPathSmoothly() {
+        val (f, r) = connected()
+        val t0 = System.currentTimeMillis()
+        // Un trajet en L : 1 m devant, puis 0,8 m à droite.
+        val res = r.followPath(listOf(1.0 to 0.0, 1.0 to 0.8), cruise = 0.4)
+        val ms = System.currentTimeMillis() - t0
+        assertTrue(res, res == "arrivé")
+        assertTrue("pos ${f.x},${f.y}", hypot(f.x - 1.0, f.y - 0.8) < 0.2)
+        assertTrue("trop lent : $ms ms", ms < 12_000) // ~1,8 m à 0,4 m/s, virage compris (avant : arrêt, pivot, arrêt…)
+        r.disconnect()
+    }
+
     @Test fun neverDrivesBlind() {
         val (f, r) = connected()
         Thread { Thread.sleep(500); f.mute = true }.start()

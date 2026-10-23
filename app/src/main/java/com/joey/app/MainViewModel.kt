@@ -1269,8 +1269,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun centerOnImagePoint(x: Double, y: Double) {
         val img = camera.frame(5000)
         val (dp, dt) = imageToDegrees((x * 2 - 1).toFloat(), (y * 2 - 1).toFloat(), img?.width ?: 4, img?.height ?: 3)
+        if (!gimbal.ready) { if (kotlin.math.abs(dp) > 5) roomba?.turn(dp); return } // sans cou : le corps se tourne
         head.look(dp, ((head.pose()?.second ?: 0.0) + dt).coerceIn(-70.0, 70.0))
     }
+
+    // ---- le regard : la tête si la nacelle est là, sinon tout le corps (il se débrouille avec ce qu'il a) -------
+    /** Peut-il tourner son regard ? (nacelle, ou à défaut les roues) */
+    private val canTurnGaze: Boolean get() = gimbal.ready || roomba != null
+
+    /** Tourne le regard de [deg] (+ = droite) ; [tilt] seulement avec la nacelle. */
+    private fun turnGaze(deg: Double, tilt: Double? = null): String = when {
+        gimbal.ready -> head.look(deg, tilt)
+        roomba != null -> roomba!!.turn(deg)
+        else -> "ni nacelle ni roues : tu ne peux pas te tourner"
+    }
+
+    /** Où regarde-t-il (+ = droite, en degrés) : la tête, ou le cap des roues. */
+    private fun gazePan(): Double = if (gimbal.ready) head.pose()?.first ?: 0.0 else roomba?.heading ?: 0.0
+
+    /** Ni nacelle ni roues. */
+    private val noGaze = "ni ta nacelle (ton cou) ni tes roues ne sont branchées : tu ne peux pas te tourner pour l'instant"
 
     /** Gemini Robotics-ER sur l'image de maintenant (pleine résolution). null s'il ne répond pas. */
     private fun erLocate(what: String, floor: Boolean = false): com.joey.app.brain.GeminiVision.Spot? {
@@ -1439,7 +1457,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         follower.pausedUntil = Long.MAX_VALUE // la tête vise la chose, pas les visages
         var sp = erLocate(what, floor = true)
         if (sp == null) return "Gemini Robotics-ER ne répond pas"
-        if (!sp.found || sp.confidence < 0.5) {
+        if ((!sp.found || sp.confidence < 0.5) && !gimbal.ready) {
+            // Sans cou : il tourne sur lui-même par sixièmes de tour et demande à chaque arrêt.
+            var hit: com.joey.app.brain.GeminiVision.Spot? = null
+            for (k in 1..5) {
+                r.turn(60.0); Thread.sleep(500)
+                val s2 = erLocate(what, floor = true) ?: break
+                if (s2.found && s2.confidence >= 0.5) { hit = s2; break }
+            }
+            sp = hit ?: return "je ne vois « $what » nulle part autour de moi (j'ai tourné sur moi-même)"
+            centerOnImagePoint(sp.x, sp.y)
+        } else if (!sp.found || sp.confidence < 0.5) {
             sp = searchSpatial(what) ?: return "je ne vois « $what » nulle part autour de moi"
         } else {
             centerOnImagePoint(sp.x, sp.y)
@@ -2026,8 +2054,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * et estime leur distance ; on les place au cap boussole. Bloquant (~30 s).
      */
     private fun mapHere(name: String): String {
-        log("🗺 Je relève : $name")
-        head.setHomeHere()
+        log("🗺 Je relève : $name" + if (!gimbal.ready) " (en tournant sur moi-même)" else "")
+        if (gimbal.ready) head.setHomeHere()
+        val pan0 = gazePan()
         val compass0 = sensors.compass()
         val (hfov, vfov) = camera.frame(5000)?.let { camera.fov(it.width, it.height) } ?: (camera.fovLong to camera.fovShort)
         val items = ArrayList<com.joey.app.brain.HouseMap.Item>()
@@ -2036,10 +2065,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         var errors = 0
         for (k in 0 until 6) {
             val target = k * 60.0
-            val cur = head.pose()?.first ?: 0.0
-            head.look(Head.wrap(target - cur), -5.0)
+            val cur = Head.wrap(gazePan() - pan0)
+            turnGaze(Head.wrap(target - cur), -5.0)
             Thread.sleep(700)
-            val pose = head.pose() ?: (target to -5.0)
+            val pose = if (gimbal.ready) head.pose() ?: (target to -5.0) else Head.wrap(gazePan() - pan0) to 0.0
             // Cap absolu de cet arrêt : boussole du départ + rotation mesurée (la boussole bouge avec les moteurs).
             val stopHeading = compass0?.let { (it + pose.first + 360) % 360 }
             val jpeg = camera.zoomJpeg("tout") ?: continue
@@ -2056,7 +2085,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             log("🗺 vue ${k + 1}/6 : ${sv.elements.size} éléments")
         }
         // Retour au départ.
-        head.look(Head.wrap(-(head.pose()?.first ?: 0.0)), 0.0)
+        turnGaze(Head.wrap(-(gazePan() - pan0)), 0.0)
         if (items.isEmpty()) return "relevé impossible ($errors erreurs de vision)"
         // Un même élément vu sur deux arrêts voisins : on n'en garde qu'un.
         val kept = ArrayList<com.joey.app.brain.HouseMap.Item>()
@@ -2680,9 +2709,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val noHead = "ta nacelle (ton cou) n'est pas connectée : tu ne peux pas bouger la tête pour l'instant"
         return when (name) {
             "regarder" -> {
-                if (!gimbal.ready) return mapOf("result" to noHead)
                 val dir = args["direction"] as? String ?: "devant"
                 val deg = (args["degres"] as? Number)?.toDouble()
+                if (!gimbal.ready) {
+                    // Sans cou : à gauche, à droite, derrière… c'est tout le corps qui tourne.
+                    val r = roomba ?: return mapOf("result" to noGaze)
+                    val turn = when (dir.lowercase()) {
+                        "gauche" -> -(deg ?: 45.0); "droite" -> deg ?: 45.0; "derriere" -> 180.0; "devant" -> 0.0
+                        else -> return mapOf("result" to "sans ta nacelle tu ne peux pas lever ou baisser les yeux")
+                    }
+                    log("👀 regarder $dir (avec les roues)")
+                    val res = moveSync(holdMs = 3000) { if (turn == 0.0) "déjà devant" else r.turn(turn) }
+                    live?.sendFrameNow()
+                    return mapOf("result" to res, "visage_dans_l_image" to ((faces.lastSize ?: 0f) > 0f))
+                }
                 log("👀 regarder $dir${deg?.let { " ${it.toInt()}°" } ?: ""}")
                 // Il garde ce regard quelques secondes avant de revenir te suivre.
                 val r = moveSync(holdMs = if (dir == "devant") 1000 else 7000) { head.lookDirection(dir, deg) }
@@ -2764,8 +2804,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 mapOf("result" to "dis au revoir en quelques mots : la conversation s'arrête dans 3 s ; on te réveille en disant « Joey »")
             }
             "regarder_personne" -> {
-                if (!gimbal.ready) return mapOf("result" to noHead)
                 val who = (args["qui"] as? String)?.trim().orEmpty()
+                if (!gimbal.ready) {
+                    val r = roomba ?: return mapOf("result" to noGaze)
+                    chooser.want(who.ifEmpty { "autre" })
+                    log("👀 je me tourne vers : ${who.ifEmpty { "l'autre" }} (avec les roues)")
+                    moveAsync(holdMs = 0) {
+                        Thread.sleep(400) // le temps que le choix du visage se fasse sur l'image suivante
+                        if (follower.sees) {
+                            val ang = follower.faceX * hfovNow() / 2
+                            if (kotlin.math.abs(ang) > 6) r.turn(ang) else "en face"
+                        } else searchWithBody(r, setOf("person"))?.let { "trouvé" } ?: "personne en vue"
+                    }
+                    return mapOf("result" to "tu te tournes (avec tes roues) vers ${who.ifEmpty { "l'autre personne" }}",
+                        "visages_dans_l_image" to chooser.count, "reconnus" to chooser.names().joinToString())
+                }
                 log("👀 je regarde : ${who.ifEmpty { "l'autre" }}")
                 // Tout de suite : la tête s'en charge pendant qu'il parle (avant, il attendait 2 à 4 s pour répondre).
                 moveAsync(holdMs = 0) { lookAtPerson(who) }
@@ -2773,8 +2826,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "reconnus" to chooser.names().joinToString())
             }
             "regarder_ce_que_je_montre" -> {
-                if (!gimbal.ready) return mapOf("result" to noHead)
                 if (!flag("camera", true)) return mapOf("result" to "ta caméra est coupée")
+                if (!gimbal.ready) {
+                    // Sans cou : il regarde ce qu'il a devant lui ; à la personne de le mettre dans le champ.
+                    live?.sendFrameNow()
+                    return mapOf("result" to "sans ta nacelle tu ne peux pas baisser les yeux : décris ce que tu vois sur " +
+                        "la nouvelle image ; si ce n'est pas dedans, demande qu'on te le mette devant la caméra")
+                }
                 var r: String? = null
                 moveSync(holdMs = 8000, timeoutMs = 40_000) { r = lookWherePointed(); r ?: "vision indisponible" }
                 live?.sendFrameNow()
@@ -2782,7 +2840,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     ". Regarde la nouvelle image pour en parler.")
             }
             "regarder_autour" -> {
-                if (!gimbal.ready) return mapOf("result" to noHead)
+                if (!gimbal.ready) {
+                    val r = roomba ?: return mapOf("result" to noGaze)
+                    log("👀 regarder autour (en tournant sur moi-même)")
+                    val seen = StringBuilder()
+                    moveSync(holdMs = 3000, timeoutMs = 40_000) {
+                        for ((k, where) in listOf("devant", "à droite", "derrière", "à gauche").withIndex()) {
+                            if (k > 0) { r.turn(90.0); Thread.sleep(400) }
+                            live?.sendFrameNow()
+                            seen.append("$where : ${objects.describe(seenNow())}. ")
+                        }
+                        r.turn(90.0) // retour face au départ
+                        "fait"
+                    }
+                    return mapOf("result" to "fait en tournant tout le corps (tu as reçu une image à chaque arrêt)", "detecteur" to seen.toString().trim())
+                }
                 log("👀 regarder autour")
                 val seen = StringBuilder()
                 moveSync(holdMs = 3000) {
@@ -2831,8 +2903,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 mapOf("result" to takePhotoBlocking(n))
             }
             "danser" -> {
-                if (!gimbal.ready) return mapOf("result" to noHead)
                 val secs = ((args["secondes"] as? Number)?.toInt() ?: 20).coerceIn(5, 120)
+                if (!gimbal.ready) {
+                    // Sans cou : il se dandine sur ses roues.
+                    val r = roomba ?: return mapOf("result" to noGaze)
+                    log("💃 je danse avec mes roues")
+                    moveAsync(holdMs = 1000) {
+                        val end = System.currentTimeMillis() + secs * 1000L
+                        var side = 1.0
+                        while (System.currentTimeMillis() < end && !Thread.currentThread().isInterrupted) {
+                            r.velocity(0.0, 120.0 * side, 350); Thread.sleep(330); side = -side
+                        }
+                        r.velocity(0.0, 0.0, 100)
+                        "fini"
+                    }
+                    return mapOf("result" to "tu danses ${secs} s en te dandinant sur tes roues")
+                }
                 dance(secs)
                 mapOf("result" to "tu danses ${secs} s (la tête suit le rythme entendu ; sans musique : rythme à toi)")
             }
@@ -2947,7 +3033,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             "aller_vers" -> {
                 if (roomba == null) return mapOf("result" to noWheels)
-                if (!gimbal.ready) return mapOf("result" to noHead)
                 val what = (args["objet"] as? String)?.trim().orEmpty()
                 if (what.isEmpty()) return mapOf("result" to "vers quoi ?")
                 log("🛞 Je vais vers : $what")
@@ -2970,7 +3055,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 mapOf("result" to res)
             }
             "cartographier" -> {
-                if (!gimbal.ready) return mapOf("result" to noHead)
+                if (!canTurnGaze) return mapOf("result" to noGaze)
                 if (!flag("camera", true)) return mapOf("result" to "ta caméra est coupée")
                 val lieu = (args["lieu"] as? String)?.trim().orEmpty().ifEmpty { "ici" }
                 var r = ""

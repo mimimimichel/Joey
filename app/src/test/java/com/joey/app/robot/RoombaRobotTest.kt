@@ -14,6 +14,8 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
     var right = 0; var left = 0 // mm/s
     var countsL = 1000.0; var countsR = 64000.0 // proche du passage à 0, pour tester le rebouclage
     var bump = false; var cliff = false; var onBase = false
+    var blocked = false // coincé : les roues ne tournent plus
+    var mute = false    // fil qui bouge : il n'entend plus rien
     var x = 0.0; var y = 0.0; var h = 0.0 // vraie position (m, °)
     val songs = ArrayList<Int>()
     var curBaud = 0
@@ -26,7 +28,7 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         val dt = (now - last) / 1e9
         last = now
         if (mode < 2) { right = 0; left = 0 }
-        val dl = left / 1000.0 * dt; val dr = right / 1000.0 * dt
+        val dl = if (blocked) 0.0 else left / 1000.0 * dt; val dr = if (blocked) 0.0 else right / 1000.0 * dt
         countsL += dl * 1000 / RoombaOI.MM_PER_COUNT; countsR += dr * 1000 / RoombaOI.MM_PER_COUNT
         val d = (dl + dr) / 2
         val dth = Math.toDegrees((dl - dr) / 0.235)
@@ -37,7 +39,7 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
 
     @Synchronized override fun write(b: ByteArray) {
         physics()
-        if (curBaud != baudOk) return // mauvaise vitesse : il n'entend rien
+        if (curBaud != baudOk || mute) return // mauvaise vitesse (ou fil débranché) : il n'entend rien
         for (v in b) inBuf.add(v.toInt() and 0xFF)
         while (inBuf.isNotEmpty()) {
             val op = inBuf[0]
@@ -162,6 +164,30 @@ class RoombaRobotTest {
         assertTrue(r.vacuuming)
         r.vacuum(false)
         assertTrue(!r.vacuuming)
+        r.disconnect()
+    }
+
+    @Test fun seesItIsStuckAndGetsFree() {
+        val (f, r) = connected()
+        f.blocked = true
+        val res = r.drive(0.5)
+        assertTrue(res, res.contains("bloqué"))
+        assertTrue(r.stuck)
+        f.blocked = false
+        val u = r.unstick(0)
+        assertTrue(u, u.contains("dégage"))
+        assertTrue("x ${f.x}", f.x < 0) // il a reculé
+        assertTrue("cap ${f.h}", abs(abs(f.h) - 40) < 8) // puis tourné
+        r.disconnect()
+    }
+
+    @Test fun neverDrivesBlind() {
+        val (f, r) = connected()
+        Thread { Thread.sleep(500); f.mute = true }.start()
+        val t0 = System.currentTimeMillis()
+        val res = r.drive(2.0)
+        assertTrue(res, res.contains("liaison"))
+        assertTrue("trop long", System.currentTimeMillis() - t0 < 5000) // avant : il roulait 43 s à l'aveugle
         r.disconnect()
     }
 

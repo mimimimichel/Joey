@@ -1498,7 +1498,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (d <= 0.6) return "je suis arrivé devant « $what »" + distanceText(d)
             alignBodyWithHead()
             val res = r.drive((d - 0.5).coerceIn(0.2, 1.0))
-            if (res.contains("obstacle") || res.contains("vide") || res.contains("interrompu")) return "je me suis arrêté : $res"
+            if ((res.contains("obstacle") || res.contains("bloqué")) && step < 4) { log("🛞 ${r.unstick(step)}"); return@repeat }
+            if (res.contains("obstacle") || res.contains("vide") || res.contains("interrompu") || res.contains("bloqué") ||
+                res.contains("liaison")) return "je me suis arrêté : $res"
         }
         return "je me suis approché de « $what »"
     }
@@ -1738,6 +1740,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 applyTuning(r)
                 bodyRef = null // nouvelles roues, nouveau repère
                 log("🛞 Roomba branché : j'ai des roues !")
+                // Il le sait tout de suite (sinon il répondait « pas branchées » d'après ce qu'il savait avant).
+                live?.event("Tes roues (le Roomba) viennent d'être branchées : tu peux rouler.", reply = false)
+                r.onLink = { ok ->
+                    log(if (ok) "🛞 Liaison avec le Roomba revenue" else "🛞 Liaison avec le Roomba coupée (fil qui bouge ?)")
+                    live?.event(if (ok) "La liaison avec tes roues est revenue." else "La liaison avec tes roues vient de se couper " +
+                        "(un fil a peut-être bougé) : tu t'es arrêté par sécurité. Dis-le simplement.", reply = false)
+                }
                 refreshRoomba()
             } catch (e: Exception) {
                 if (!quiet) { log("Roomba : ${e.message}"); message("Roomba : ${e.message}") }
@@ -1908,12 +1917,86 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return "angles : corrigés (%.0f° en vrai pour 90° annoncés)".format(measured)
     }
 
+    // ---- explorer : partir à l'aventure (trouver une pièce, le chien, une porte…) -----------------------------------
+    /** Une pièce se reconnaît à ce qu'il y a dedans (le détecteur du téléphone les connaît, sans quota). */
+    private fun roomClue(goal: String): String? {
+        val g = goal.lowercase()
+        return when {
+            "chambre" in g -> "lit"
+            "cuisine" in g -> "frigo"
+            "salle de bain" in g || "salle d'eau" in g -> "lavabo"
+            "toilette" in g || "wc" in g -> "toilettes"
+            "salon" in g || "séjour" in g -> "canapé"
+            "bureau" in g -> "ordinateur"
+            else -> null
+        }
+    }
+
+    /**
+     * Explore : il avance tout droit, contourne ce qu'il touche (se dégage et repart d'un autre côté), change de
+     * direction de temps en temps, et regarde à chaque arrêt si [goal] est en vue : le détecteur du téléphone (gratuit)
+     * pour ce qu'il connaît (une chambre = un lit…), sinon Gemini Robotics-ER une fois sur trois. Bloquant, [maxSec] au plus.
+     */
+    private fun explore(goal: String?, maxSec: Int = 120): String {
+        val r = roomba ?: return noWheels
+        following = false
+        followGen.incrementAndGet()
+        val clue = goal?.let { roomClue(it) ?: it }
+        val labels = clue?.let { CocoClasses.forTarget(it) }
+        val t0 = System.currentTimeMillis()
+        var travelled = 0.0
+        var sinceTurn = 0.0
+        var stops = 0
+        var stuckInRow = 0
+        log("🧭 J'explore" + (goal?.let { " : je cherche $it" + (if (clue != it) " (un $clue)" else "") } ?: ""))
+        while (System.currentTimeMillis() - t0 < maxSec * 1000L) {
+            // Regarder.
+            if (clue != null) {
+                val seen = labels?.let { bestSeen(it) }
+                if (seen != null) {
+                    val ang = (seen.box.cx - 0.5) * hfovNow()
+                    if (kotlin.math.abs(ang) > 8) r.turn(ang)
+                    return "trouvé : « $goal » est devant toi (j'ai vu ${if (clue != goal) "un $clue" else clue}) après %.1f m d'exploration".format(travelled)
+                }
+                if (labels == null && stops % 3 == 0 && vision.available()) {
+                    erLocate(clue, floor = true)?.takeIf { it.found && it.confidence >= 0.5 }?.let { sp ->
+                        centerOnImagePoint(sp.x, sp.y)
+                        return "trouvé : « $goal » en vue" + distanceText(sp.distance) + " après %.1f m d'exploration".format(travelled)
+                    }
+                }
+            }
+            stops++
+            // Avancer.
+            val res = r.drive(0.7)
+            val moved = Regex("([0-9]+[,.][0-9]+) m").find(res)?.groupValues?.get(1)?.replace(',', '.')?.toDoubleOrNull()
+                ?: if (res.startsWith("avancé")) 0.7 else 0.0
+            travelled += kotlin.math.abs(moved); sinceTurn += kotlin.math.abs(moved)
+            when {
+                res.contains("liaison") || res.contains("vide") || res.startsWith("je ne roule pas") || res == "interrompu" ->
+                    return "exploration arrêtée : $res (après %.1f m)".format(travelled)
+                res.contains("obstacle") || res.contains("bloqué") -> {
+                    if (++stuckInRow > 4) return "je n'arrive plus à avancer (coincé, après %.1f m) : aide-moi".format(travelled)
+                    log("🧭 ${r.unstick(stuckInRow - 1)}")
+                    sinceTurn = 0.0
+                }
+                else -> {
+                    stuckInRow = 0
+                    // Un long couloir sans rien : il change de cap de temps en temps pour ne pas tourner en rond.
+                    if (sinceTurn > 2.5) { r.turn(if (stops % 2 == 0) 70.0 else -100.0); sinceTurn = 0.0 }
+                }
+            }
+        }
+        return (if (goal != null) "pas trouvé « $goal »" else "exploration finie") + " après %.1f m (en %d s)".format(travelled, maxSec)
+    }
+
     /** « Viens ici » sans nacelle : les roues font le cou (il tourne pour te trouver et te garder en face). */
     private fun comeHereWithBody(r: com.joey.app.robot.RoombaRobot): String = chase(r, untilClose = true)
 
     /** « Viens ici » : trouve la personne, se tourne vers elle, s'approche jusqu'à ~1 m. Bloquant. */
     private fun comeHere(): String {
         val r = roomba ?: return noWheels
+        following = false
+        followGen.incrementAndGet()
         if (!gimbal.ready) return comeHereWithBody(r)
         if (!follower.sees && !searchLocal("personne", setOf("person"), keepMs = 2500)) return "je ne vois personne autour de moi"
         follower.pausedUntil = 0 // le suivi garde la personne au centre pendant qu'il avance
@@ -1943,8 +2026,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *   dépassait la cible et repartait dans l'autre sens.
      * - Perdue : il ralentit, puis tourne doucement du côté où il l'a vue (un tour au plus).
      */
+    /** Un seul « suis-moi » à la fois (le journal en montrait trois en même temps, qui se battaient). */
+    private val followGen = AtomicInteger()
+
     private fun followMe(minutes: Double) {
         val r = roomba ?: return
+        val gen = followGen.incrementAndGet()
         if (gimbal.ready && bodyRef == null) calibrateBody()
         following = true
         trackName = "personne"
@@ -1953,10 +2040,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         follower.pausedUntil = 0
         _state.update { it.copy(tracking = "je te suis") }
         thread(name = "suivre", isDaemon = true) {
-            try { chase(r, untilClose = false) } finally {
-                following = false
-                trackUntil = 0
-                _state.update { it.copy(tracking = null) }
+            try { chase(r, untilClose = false, gen = gen) } finally {
+                if (gen == followGen.get()) {
+                    following = false
+                    trackUntil = 0
+                    _state.update { it.copy(tracking = null) }
+                }
             }
         }
     }
@@ -1965,7 +2054,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Le pilotage commun de « suis-moi » et « viens ici » : boucle de 0,1 s, voir [followMe].
      * [untilClose] : s'arrête et renvoie dès qu'il est tout près (viens ici) ; sinon tant que [following].
      */
-    private fun chase(r: com.joey.app.robot.RoombaRobot, untilClose: Boolean, maxMs: Long = 60_000): String {
+    private fun chase(r: com.joey.app.robot.RoombaRobot, untilClose: Boolean, maxMs: Long = 60_000, gen: Int = followGen.get()): String {
+            var unstuck = 0
             val start = System.currentTimeMillis()
             val person = setOf("person")
             val headings = ArrayDeque<Pair<Long, Double>>() // cap des roues dans le temps
@@ -1981,10 +2071,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             var searched = 0.0
             var prevHeading = r.heading
             try {
-                while (roomba === r && (if (untilClose) System.currentTimeMillis() - start < maxMs
+                while (roomba === r && gen == followGen.get() && (if (untilClose) System.currentTimeMillis() - start < maxMs
                         else following && System.currentTimeMillis() < trackUntil)) {
                     Thread.sleep(100)
                     val now = System.currentTimeMillis()
+                    // Coincé : il se dégage tout seul (3 essais), puis demande de l'aide.
+                    if (r.stuck) {
+                        if (unstuck >= 3) {
+                            log("🛞 Coincé, je n'arrive pas à me dégager")
+                            remark("Tu es coincé et tu n'arrives pas à te dégager après 3 essais : demande de l'aide, en " +
+                                "quelques mots.", minGapMs = 10_000)
+                            return "coincé : j'ai essayé 3 fois de me dégager, il faut m'aider"
+                        }
+                        log("🛞 Coincé : je me dégage (essai ${unstuck + 1})")
+                        r.unstick(unstuck++)
+                        fwd = 0.0; yaw = 0.0
+                        continue
+                    }
                     headings.addLast(now to r.heading)
                     while (headings.size > 40) headings.removeFirst()
                     // Une nouvelle image : où est la personne ?
@@ -2739,7 +2842,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Appelé sur un fil à part par Gemini Live ; peut bloquer le temps du mouvement. */
     // ---- outils longs en arrière-plan : la conversation continue pendant qu'il cherche ou se déplace ----------
     /** Outils qui peuvent durer (recherche, déplacement, relevé) : Gemini n'attend pas, il reçoit le résultat après. */
-    private val longTools = setOf("chercher", "aller_vers", "viens_ici", "cartographier", "regarder_ce_que_je_montre", "tester_roues")
+    private val longTools = setOf("chercher", "aller_vers", "viens_ici", "cartographier", "regarder_ce_que_je_montre", "tester_roues",
+        "explorer", "se_degager")
     private val toolPool = Executors.newCachedThreadPool()
     @Volatile private var longToolGen = 0
 
@@ -3164,8 +3268,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 followMe(((args["minutes"] as? Number)?.toDouble() ?: 3.0).coerceIn(0.5, 15.0))
                 mapOf("result" to "tu suis la personne (dis-lui de marcher doucement) ; « arrete » pour t'arrêter")
             }
+            "se_degager" -> {
+                val r = roomba ?: return mapOf("result" to noWheels)
+                log("🛞 Je me dégage")
+                var res = ""
+                moveSync(holdMs = 1000, timeoutMs = 30_000) {
+                    val tries = ArrayList<String>()
+                    for (i in 0 until 3) {
+                        tries.add(r.unstick(i))
+                        Thread.sleep(300)
+                        if (!r.stuck && r.sensors?.bump != true) break
+                    }
+                    res = tries.joinToString(" ; ")
+                    res
+                }
+                mapOf("result" to res + (if (r.stuck) " — toujours coincé : demande de l'aide" else " — libre"))
+            }
+            "explorer" -> {
+                if (roomba == null) return mapOf("result" to noWheels)
+                val goal = (args["objectif"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+                val secs = ((args["secondes"] as? Number)?.toInt() ?: 120).coerceIn(20, 300)
+                var res = ""
+                moveSync(holdMs = 3000, timeoutMs = secs * 1000L + 30_000) { res = explore(goal, secs); res }
+                live?.sendFrameNow()
+                mapOf("result" to res + ". Si c'est une pièce que tu ne connais pas, propose de la cartographier.")
+            }
             "arrete" -> {
                 following = false
+                followGen.incrementAndGet()
                 wheelGen.incrementAndGet() // les déplacements en attente sont annulés
                 roomba?.stop()
                 motionJob?.cancel(true)

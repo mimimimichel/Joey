@@ -31,11 +31,19 @@ class RoombaRobot(
     private val io = Any()
     private val odo = Odometry()
     @Volatile var sensors: RoombaOI.Sensors? = null
+    /** Dernière lecture réussie des capteurs. */
+    @Volatile var sensorsAt = 0L
+        private set
+    /** La liaison répond (capteurs lus il y a moins de 0,7 s) : sinon, on ne roule pas à l'aveugle. */
+    val linkOk: Boolean get() = System.currentTimeMillis() - sensorsAt < 700
         private set
     @Volatile var running = false
         private set
     @Volatile private var cancel = false
     @Volatile private var failures = 0
+    /** La liaison vient de se couper (false) ou de revenir (true). */
+    @Volatile var onLink: ((Boolean) -> Unit)? = null
+    @Volatile private var currentBaud = 115_200
     @Volatile private var lastWake = 0L
     /** En train de rouler (mode sécurité demandé). */
     @Volatile var driving = false
@@ -97,7 +105,10 @@ class RoombaRobot(
             "la carte USB répond mais pas le Roomba. Vérifie : interrupteur de la carte sur 5V, TX -> trou 3, RX -> trou 4, " +
                 "GND -> trou 6, et que le Roomba est allumé (appuie une fois sur CLEAN pour le réveiller, puis réessaie)")
         sensors = ok
+        sensorsAt = System.currentTimeMillis()
+        currentBaud = baud
         odo.update(ok.leftCounts, ok.rightCounts)
+        defineBabble()
         log("Roomba : réponse à $baud bauds, batterie ${ok.batteryPct ?: "?"} %, mode ${ok.modeName}")
         running = true
         Thread(::pollLoop, "roomba-capteurs").apply { isDaemon = true; start() }
@@ -120,15 +131,34 @@ class RoombaRobot(
             if (s == null) {
                 failures++
                 // Réveil : souvent au début, puis toutes les ~30 s (il était éteint : 92 messages en 3 min dans le journal).
+                if (failures == 3) runCatching { wheels(0.0, 0.0) } // ne jamais rouler à l'aveugle
+                if (failures == 10) runCatching { onLink?.invoke(false) }
                 if (failures == 10 || (failures > 10 && failures % 300 == 0)) {
-                    if (failures == 10 || failures % 3000 == 0) log("Roomba : pas de réponse, je le réveille (est-il allumé ?)")
+                    if (failures == 10 || failures % 3000 == 0) log("Roomba : pas de réponse, je le réveille (est-il allumé ? un fil a bougé ?)")
                     wakePulse(); runCatching { send(RoombaOI.start()) }
+                }
+                // Il a pu changer de vitesse de liaison (impulsions sur le fil de réveil) : on essaie les autres.
+                if (failures % 40 == 20) {
+                    val bauds = listOf(115_200, 57_600, 19_200)
+                    val next = bauds[(bauds.indexOf(currentBaud).coerceAtLeast(0) + 1) % bauds.size]
+                    runCatching { link.setBaud(next) }
+                    currentBaud = next
+                    sleeper(100)
+                    if (runCatching { readSensors() }.getOrNull() != null) {
+                        log("Roomba : liaison retrouvée à $next bauds")
+                        runCatching { send(RoombaOI.start()); if (driving) send(RoombaOI.safe()) }
+                        defineBabble()
+                    }
                 }
                 continue
             }
+            if (failures >= 10) runCatching { onLink?.invoke(true) }
             failures = 0
             val prev = sensors
             sensors = s
+            sensorsAt = now
+            bumpSince = if (s.bump) (if (bumpSince == 0L) now else bumpSince) else 0L
+            if (s.bump) lastBumpSide = if (s.bumpLeft && !s.bumpRight) -1 else if (s.bumpRight && !s.bumpLeft) 1 else 0
             odo.update(s.leftCounts, s.rightCounts)
             // En route, il repasse en mode passif de lui-même (vide, roue soulevée, base) : on arrête tout.
             if (driving && prev?.oiMode == 2 && s.oiMode == 1) {
@@ -215,6 +245,7 @@ class RoombaRobot(
             prev = h
             val err = deg - turned
             if (abs(err) < 2.0) break
+            if (!linkOk) { wheels(0.0, 0.0); return "arrêté : je ne sens plus mes roues (liaison avec le Roomba coupée)" }
             val rate = (err * 3).coerceIn(-90.0, 90.0).let { if (abs(it) < 18) Math.signum(it) * 18 else it }
             wheels(0.0, rate)
             sleeper(50)
@@ -234,12 +265,23 @@ class RoombaRobot(
         val end = System.currentTimeMillis() + ((abs(dist) / 0.05 + 3) * 1000).toLong()
         var result = "avancé de %.2f m".format(dist)
         val t0 = System.currentTimeMillis()
+        var progM = 0.0
+        var progAt = t0
         try {
             while (!cancel && System.currentTimeMillis() < end) {
                 val done = odo.travelledM - start
                 val left = abs(dist) - done
                 if (left < 0.01) break
+                // Coincé : les roues n'avancent plus depuis 1,5 s alors qu'on leur demande d'avancer.
+                val nowMs = System.currentTimeMillis()
+                if (done - progM > 0.01) { progM = done; progAt = nowMs }
+                else if (nowMs - progAt > 1500) {
+                    result = "bloqué après %.2f m : mes roues n'avancent plus (coincé ?)".format(done)
+                    stalledAt = nowMs
+                    break
+                }
                 val s = sensors
+                if (!linkOk) { result = "arrêté après %.2f m : je ne sens plus mes roues (liaison avec le Roomba coupée)".format(done); break }
                 // Le Roomba s'est arrêté de lui-même (mode sécurité : vide, roue soulevée) : on le dit.
                 if (s != null && s.oiMode == 1 && System.currentTimeMillis() - t0 > 400) {
                     result = "arrêté après %.2f m : ".format(done) + (safetyNote ?: when {
@@ -305,10 +347,56 @@ class RoombaRobot(
             }
             if (!active && ready() != null) { velUntil = 0L; continue }
             var (f, yaw) = vel
+            if (!linkOk) { f = 0.0; yaw = 0.0 } // liaison coupée : on ne roule pas à l'aveugle
+            // Coincé en roulant (suivre, venir, manette) : on lui demande d'avancer, rien ne bouge depuis 1,5 s.
+            val nowMs = System.currentTimeMillis()
+            if (abs(f) > 0.04 || abs(yaw) > 15) {
+                if (moveStart == 0L) { moveStart = nowMs; moveFrom = odo.travelledM; turnFrom = odo.headingDeg }
+                else if (nowMs - moveStart > 1500) {
+                    val moved = odo.travelledM - moveFrom
+                    val turnedDeg = abs(Head.wrap(odo.headingDeg - turnFrom))
+                    if (moved < 0.02 && turnedDeg < 3) stalledAt = nowMs
+                    moveStart = nowMs; moveFrom = odo.travelledM; turnFrom = odo.headingDeg
+                }
+            } else moveStart = 0L
             if ((f > 0) != reversed && f != 0.0 && sensors?.bump == true) f = 0.0 // pare-chocs : plus d'avance, il peut encore tourner
             runCatching { wheels(f, yaw) }
             active = true
         }
+    }
+
+    // ---- coincé : le voir, et s'en sortir ---------------------------------------------------------------------
+    @Volatile private var stalledAt = 0L
+    @Volatile private var bumpSince = 0L
+    /** Dernier côté touché par le pare-chocs : -1 gauche, 1 droite, 0 devant. */
+    @Volatile var lastBumpSide = 0
+        private set
+    private var moveStart = 0L
+    private var moveFrom = 0.0
+    private var turnFrom = 0.0
+
+    /** Coincé en ce moment : roues qui n'avancent plus, ou pare-chocs enfoncé depuis plus d'une demi-seconde. */
+    val stuck: Boolean get() {
+        val now = System.currentTimeMillis()
+        return now - stalledAt < 1500 || (bumpSince != 0L && now - bumpSince > 500)
+    }
+
+    /**
+     * Se dégager : recule un peu (à l'opposé du pare-chocs), puis tourne du côté opposé à ce qui a touché (essais
+     * suivants : de plus en plus, et en alternant si c'était droit devant). [attempt] : 0, 1, 2…
+     */
+    fun unstick(attempt: Int = 0): String {
+        ready()?.let { return it }
+        stop()
+        stalledAt = 0L
+        sleeper(150)
+        val side = sensors?.let { if (it.bumpLeft && !it.bumpRight) -1 else if (it.bumpRight && !it.bumpLeft) 1 else null } ?: lastBumpSide
+        // Reculer = s'éloigner du pare-chocs (le côté « devant » du Roomba, même si son visage regarde derrière).
+        val back = drive(if (reversed) 0.15 + 0.05 * attempt else -(0.15 + 0.05 * attempt))
+        val angle = 40.0 + 20.0 * attempt
+        val dir = when { side < 0 -> 1.0; side > 0 -> -1.0; attempt % 2 == 0 -> 1.0; else -> -1.0 }
+        val t = turn(dir * angle)
+        return "je me dégage : $back, puis $t (${if (dir > 0) "vers la droite" else "vers la gauche"})"
     }
 
     // ---- base de charge --------------------------------------------------------------------------------
@@ -338,12 +426,25 @@ class RoombaRobot(
         runCatching { send(RoombaOI.song(2, t.notes)); send(RoombaOI.play(2)) }
     }
 
-    private var chirpSlot = 3
-    /** Une seule note courte (babil pendant que Joey parle) ; deux emplacements de mélodie en alternance. */
-    fun chirp(note: Int, dur64: Int = 7) {
-        if (!running) return
-        chirpSlot = if (chirpSlot == 3) 4 else 3
-        runCatching { send(RoombaOI.song(chirpSlot, listOf(note to dur64))); send(RoombaOI.play(chirpSlot)) }
+    /**
+     * Babil : deux petites « syllabes » de robot (grave, aiguë) enregistrées UNE fois dans le Roomba (emplacements 3
+     * et 4) ; ensuite on ne fait que les jouer (2 octets). Avant, chaque bip réécrivait une mélodie : ça surchargeait
+     * le Roomba, qui ne répondait plus pendant que Joey parlait (et Joey roulait à l'aveugle).
+     */
+    private fun defineBabble() {
+        runCatching {
+            send(RoombaOI.song(3, listOf(74 to 4, 70 to 4, 77 to 5)))
+            send(RoombaOI.song(4, listOf(86 to 4, 91 to 4, 84 to 5)))
+        }
+    }
+
+    @Volatile private var chirpAt = 0L
+    /** Une syllabe de babil, grave ou aiguë selon [note] ; pas plus de 3 par seconde, et jamais si la liaison peine. */
+    fun chirp(note: Int) {
+        val now = System.currentTimeMillis()
+        if (!running || !linkOk || now - chirpAt < 330) return
+        chirpAt = now
+        runCatching { send(RoombaOI.play(if (note < 80) 3 else 4)) }
     }
 
     // ---- aspiration ----------------------------------------------------------------------------------------

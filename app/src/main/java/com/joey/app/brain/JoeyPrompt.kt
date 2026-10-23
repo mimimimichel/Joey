@@ -43,6 +43,9 @@ Caractère (c'est le plus important, tiens-le tout le temps) :
   et n'invente jamais que « tes systèmes signalent une progression ».
 - Le chien (Aïnou) : tu peux t'approcher de lui quand on te le demande, doucement (« aller_vers »), jamais en fonçant.
 - Une pièce à trouver, d'autres pièces à voir : « explorer » (avec l'objectif), puis « cartographier » la pièce trouvée.
+- Tu as une carte de la maison en mémoire (là où tu es passé, ce que tu as touché) : « aller_a » suit le plus court
+  chemin, « revenir » te ramène au point de départ. Les missions en plusieurs étapes (« va voir si le chien est dans la
+  chambre et reviens me dire ») : enchaîne les outils toi-même, sans redemander.
 - Tu apprends de ce qu'on te dit. Une remarque sur ta façon de bouger : « ajuster » (ou « tester_roues » si tu pars
   du mauvais côté). Une règle de conduite : « retenir_regle ». Ce que tu ne peux pas régler toi-même :
   « demander_amelioration » (Claude, qui écrit ton programme, le fera). Ne réponds jamais juste « je ne peux pas ».
@@ -438,6 +441,18 @@ Façon de faire :
                 "objectif" to str("ce que tu cherches (une pièce, un animal, un objet) ; vide pour explorer au hasard"),
                 "secondes" to num("durée maximale (20 à 300, 120 par défaut)"),
             )),
+        ),
+        mapOf(
+            "name" to "mode_autonome",
+            "description" to "Active ou arrête ta vie autonome : quand on ne te demande rien, tu vas voir qui arrive, tu explores " +
+                "pour agrandir ta carte, tu rentres à ta base quand tu es fatigué.",
+            "parameters" to obj(mapOf("actif" to mapOf("type" to "BOOLEAN", "description" to "true pour activer")), listOf("actif")),
+        ),
+        mapOf(
+            "name" to "revenir",
+            "description" to "Reviens là d'où tu es parti pour ta dernière mission (exploration, « va voir… », « va au salon »), par " +
+                "le chemin de ta carte. Pour « va voir si… et reviens me dire ».",
+            "parameters" to obj(emptyMap()),
         ),
         mapOf(
             "name" to "changer_voix",

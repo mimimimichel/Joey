@@ -123,6 +123,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Tours de la tête par rapport au corps (le câble vers le Roomba ne doit pas s'entortiller). */
     private val cable = com.joey.app.gimbal.CableTwist()
+    /** La carte en carreaux de 10 cm (où il est passé, ce qu'il a touché) : trajets et exploration. */
+    private val grid = com.joey.app.robot.NavGrid()
+    private val gridFile = File(app.filesDir, "carte_grille.json")
+    /** Repère de la carte = sa base (gardé d'une fois sur l'autre) ; sinon carte de la séance seulement. */
+    @Volatile private var gridAnchored = false
     /** Ce qu'il apprend de ce qu'on lui dit : réglages ajustés, règles de conduite. */
     private val tuning = com.joey.app.life.Tuning(File(app.filesDir, "reglages.json"))
     private val people = com.joey.app.brain.People(File(app.filesDir, "personnes.json"))
@@ -1469,6 +1474,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun goToward(what: String): String {
         val r = roomba ?: return noWheels
+        missionStart = r.x to r.y
         follower.pausedUntil = Long.MAX_VALUE // la tête vise la chose, pas les visages
         var sp = erLocate(what, floor = true)
         if (sp == null) return "Gemini Robotics-ER ne répond pas"
@@ -1739,6 +1745,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 roomba = r
                 applyTuning(r)
                 bodyRef = null // nouvelles roues, nouveau repère
+                anchorGrid(r)
+                r.onContact = { kind, side -> runCatching { gridContact(r, kind, side) } }
                 log("🛞 Roomba branché : j'ai des roues !")
                 // Il le sait tout de suite (sinon il répondait « pas branchées » d'après ce qu'il savait avant).
                 live?.event("Tes roues (le Roomba) viennent d'être branchées : tu peux rouler.", reply = false)
@@ -1953,6 +1961,142 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "maison relevée : ${done.size} pièce(s) — ${done.joinToString()} (sur ta carte, avec leur position)"
     }
 
+    // ---- mode autonome : quand on ne lui demande rien, il vit sa vie de robot ------------------------------------------
+    /**
+     * Toutes les 15 s, s'il est libre (pas de conversation en cours, pas de mission), de jour, avec ses roues et de la
+     * batterie : quelqu'un vient d'arriver -> il va le voir et le salue ; personne depuis 10 min et sa carte n'a pas
+     * grandi depuis 30 min -> petite exploration (75 s), puis retour (à sa base s'il en venait). Batterie faible : la
+     * base (déjà géré par l'horloge).
+     */
+    private fun autonomyLoop() {
+        var lastExploreAt = System.currentTimeMillis() - 25 * 60_000L
+        var lastVisitAt = 0L
+        var seenSince = 0L
+        while (!cleared) {
+            Thread.sleep(15_000)
+            runCatching {
+                if (!flag("autonomy", false)) return@runCatching
+                val r = roomba ?: return@runCatching
+                val s = _state.value
+                val now = System.currentTimeMillis()
+                val h = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+                if (h !in 8..21 || s.busy || following || dancing) return@runCatching
+                if (s.live == LiveState.SPEAKING || now - lastPersonTalkAt < 120_000) return@runCatching // on lui parle : il reste là
+                val battery = r.battery ?: 100
+                if (battery < 30 || (r.charging && battery < 80)) return@runCatching
+                // Quelqu'un est là depuis peu (pas encore salué) : il va le voir.
+                if (follower.sees) { if (seenSince == 0L) seenSince = now } else seenSince = 0L
+                if (seenSince != 0L && now - seenSince < 30_000 && now - lastVisitAt > 20 * 60_000L) {
+                    lastVisitAt = now
+                    log("🤖 Autonome : je vais voir qui est là")
+                    val res = moveSync(holdMs = 3000, timeoutMs = 90_000) { comeHere() }
+                    if (res.startsWith("je suis arrivé")) remark("Tu es allé de toi-même voir la personne qui vient d'arriver : " +
+                        "salue-la, en quelques mots, avec ton caractère.", minGapMs = 0)
+                    return@runCatching
+                }
+                // Personne autour : il agrandit sa carte, puis revient.
+                if (now - lastExploreAt > 30 * 60_000L && now - lastFaceSeenAt > 10 * 60_000L) {
+                    lastExploreAt = now
+                    val fromBase = r.onBase
+                    log("🤖 Autonome : je vais agrandir ma carte" + if (fromBase) " (puis je rentre à ma base)" else "")
+                    missionStart = r.x to r.y
+                    moveSync(holdMs = 1000, timeoutMs = 5 * 60_000L) {
+                        val e = explore(null, 75)
+                        val back = if (fromBase) r.seekDock() else missionStart?.let { navigateTo(it.first, it.second) } ?: ""
+                        missionStart = null
+                        log("🤖 $e ; retour : $back")
+                        e
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- carte en grille, trajets ---------------------------------------------------------------------------------
+    private var lastMarkX = Double.NaN
+    private var lastMarkY = Double.NaN
+    private var gridSavedAt = 0L
+    private var wasOnBase = false
+
+    /** Posé sur sa base : la base devient l'origine, et on reprend la carte gardée (sinon : carte de la séance). */
+    private fun anchorGrid(r: com.joey.app.robot.RoombaRobot) {
+        if (r.onBase) {
+            r.resetOdometry()
+            if (!gridAnchored) { grid.clear(); grid.load(gridFile) }
+            gridAnchored = true
+            log("🗺 Sur ma base : ma carte part d'ici (%.0f m² connus)".format(grid.knownArea()))
+        } else if (!gridAnchored) {
+            grid.clear()
+        }
+        wasOnBase = r.onBase
+        lastMarkX = Double.NaN
+    }
+
+    /** 10 fois par seconde : là où il passe est libre ; revenu sur sa base, il recale sa position (fini la dérive). */
+    private fun gridTick() {
+        val r = roomba ?: return
+        if (!r.linkOk) return
+        if (r.onBase && !wasOnBase) anchorGrid(r)
+        wasOnBase = r.onBase
+        val x = r.x; val y = r.y
+        if (lastMarkX.isNaN() || kotlin.math.hypot(x - lastMarkX, y - lastMarkY) > 0.05) {
+            grid.markRobot(x, y); lastMarkX = x; lastMarkY = y
+        }
+        val now = System.currentTimeMillis()
+        if (gridAnchored && now - gridSavedAt > 30_000) { gridSavedAt = now; grid.save(gridFile) }
+    }
+
+    /** Un contact sur la carte (le pare-chocs regarde vers l'arrière de Joey s'il est monté à l'envers). */
+    private fun gridContact(r: com.joey.app.robot.RoombaRobot, kind: String, side: Int) {
+        val h = r.heading + if (r.reversed) 180.0 else 0.0
+        when (kind) {
+            "vide" -> { grid.markCliff(r.x, r.y, h); log("🗺 Vide noté sur ma carte") }
+            "proche" -> grid.markObstacle(r.x, r.y, h, 0.30, side)
+            else -> grid.markObstacle(r.x, r.y, h, side = side)
+        }
+    }
+
+    /** Distance parcourue d'après le résumé de drive() (« avancé de 0,70 m », « … après 0,35 m »). */
+    private fun movedOf(res: String, asked: Double): Double =
+        Regex("([0-9]+[,.][0-9]+) m").find(res)?.groupValues?.get(1)?.replace(',', '.')?.toDoubleOrNull()?.let { kotlin.math.abs(it) }
+            ?: if (res.startsWith("avancé")) kotlin.math.abs(asked) else 0.0
+
+    /**
+     * Va au point (x, y) de sa carte par le plus court chemin connu : il suit les segments, et s'il touche quelque chose
+     * (noté sur la carte), il se dégage et recalcule. [budget] : mètres au plus.
+     */
+    private fun navigateTo(tx: Double, ty: Double, tries: Int = 6, budget: Double = 20.0): String {
+        val r = roomba ?: return noWheels
+        var travelled = 0.0
+        for (attempt in 0 until tries) {
+            if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.3) return "arrivé"
+            val path = grid.plan(r.x, r.y, tx, ty) ?: return "pas de chemin sur ma carte (tout est bouché par là)"
+            var replan = false
+            for (wp in path.drop(1)) {
+                val dx = wp.first - r.x; val dy = wp.second - r.y
+                val d = kotlin.math.hypot(dx, dy)
+                if (d < 0.08) continue
+                r.turn(Head.wrap(Math.toDegrees(kotlin.math.atan2(dy, dx)) - r.heading))
+                val step = d.coerceAtMost(1.2)
+                val res = r.drive(step)
+                travelled += movedOf(res, step)
+                when {
+                    res.contains("liaison") || res.contains("vide") || res.startsWith("je ne roule pas") || res == "interrompu" ||
+                        res.contains("roue soulevée") -> return "arrêté : $res"
+                    res.contains("obstacle") || res.contains("bloqué") -> { log("🛞 ${r.unstick(attempt)}"); replan = true }
+                }
+                if (replan) break
+                if (travelled > budget) return "trajet trop long (%.1f m), je m'arrête".format(travelled)
+                if (d > step + 0.05) { replan = true; break } // segment long : on refait le point
+            }
+            if (!replan && kotlin.math.hypot(tx - r.x, ty - r.y) < 0.35) return "arrivé"
+        }
+        return if (kotlin.math.hypot(tx - r.x, ty - r.y) < 0.6) "presque arrivé" else "pas réussi à y arriver (trop d'obstacles)"
+    }
+
+    /** Où il était avant sa dernière mission (pour « reviens »). */
+    @Volatile private var missionStart: Pair<Double, Double>? = null
+
     // ---- explorer : partir à l'aventure (trouver une pièce, le chien, une porte…) -----------------------------------
     /** Une pièce se reconnaît à ce qu'il y a dedans (le détecteur du téléphone les connaît, sans quota). */
     private fun roomClue(goal: String): String? {
@@ -1977,52 +2121,82 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val r = roomba ?: return noWheels
         following = false
         followGen.incrementAndGet()
+        missionStart = missionStart ?: (r.x to r.y)
         val clue = goal?.let { roomClue(it) ?: it }
         val labels = clue?.let { CocoClasses.forTarget(it) }
         val t0 = System.currentTimeMillis()
+        val area0 = grid.knownArea()
         var travelled = 0.0
         var sinceTurn = 0.0
         var stops = 0
         var stuckInRow = 0
+        var doors = 0
         log("🧭 J'explore" + (goal?.let { " : je cherche $it" + (if (clue != it) " (un $clue)" else "") } ?: ""))
+        if (gimbal.ready) { head.center(); head.look(null, -12.0) } // la tête droit devant, un peu vers le sol
+        fun summary() = "%.1f m parcourus, %.0f m² de plus sur ma carte%s".format(travelled, grid.knownArea() - area0,
+            if (doors > 0) ", $doors porte(s) passée(s)" else "")
         while (System.currentTimeMillis() - t0 < maxSec * 1000L) {
-            // Regarder.
-            if (clue != null) {
-                val seen = labels?.let { bestSeen(it) }
-                if (seen != null) {
+            // 1. Regarder : le détecteur du téléphone (gratuit) pour ce qu'il connaît.
+            if (clue != null && labels != null) {
+                bestSeen(labels)?.let { seen ->
                     val ang = (seen.box.cx - 0.5) * hfovNow()
                     if (kotlin.math.abs(ang) > 8) r.turn(ang)
-                    return "trouvé : « $goal » est devant toi (j'ai vu ${if (clue != goal) "un $clue" else clue}) après %.1f m d'exploration".format(travelled)
-                }
-                if (labels == null && stops % 3 == 0 && vision.available()) {
-                    erLocate(clue, floor = true)?.takeIf { it.found && it.confidence >= 0.5 }?.let { sp ->
-                        centerOnImagePoint(sp.x, sp.y)
-                        return "trouvé : « $goal » en vue" + distanceText(sp.distance) + " après %.1f m d'exploration".format(travelled)
-                    }
+                    return "trouvé : « $goal » est devant toi (j'ai vu ${if (clue != goal) "un $clue" else clue}) ; ${summary()}"
                 }
             }
             stops++
-            // Avancer.
-            val res = r.drive(0.7)
-            val moved = Regex("([0-9]+[,.][0-9]+) m").find(res)?.groupValues?.get(1)?.replace(',', '.')?.toDoubleOrNull()
-                ?: if (res.startsWith("avancé")) 0.7 else 0.0
-            travelled += kotlin.math.abs(moved); sinceTurn += kotlin.math.abs(moved)
+            // 2. Où aller : la vision (Robotics-ER) choisit un point du sol — une porte, un passage, vers l'inconnu.
+            val jpeg = if (vision.available()) camera.zoomJpeg("tout") else null
+            val wp = jpeg?.let { j -> runCatching { vision.waypoint(j, clue) }.onFailure { log("🧭 vision : ${it.message}") }.getOrNull() }
+            val res: String
+            var asked: Double
+            if (wp != null) {
+                if (wp.goalVisible && goal != null) {
+                    centerOnImagePoint(wp.x, wp.y)
+                    return "trouvé : « $goal » en vue" + distanceText(wp.distance) + " ; ${summary()}"
+                }
+                val img = camera.frame(3000)
+                val bearing = imageToDegrees((wp.x * 2 - 1).toFloat(), 0f, img?.width ?: 4, img?.height ?: 3).first +
+                    (if (gimbal.ready) bodyPan() ?: 0.0 else 0.0)
+                if (wp.doorway) { doors++; log("🚪 Un passage : ${wp.description}") }
+                // Ce que la vision voit de sol libre droit devant : noté sur la carte (sans y être passé).
+                wp.clearAhead?.let { c -> if (c > 0.3) grid.markFreeRay(r.x, r.y, r.heading + (if (gimbal.ready) bodyPan() ?: 0.0 else 0.0), c.coerceAtMost(3.0)) }
+                if (kotlin.math.abs(bearing) > 6) r.turn(bearing)
+                asked = ((wp.distance ?: 1.0) - 0.2).coerceIn(0.3, 1.5)
+                // Obstacle vu tout près dans cette direction : il avance moins (et le contourne au prochain arrêt).
+                if (kotlin.math.abs(bearing) < 15) wp.clearAhead?.let { c -> asked = asked.coerceAtMost((c - 0.15).coerceAtLeast(0.2)) }
+                res = r.drive(asked)
+            } else {
+                // 3. Sans vision : la frontière la plus proche de sa carte (bord du connu), à au moins 80 cm.
+                val f = grid.frontiers(r.x, r.y, minSize = 4).firstOrNull { kotlin.math.hypot(it.first - r.x, it.second - r.y) > 0.8 }
+                if (f != null && stops % 4 != 0) {
+                    val before = r.x to r.y
+                    val nav = navigateTo(f.first, f.second, tries = 2, budget = 2.5)
+                    travelled += kotlin.math.hypot(r.x - before.first, r.y - before.second)
+                    if (nav.startsWith("arrêté")) return "exploration arrêtée : $nav (${summary()})"
+                    continue
+                }
+                // 4. Sinon : tout droit, et on change de cap de temps en temps.
+                asked = 0.7
+                res = r.drive(asked)
+            }
+            val moved = movedOf(res, asked)
+            travelled += moved; sinceTurn += moved
             when {
                 res.contains("liaison") || res.contains("vide") || res.startsWith("je ne roule pas") || res == "interrompu" ->
-                    return "exploration arrêtée : $res (après %.1f m)".format(travelled)
+                    return "exploration arrêtée : $res (${summary()})"
                 res.contains("obstacle") || res.contains("bloqué") -> {
-                    if (++stuckInRow > 4) return "je n'arrive plus à avancer (coincé, après %.1f m) : aide-moi".format(travelled)
+                    if (++stuckInRow > 4) return "je n'arrive plus à avancer (coincé) : aide-moi (${summary()})"
                     log("🧭 ${r.unstick(stuckInRow - 1)}")
                     sinceTurn = 0.0
                 }
                 else -> {
                     stuckInRow = 0
-                    // Un long couloir sans rien : il change de cap de temps en temps pour ne pas tourner en rond.
-                    if (sinceTurn > 2.5) { r.turn(if (stops % 2 == 0) 70.0 else -100.0); sinceTurn = 0.0 }
+                    if (wp == null && sinceTurn > 2.5) { r.turn(if (stops % 2 == 0) 70.0 else -100.0); sinceTurn = 0.0 }
                 }
             }
         }
-        return (if (goal != null) "pas trouvé « $goal »" else "exploration finie") + " après %.1f m (en %d s)".format(travelled, maxSec)
+        return (if (goal != null) "pas trouvé « $goal »" else "exploration finie") + " (${summary()})"
     }
 
     /** « Viens ici » sans nacelle : les roues font le cou (il tourne pour te trouver et te garder en face). */
@@ -2879,7 +3053,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- outils longs en arrière-plan : la conversation continue pendant qu'il cherche ou se déplace ----------
     /** Outils qui peuvent durer (recherche, déplacement, relevé) : Gemini n'attend pas, il reçoit le résultat après. */
     private val longTools = setOf("chercher", "aller_vers", "viens_ici", "cartographier", "regarder_ce_que_je_montre", "tester_roues",
-        "explorer", "se_degager", "aller_a")
+        "explorer", "se_degager", "aller_a", "revenir")
     private val toolPool = Executors.newCachedThreadPool()
     @Volatile private var longToolGen = 0
 
@@ -3322,6 +3496,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 followMe(((args["minutes"] as? Number)?.toDouble() ?: 3.0).coerceIn(0.5, 15.0))
                 mapOf("result" to "tu suis la personne (dis-lui de marcher doucement) ; « arrete » pour t'arrêter")
             }
+            "mode_autonome" -> {
+                val on = args["actif"] != false
+                setFlagValue("autonomy", on)
+                log(if (on) "🤖 Mode autonome activé" else "🤖 Mode autonome arrêté")
+                mapOf("result" to if (on) "mode autonome activé : quand on ne te demande rien (de 8 h à 22 h), tu vas voir qui " +
+                    "arrive, tu agrandis ta carte de la maison, et tu rentres à ta base quand ta batterie baisse" else "mode autonome arrêté")
+            }
+            "revenir" -> {
+                val r = roomba ?: return mapOf("result" to noWheels)
+                val back = missionStart ?: return mapOf("result" to "tu n'es parti de nulle part : tu es déjà là")
+                log("🛞 Je reviens")
+                var res = ""
+                moveSync(holdMs = 1000, timeoutMs = 180_000) { res = navigateTo(back.first, back.second); res }
+                if (res.startsWith("arrivé") || res.startsWith("presque")) missionStart = null
+                mapOf("result" to "retour : $res")
+            }
             "se_degager" -> {
                 val r = roomba ?: return mapOf("result" to noWheels)
                 log("🛞 Je me dégage")
@@ -3386,7 +3576,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "il faudra le relever à nouveau en y étant, avec les roues branchées")
                 log("🛞 Je vais : ${p.name}")
                 var res = ""
-                moveSync(holdMs = 1000, timeoutMs = 120_000) { res = r.goTo(px, py); res }
+                missionStart = r.x to r.y
+                moveSync(holdMs = 1000, timeoutMs = 180_000) { res = navigateTo(px, py); res }
                 if (!res.contains("obstacle") && !res.contains("interrompu")) currentPlace = p.name
                 mapOf("result" to res)
             }
@@ -3444,6 +3635,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         ?: "pas branchées (Roomba)"),
                     "souvenirs" to memory.size,
                     "reglages_appris" to tuning.describe(),
+                    "carte" to "%.0f m² connus%s".format(grid.knownArea(), if (gridAnchored) ", repère = ta base" else
+                        " (carte de cette séance : pose-toi sur ta base pour la garder)"),
                     "cable_tete" to "tête tournée de $cable par rapport au corps (limite ±185°)",
                     "regles_apprises" to tuning.rules().size,
                     "visage_vu" to follower.sees,
@@ -3552,11 +3745,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // Tête presque à la verticale : son cap ne veut plus rien dire, on reprend après.
                     if (ph != null && kotlin.math.abs(ph.second) < 70) cable.update(ph.first, roomba?.heading) else cable.pause()
                 }
+                runCatching { gridTick() }
                 Thread.sleep(100)
             }
         }
         thread(name = "visee-casque", isDaemon = true) { aimLoop() }
         thread(name = "vie", isDaemon = true) { lifeLoop() }
+        thread(name = "autonome", isDaemon = true) { autonomyLoop() }
         prefs.getString("speed_table", null)?.let { t ->
             runCatching {
                 head.setTable(t.split(",").map { it.split(":").let { (a, b) -> a.toInt() to b.toDouble() } })

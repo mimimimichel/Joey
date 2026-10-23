@@ -41,6 +41,13 @@ class RoombaRobot(
         private set
     @Volatile private var cancel = false
     @Volatile private var failures = 0
+    /** Un contact : « pare-chocs », « vide » ou « proche », et le côté (-1 gauche, 0 devant, 1 droite). */
+    @Volatile var onContact: ((String, Int) -> Unit)? = null
+    /** Un obstacle tout proche devant le pare-chocs (détecteurs de proximité). */
+    val obstacleNear: Boolean get() = ((sensors?.lightBumper ?: 0) and 0x3F) != 0
+
+    /** Repart de zéro (posé sur sa base : la base devient l'origine de la carte). */
+    fun resetOdometry() = odo.reset()
     /** Le garder éveillé (mode sécurité au repos) : sinon il s'endort au bout de 5 min. */
     @Volatile var keepAwake = true
     private var passiveSince = 0L
@@ -164,6 +171,15 @@ class RoombaRobot(
             sensors = s
             sensorsAt = now
             bumpSince = if (s.bump) (if (bumpSince == 0L) now else bumpSince) else 0L
+            // Contacts (pour la carte) : pare-chocs, vide, obstacle tout proche (détecteurs de proximité, si le modèle en a).
+            runCatching {
+                if (s.bump && prev?.bump != true)
+                    onContact?.invoke("pare-chocs", if (s.bumpLeft && !s.bumpRight) -1 else if (s.bumpRight && !s.bumpLeft) 1 else 0)
+                if (s.cliff && prev?.cliff != true && driving) onContact?.invoke("vide", 0)
+                val lb = s.lightBumper and 0x3F
+                if (lb != 0 && ((prev?.lightBumper ?: 0) and 0x3F) == 0)
+                    onContact?.invoke("proche", if (lb and 0x3C == 0 && lb and 0x03 != 0) -1 else if (lb and 0x0F == 0) 1 else 0)
+            }
             // En mode passif (au repos), le Roomba s'endort au bout de 5 min, et sans le fil de réveil on ne peut plus le
             // rallumer. En mode sécurité il ne s'endort pas : on l'y remet au bout de 3 min de repos (pas sur sa base).
             if (s.oiMode == 1 && !s.onHomeBase && !s.charging && keepAwake) {
@@ -322,7 +338,9 @@ class RoombaRobot(
                     result = "arrêté après %.2f m : obstacle vu devant".format(done)
                     break
                 }
-                val v = (left * 1.5).coerceIn(0.06, maxSpeed) * sign
+                // Un obstacle tout près (détecteurs de proximité) : il ralentit pour le toucher en douceur, ou l'éviter.
+                val vmax = if ((sign > 0) != reversed && obstacleNear) 0.08 else maxSpeed
+                val v = (left * 1.5).coerceIn(0.06, maxOf(0.06, vmax)) * sign
                 val yaw = (Head.wrap(h0 - odo.headingDeg) * 2).coerceIn(-20.0, 20.0)
                 wheels(v, yaw)
                 sleeper(50)
@@ -377,6 +395,7 @@ class RoombaRobot(
                 }
             } else moveStart = 0L
             if ((f > 0) != reversed && f != 0.0 && sensors?.bump == true) f = 0.0 // pare-chocs : plus d'avance, il peut encore tourner
+            if ((f > 0) != reversed && obstacleNear) f = f.coerceIn(-0.08, 0.08) // tout près d'un obstacle : doucement
             runCatching { wheels(f, yaw) }
             active = true
         }

@@ -271,6 +271,43 @@ class GeminiVision(private val apiKey: () -> String) {
             j.optDouble("distance_m", Double.NaN).takeIf { !it.isNaN() && it > 0 && it < 30 }, j.optString("description"), model)
     }
 
+    /**
+     * Où aller pour explorer (ou pour trouver [goal]) : le point du sol vers lequel rouler (une porte, un passage, du
+     * sol libre qui mène vers l'inconnu), la distance de sol libre droit devant, et si le but est en vue.
+     */
+    class Waypoint(val goalVisible: Boolean, val x: Double, val y: Double, val distance: Double?, val doorway: Boolean,
+                   val clearAhead: Double?, val room: String, val description: String)
+
+    fun waypoint(jpegBase64: String, goal: String?): Waypoint = spatial { model, key ->
+        val schema = JSONObject("""
+        {"type":"object","properties":{
+          "but_visible":{"type":"boolean","description":"true si ce qu'on cherche est clairement visible"},
+          "point":{"type":"array","items":{"type":"integer"},"description":"[y, x] entre 0 et 1000 : point du SOL vers lequel le robot doit rouler"},
+          "distance_m":{"type":"number","description":"distance estimée jusqu'à ce point, en mètres"},
+          "porte":{"type":"boolean","description":"true si le point est une porte ou un passage vers une autre pièce"},
+          "sol_libre_devant_m":{"type":"number","description":"combien de mètres de sol libre droit devant (centre bas de l'image) avant un obstacle"},
+          "piece":{"type":"string","description":"type de pièce visible (salon, chambre, cuisine, couloir…)"},
+          "description":{"type":"string","description":"une phrase en français"}
+        },"required":["but_visible","point","porte","piece","description"]}
+        """.trimIndent())
+        val want = if (goal.isNullOrBlank()) "Le robot explore la maison pour en faire la carte."
+            else "Le robot cherche « $goal ». S'il est visible, but_visible = true et le point est sur le sol juste devant lui."
+        val prompt = "Image de la caméra d'un petit robot à roues (un aspirateur, caméra à ~40 cm du sol). $want
+" +
+            "Choisis UN point du sol (pas un mur, pas un meuble) où le robot peut rouler sans obstacle sur le chemin : de " +
+            "préférence une porte ou un passage vers une pièce qu'on ne voit pas encore, sinon le sol libre le plus loin vers " +
+            "une zone inexplorée. Estime sa distance, et combien de sol libre il y a droit devant. N'invente rien."
+        val j = generateWithImage(model, key, jpegBase64, prompt, schema)
+        val pt = j.optJSONArray("point")
+        val (x, y) = if (pt != null && pt.length() == 2) (pt.optDouble(1) / 1000).coerceIn(0.0, 1.0) to (pt.optDouble(0) / 1000).coerceIn(0.0, 1.0)
+            else 0.5 to 0.8
+        Waypoint(j.optBoolean("but_visible"), x, y,
+            j.optDouble("distance_m", Double.NaN).takeIf { !it.isNaN() && it > 0 && it < 20 },
+            j.optBoolean("porte"),
+            j.optDouble("sol_libre_devant_m", Double.NaN).takeIf { !it.isNaN() && it >= 0 && it < 20 },
+            j.optString("piece"), j.optString("description"))
+    }
+
     /** Ce qu'une personne montre du doigt. */
     class Pointing(val pointing: Boolean, val target: String, val inImage: Boolean, val x: Double, val y: Double,
                    val direction: String, val angle: Double?, val description: String)

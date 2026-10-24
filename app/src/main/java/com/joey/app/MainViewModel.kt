@@ -2143,10 +2143,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             setBodyRef(abs - res.panDeg, r.heading) // maintenant bodyPan() vaut l'angle mesuré
             cable.correct(res.panDeg) // le compteur du câble suit l'angle réel (au tour près)
             if (kotlin.math.abs(res.panDeg) < 5) break
-            // La correction se fait tête relevée : tête très baissée, la nacelle dépassait sa cible de 2 à 3 fois (24/10,
-            // 13:57 : -18° -> -70° -> +38° -> -36° -> +39°) ; à l'horizontale, elle va juste (un peu trop : amortie à 60 %).
-            head.look(null, 0.0, timeoutMs = 1500)
-            head.look(-0.6 * res.panDeg, 0.0, timeoutMs = 2500)
+            // C'est le corps qui se tourne vers la tête : la nacelle, verrouillée, garde la tête fixe dans la pièce, et le
+            // Roomba tourne juste. (Tourner la tête vers le corps ne marchait pas : la nacelle obéit mal aux petites
+            // rotations, 24/10 : -18° -> -70° -> +38° -> -36° -> +39°, puis -80° -> -40° -> +37°.)
+            val turned = r.turn(res.panDeg)
+            if (turned.startsWith("arrêté") || turned == "interrompu") break
+            Thread.sleep(300)
         }
         if (last == null) log("🎯 Pastilles invisibles : je recentre la nacelle")
         return last
@@ -2564,6 +2566,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** CLEAN : aspiration marche/arrêt ; SPOT : il vient vers toi ; DOCK : il rentre à sa base. */
     private fun roombaButton(r: com.joey.app.robot.RoombaRobot, b: String) {
+        // Mode test : un appui sert à réveiller le Roomba, pas à commander Joey (24/10 : CLEAN pour le réveiller a lancé
+        // l'aspiration).
+        if (testQuiet) { log("🔘 Bouton $b du Roomba (ignoré : mode test)"); return }
         log("🔘 Bouton $b du Roomba")
         when (b) {
             "clean" -> thread(isDaemon = true) { log("🧹 " + r.vacuum(!r.vacuuming)) }
@@ -3777,7 +3782,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 log("👀 regarder $dir${deg?.let { " ${it.toInt()}°" } ?: ""}")
                 gazeDirectedUntil = System.currentTimeMillis() + 60_000
                 // Il garde ce regard quelques secondes avant de revenir te suivre.
-                val r = moveSync(holdMs = if (dir == "devant") 1000 else 7000) {
+                val r = moveSync(holdMs = if (dir == "devant") 1000 else 7000, timeoutMs = if (dir == "devant") 45_000 else 15_000) {
                     // « Devant » avec les roues : la nacelle se remet dans l'axe du corps (sa propre commande, sans dérive)
                     // et le repère tête-corps est repris.
                     if (dir.lowercase() == "devant" && roomba != null && calibrateBody()) { head.look(null, 0.0, timeoutMs = 1500); "tête droite devant, dans l'axe de ton corps" }

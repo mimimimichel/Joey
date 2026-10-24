@@ -180,7 +180,10 @@ class RoombaRobot(
         sleeper(300)
         var s: RoombaOI.Sensors? = null
         var baud = 0
-        for (b in listOf(115_200, 57_600)) {
+        // 19 200 aussi : trois impulsions sur le fil de réveil en 2 s font passer le Roomba à cette vitesse (spécification
+        // Open Interface) ; l'arrêt et la relance de l'app (mise à jour) peuvent en produire (24/10 : « la carte répond mais
+        // pas le Roomba » après presque chaque mise à jour).
+        for (b in listOf(115_200, 57_600, 19_200)) {
             link.setBaud(b)
             sleeper(100)
             send(RoombaOI.start())
@@ -199,12 +202,16 @@ class RoombaRobot(
         defineBabble()
         log("Roomba : réponse à $baud bauds, batterie ${ok.batteryPct ?: "?"} %, mode ${ok.modeName}")
         running = true
+        connectedAt = System.currentTimeMillis()
         Thread(::pollLoop, "roomba-capteurs").apply { isDaemon = true; start() }
         Thread(::driveLoop, "roomba-roues").apply { isDaemon = true; start() }
         sing(Tune.HELLO)
     }
 
     private var idleRef: Triple<Double, Double, Long>? = null
+    private var buttonsPrev = 0
+    private var buttonsSent = 0
+    @Volatile private var connectedAt = 0L
     /**
      * Plus aucune réponse depuis 20 s malgré les réveils : la liaison série elle-même est bloquée (24/10 : seule une relance
      * de l'app, qui rouvre la carte USB, l'a débloquée). L'app rouvre alors la carte (une fois par panne).
@@ -314,11 +321,18 @@ class RoombaRobot(
                     s.lightSignals?.forEachIndexed { k, sig -> lightDistance(sig)?.let { d -> onProximity?.invoke(RoombaOI.LIGHT_ANGLES[k], d) } }
                     if (s.wall == true || s.wallSignal > 30) onProximity?.invoke(90.0, if (s.wallSignal > 200) 0.05 else 0.12)
                 }
-                // Boutons du Roomba : des commandes pour Joey.
-                val pressed = s.buttons and (prev?.buttons ?: 0).inv()
-                if (pressed and 1 != 0) onButton?.invoke("clean")
-                if (pressed and 2 != 0) onButton?.invoke("spot")
-                if (pressed and 4 != 0) onButton?.invoke("dock")
+                // Boutons du Roomba : des commandes pour Joey. Un appui ne compte que s'il est lu deux fois de suite, et pas
+                // dans les 5 s qui suivent le retour de la liaison (24/10 : un appui DOCK fantôme, lu juste après une
+                // reconnexion, a lancé la recherche de la base et l'aspiration).
+                val held = s.buttons and buttonsPrev
+                val pressed = held and buttonsSent.inv()
+                buttonsPrev = s.buttons
+                buttonsSent = held
+                if (now - linkGoodSince > 5000 && now - connectedAt > 5000) {
+                    if (pressed and 1 != 0) onButton?.invoke("clean")
+                    if (pressed and 2 != 0) onButton?.invoke("spot")
+                    if (pressed and 4 != 0) onButton?.invoke("dock")
+                }
             }
             // Roues en surintensité (coincées, même si elles patinent) : il est coincé.
             if (s.wheelOvercurrent && (abs(vel[0]) > 0.04 || driving)) stalledAt = now

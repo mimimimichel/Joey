@@ -168,6 +168,8 @@ class MainActivity : ComponentActivity() {
             @Suppress("DEPRECATION")
             window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
         }
+        // Sur le S8, « allumer l'écran » ne suffit pas quand il est relancé écran éteint (24/10, 19 h 51) : on l'allume.
+        runCatching { vm.wakeScreen("démarrage") }
         // Plein écran : c'est un visage, pas une app.
         WindowCompat.getInsetsController(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.systemBars())

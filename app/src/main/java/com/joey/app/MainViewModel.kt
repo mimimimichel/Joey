@@ -1200,6 +1200,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val every = when { idle -> 400L; testQuiet && !rolling -> 300L; else -> 90L }
                 if (camera.frameEveryMs != every) camera.frameEveryMs = every
             }
+            // Plus d'images de la caméra depuis 10 s : l'écran s'est éteint (délai de veille, ou relancé écran éteint après
+            // une mise à jour : 24/10, 19 h 51, « allumer l'écran au démarrage » n'a rien fait sur le S8). L'app n'est plus
+            // au premier plan et la caméra s'arrête : il rallume l'écran lui-même.
+            runCatching { wakeScreenIfBlind(now) }
             // Mode test : ni coups d'œil, ni poses, ni initiatives (la tête ne bouge que sur ordre ; 24/10, « je m'ennuie »
             // et les coups d'œil tordaient le câble jusqu'à éteindre la nacelle).
             if (testQuiet) continue
@@ -2102,6 +2106,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 r.gyroHeading = { if (gimbal.ready) null else sensors.read()?.takeIf { kotlin.math.abs(it.second) < 60 }?.first }
                 // Ce que la caméra voit de sol libre devant (récent seulement) : il ralentit et s'arrête avant le choc.
                 r.cautiousWhenBlind = true
+                // Câble tordu à droite (tête à droite du corps) : tourner le corps à droite le déroule.
+                r.twistSign = { if (!gimbal.ready) 0 else cable.value.let { v -> if (v > 30) 1 else if (v < -30) -1 else 0 } }
                 r.visionClear = { clearAhead() }
                 // Les boutons du Roomba deviennent des commandes.
                 r.onButton = { b -> runCatching { roombaButton(r, b) } }
@@ -2175,6 +2181,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * La caméra est-elle au-dessus de l'axe de la nacelle ? Oui pour le S8+ ; le S10 a la sienne à ~10 cm de l'axe (coin de
      * l'écran) : seule la paire de pastilles reconnue par sa forme compte (24/10). Réglage « camera_centree ».
      */
+    @Volatile private var screenWakeAt = 0L
+    private val startedAt = System.currentTimeMillis()
+
+    /** Rallume l'écran si la caméra ne donne plus rien (l'app repasse au premier plan par-dessus le verrouillage). */
+    private fun wakeScreenIfBlind(now: Long) {
+        if (!flag("camera", true) || now - screenWakeAt < 30_000) return
+        val last = camera.frameAt
+        if (last == 0L && now - startedAt < 20_000) return
+        if (now - maxOf(last, startedAt) < 10_000) return
+        screenWakeAt = now
+        wakeScreen("la caméra ne voit plus rien depuis 10 s")
+    }
+
+    /** Allume l'écran quelques secondes (ACQUIRE_CAUSES_WAKEUP) ; l'app, au premier plan, le garde allumé ensuite. */
+    fun wakeScreen(why: String) {
+        val pm = getApplication<android.app.Application>().getSystemService(android.os.PowerManager::class.java) ?: return
+        if (pm.isInteractive) return
+        @Suppress("DEPRECATION")
+        val wl = pm.newWakeLock(android.os.PowerManager.SCREEN_DIM_WAKE_LOCK or android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP, "joey:ecran")
+        runCatching { wl.acquire(4000) }
+        log("💡 J'allume l'écran ($why)")
+    }
+
     @Volatile private var unwindAt = 0L
     @Volatile private var gimbalLostAt = 0L
 

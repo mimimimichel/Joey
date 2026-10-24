@@ -93,6 +93,9 @@ class RoombaRobot(
     @Volatile internal var awakeAfterMs = 180_000L
     /** Il cherche sa base tout seul (mode passif, mais il roule) : on ne le dérange pas jusque-là. */
     @Volatile private var seekingDockUntil = 0L
+    /** Côté où tourner le corps pour dérouler le câble (+1 droite, -1 gauche, 0 sans préférence) : donné par l'app. */
+    @Volatile var twistSign: (() -> Int)? = null
+
     /** Il cherche sa base tout seul (il tourne beaucoup sur lui-même). */
     val seekingDock: Boolean get() = System.currentTimeMillis() < seekingDockUntil
 
@@ -936,7 +939,13 @@ class RoombaRobot(
         // 24/10 : « là où il n'est pas coincé, il faudrait qu'il manœuvre : faire demi-tour et repartir dans l'autre sens ».
         val uTurn = side == 0 || attempt >= 2
         val angle = if (uTurn) 180.0 else 40.0 + 20.0 * attempt
-        val dir = when { side < 0 -> 1.0; side > 0 -> -1.0; attempt % 2 == 0 -> 1.0; else -> -1.0 }
+        // Le demi-tour se fait dans le sens qui déroule le câble (la tête, verrouillée, reste fixe pendant que le corps
+        // tourne : tourner le corps du côté de la torsion la réduit ; 24/10, un demi-tour l'avait poussé à -301°).
+        val twistSide = twistSign?.invoke() ?: 0
+        val dir = when {
+            uTurn && twistSide != 0 -> twistSide.toDouble()
+            side < 0 -> 1.0; side > 0 -> -1.0; attempt % 2 == 0 -> 1.0; else -> -1.0
+        }
         val t = turn(dir * angle)
         return "je me dégage : $back, puis ${if (uTurn) "demi-tour ($t)" else t} (${if (dir > 0) "vers la droite" else "vers la gauche"})"
     }

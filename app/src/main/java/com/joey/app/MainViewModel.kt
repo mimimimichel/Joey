@@ -1192,9 +1192,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     !flag("watch", false) && !questFollowing
                 if (idle != s.idle) {
                     _state.update { it.copy(idle = idle) }
-                    camera.frameEveryMs = if (idle) 400L else 90L
                     log(if (idle) "🔅 Personne depuis 5 min : je me mets en économie" else "🔆 Je me réveille de l'économie")
                 }
+                // Cadence de la caméra : 90 ms en roulant ou en conversation ; 300 ms à l'arrêt en mode test (24/10 : le
+                // téléphone perdait 35 % par heure pendant les essais) ; 400 ms en économie.
+                val rolling = roomba?.let { now - it.movingAt < 3000 } == true || roadGaze.active || s.busy
+                val every = when { idle -> 400L; testQuiet && !rolling -> 300L; else -> 90L }
+                if (camera.frameEveryMs != every) camera.frameEveryMs = every
             }
             // Mode test : ni coups d'œil, ni poses, ni initiatives (la tête ne bouge que sur ordre ; 24/10, « je m'ennuie »
             // et les coups d'œil tordaient le câble jusqu'à éteindre la nacelle).
@@ -2240,8 +2244,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val small = android.graphics.Bitmap.createScaledBitmap(bmp, w, h, true)
             val px = IntArray(w * h); small.getPixels(px, 0, w, 0, 0, w, h)
             if (small !== bmp) small.recycle()
-            val res = com.joey.app.senses.BodyMarks.measure(px, w, h, pitch, hf, vf, arrow = flag("fleche", false),
-                centered = cameraCentered())
+            // L'anneau d'abord (visible quelle que soit la direction de la tête), puis les pastilles.
+            val ring = if (flag("anneau", false)) com.joey.app.senses.BodyMarks.measureRing(px, w, h, pitch, hf, vf) else null
+            if (ring != null) log("🎯 Anneau : symbole « ${ring.name} » vu")
+            val res = ring?.let { val z = com.joey.app.senses.BodyMarks.Mark(0.0, 0.0, 0); com.joey.app.senses.BodyMarks.Result(it.panDeg, z, z) }
+                ?: com.joey.app.senses.BodyMarks.measure(px, w, h, pitch, hf, vf, arrow = flag("fleche", false),
+                    centered = cameraCentered())
             if (res == null) {
                 // Invisibles : la tête regarde peut-être loin sur le côté (24/10 : -64°, pastilles hors de l'image). Le corps
                 // tourne de 60° (la tête reste fixe dans la pièce) et on regarde de nouveau, 5 fois au plus.
@@ -5002,6 +5010,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // Profondeur (MiDaS) : cmd profondeur&on=0 la coupe (si elle voit des obstacles qui n'existent pas), on=1 la rallume.
             // La flèche imprimée est collée sur le Roomba (cmd fleche on=1) : il s'en sert pour trouver l'axe du corps.
             "fleche" -> { val on = q["on"] != "0"; prefs.edit().putBoolean("fleche", on).apply(); "flèche ${if (on) "utilisée" else "ignorée"}" }
+            // L'anneau d'orientation (hardware/repere-corps/anneau.stl) est collé : cmd anneau on=1.
+            "anneau" -> { val on = q["on"] != "0"; prefs.edit().putBoolean("anneau", on).apply(); "anneau ${if (on) "utilisé" else "ignoré"}" }
             "profondeur" -> { val on = q["on"] != "0"; prefs.edit().putBoolean("profondeur", on).apply()
                 log("🧠 Profondeur ${if (on) "activée" else "coupée"}"); "profondeur ${if (on) "activée" else "coupée"}" }
             "visage" -> { endTestScreen(); "visage rallumé" }

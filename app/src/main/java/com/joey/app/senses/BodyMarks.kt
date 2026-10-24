@@ -324,4 +324,118 @@ object BodyMarks {
         // L'axe part vers la gauche (dX < 0) : la tête est tournée à droite du corps.
         return Result(-Math.toDegrees(kotlin.math.atan2(dX, dY)), front, back)
     }
+
+    // ---- anneau d'orientation (hardware/repere-corps/anneau.py) ---------------------------------------------------
+    /** Rayon moyen de l'anneau (m) et hauteur supposée de la caméra au-dessus du capot (m). */
+    const val RING_R = 0.102
+    const val CAM_H = 0.28
+    /** Où est le mât (centre de l'anneau) vu de la caméra, sur le capot (hauteur 1) : à droite, ~10 cm (S8 et S10). */
+    const val POLE_X = 0.10 / CAM_H
+    const val POLE_Y = 0.0
+
+    /** Un symbole de l'anneau vu : son nom, son angle sur l'anneau (degrés, + = droite) et l'angle tête-corps mesuré. */
+    data class RingSeen(val name: String, val ringDeg: Double, val panDeg: Double, val residual: Double)
+
+    /**
+     * L'angle tête-corps d'après l'anneau : chaque point cardinal porte un symbole différent (avant : dard ; droite :
+     * barre ; arrière : deux points ; gauche : trois points). Un seul symbole suffit : sa direction le long de l'anneau
+     * (ligne des points, axe de la barre) et le mât à droite de la caméra donnent l'avant du corps, sur 360°.
+     * Null si aucun symbole sûr n'est vu.
+     */
+    fun measureRing(px: IntArray, w: Int, h: Int, pitchDeg: Double, hfov: Double, vfov: Double): RingSeen? {
+        if (pitchDeg > -40) return null
+        val fx = (w / 2.0) / tan(Math.toRadians(hfov / 2)); val fy = (h / 2.0) / tan(Math.toRadians(vfov / 2))
+        val cx = w / 2.0; val cy = h / 2.0
+        val a = Math.toRadians(-pitchDeg)
+        fun ground(x: Double, y: Double): Pair<Double, Double>? {
+            val xn = (x - cx) / fx; val yn = (y - cy) / fy
+            val den = yn * cos(a) + kotlin.math.sin(a)
+            if (den < 1e-3) return null
+            return xn / den to (cos(a) - yn * kotlin.math.sin(a)) / den
+        }
+        fun mm(v: Double) = v * CAM_H * 1000.0
+        val (all, _) = analyze(px, w, h)
+        val cand = all.filter { it.chr <= 18 && it.size >= 4 }
+        if (cand.isEmpty()) return null
+        val white = maxOf(150.0, minOf(200.0, 0.8 * cand.maxOf { it.lum }))
+        // Chaque tache sur le capot : position (hauteur 1), aire réelle (mm², à la hauteur supposée), axe sur le capot.
+        data class G(val m: Mark, val x: Double, val y: Double, val areaMm2: Double, val lenMm: Double, val ux: Double, val uy: Double)
+        val gs = cand.filter { it.lum >= white }.mapNotNull { m ->
+            val g = ground(m.x, m.y) ?: return@mapNotNull null
+            val den = ((m.y - cy) / fy) * cos(a) + kotlin.math.sin(a)
+            val area = m.size / (fx * fy) / (den * den * den) * (CAM_H * 1000) * (CAM_H * 1000)
+            // Axe de la tache sur le capot : deux points de part et d'autre du centre, le long du grand axe de l'image.
+            val l = kotlin.math.sqrt(m.size.toDouble()) * kotlin.math.sqrt(m.elong) / 2
+            val p1 = ground(m.x - m.ax * l, m.y - m.ay * l); val p2 = ground(m.x + m.ax * l, m.y + m.ay * l)
+            if (p1 == null || p2 == null) return@mapNotNull null
+            val dx = p2.first - p1.first; val dy = p2.second - p1.second; val d = hypot(dx, dy).coerceAtLeast(1e-9)
+            G(m, g.first, g.second, area, mm(d), dx / d, dy / d)
+        }
+        val compact = gs.filter { it.m.elong < 2.0 }
+        val found = ArrayList<Triple<String, Double, Pair<Double, Double>>>() // nom, angle sur l'anneau, (position, tangente) codées
+        val tangents = HashMap<String, DoubleArray>()
+        fun dist(p: G, q: G) = mm(hypot(p.x - q.x, p.y - q.y))
+        // Trois points (gauche) : alignés, écart ~15 mm, petits.
+        val dots = compact.filter { it.areaMm2 in 15.0..140.0 }
+        val used = HashSet<G>()
+        for (i in dots.indices) for (j in dots.indices) for (k in dots.indices) {
+            if (i == j || j == k || i == k) continue
+            val p = dots[i]; val q = dots[j]; val r = dots[k] // q au milieu
+            if (dist(p, q) !in 9.0..22.0 || dist(q, r) !in 9.0..22.0) continue
+            if (kotlin.math.abs(dist(p, q) - dist(q, r)) > 5) continue
+            val tx = r.x - p.x; val ty = r.y - p.y; val tl = hypot(tx, ty)
+            // q sur la droite p-r
+            val off = kotlin.math.abs((q.x - p.x) * ty - (q.y - p.y) * tx) / tl
+            if (mm(off) > 3.5) continue
+            if ("gauche" in tangents) continue
+            tangents["gauche"] = doubleArrayOf(q.x, q.y, tx / tl, ty / tl)
+            used += p; used += q; used += r
+        }
+        // Deux points (arrière) : écart ~18 mm, un peu plus gros, pas pris dans un trio.
+        for (i in dots.indices) for (j in i + 1 until dots.size) {
+            val p = dots[i]; val q = dots[j]
+            if (p in used || q in used || "arriere" in tangents) continue
+            val d = dist(p, q)
+            if (d !in 13.0..26.0) continue
+            val ratio = maxOf(p.areaMm2, q.areaMm2) / minOf(p.areaMm2, q.areaMm2)
+            if (ratio > 2.2) continue
+            // Pas de troisième point aligné tout près (ce serait le trio mal vu).
+            val tx = q.x - p.x; val ty = q.y - p.y; val tl = hypot(tx, ty)
+            tangents["arriere"] = doubleArrayOf((p.x + q.x) / 2, (p.y + q.y) / 2, tx / tl, ty / tl)
+        }
+        // Barre (droite) : allongée, ~30 mm de long.
+        gs.filter { it.m.elong >= 2.4 && it.lenMm in 15.0..45.0 && it.areaMm2 in 90.0..450.0 }.maxByOrNull { it.areaMm2 }?.let { b ->
+            tangents["droite"] = doubleArrayOf(b.x, b.y, b.ux, b.uy)
+        }
+        // Dard (avant) : ramassé, ~20 × 24 mm.
+        compact.filter { it.areaMm2 in 120.0..520.0 && it !in used }.maxByOrNull { it.areaMm2 }?.let { d ->
+            tangents["avant"] = doubleArrayOf(d.x, d.y, Double.NaN, Double.NaN)
+        }
+        val ringDeg = mapOf("avant" to 0.0, "droite" to 90.0, "arriere" to 180.0, "gauche" to -90.0)
+        val rr = RING_R / CAM_H
+        var best: RingSeen? = null
+        for ((name, t) in tangents) {
+            val gx = t[0]; val gy = t[1]
+            // Normale vers l'extérieur de l'anneau : perpendiculaire à la tangente, du côté opposé au mât.
+            val (nx, ny) = if (t[2].isNaN()) {
+                val dx = gx - POLE_X; val dy = gy - POLE_Y; val d = hypot(dx, dy).coerceAtLeast(1e-9); dx / d to dy / d
+            } else {
+                val n1 = -t[3] to t[2]
+                val c1 = hypot(gx - n1.first * rr - POLE_X, gy - n1.second * rr - POLE_Y)
+                val c2 = hypot(gx + n1.first * rr - POLE_X, gy + n1.second * rr - POLE_Y)
+                if (c1 <= c2) n1 else (-n1.first to -n1.second)
+            }
+            val residual = hypot(gx - nx * rr - POLE_X, gy - ny * rr - POLE_Y)
+            if (residual > 0.45) continue // le mât n'est pas là où il devrait être : fausse détection
+            val th = Math.toRadians(ringDeg.getValue(name))
+            val fX = nx * cos(th) - ny * kotlin.math.sin(th); val fY = nx * kotlin.math.sin(th) + ny * cos(th)
+            val pan = -Math.toDegrees(kotlin.math.atan2(fX, fY))
+            val seen = RingSeen(name, ringDeg.getValue(name), pan, residual)
+            // Les symboles à tangente (points, barre) sont plus justes que le dard (position seule).
+            val score = residual + if (t[2].isNaN()) 0.25 else 0.0
+            val bs = best?.let { it.residual + if (it.name == "avant") 0.25 else 0.0 }
+            if (bs == null || score < bs) best = seen
+        }
+        return best
+    }
 }

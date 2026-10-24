@@ -30,6 +30,8 @@ Tout passe par `python3 joey.py …` (dans ce dossier). Lis `python3 joey.py` po
   tait ; `complet` ; `nettoyage`). `cmd firmware` : version du logiciel du Roomba (il redémarre pour l'écrire, ~7 s).
   `cmd cable` : après avoir détortillé le câble à la main, tête vers l'avant du Roomba : compteur du câble à zéro.
   `cmd brc` : le fil de réveil marche-t-il ? (redémarrage, trois impulsions, il doit répondre à 19 200 bauds, ~6 s).
+- `cmd anneau on=1` : l'anneau d'orientation (hardware/repere-corps/anneau.stl) est collé autour du mât ; Joey s'en
+  sert pour l'angle tête-corps, avant les pastilles.
 - `cmd pixels n=56` : yeux pixelisés (plus petit = plus gros pixels) ; `n=0` pour des yeux lisses.
 - `say "…"` : lui parler (il répond à voix haute, comme si quelqu'un lui parlait).
 - `cmd stop` : **arrêt immédiat de tout**. `drive AVANT TOURNE SECONDES` : rouler à la main.

@@ -183,10 +183,15 @@ def autonome(minutes=8):
     feed(); out = pilot("cmd", "autonomy"); lines = []
     if "arrêté" in out:  # il était allumé : on le rallume
         out = pilot("cmd", "autonomy")
-    t0 = time.time()
+    t0 = time.time(); k = 0; etats = []
     while time.time() - t0 < minutes * 60 and not stopped():
         time.sleep(15); lines += feed()
+        if int(time.time() - t0) // 60 >= k:  # une image et un état par minute
+            k += 1
+            frame("autonome-%02d" % k)
+            etats.append(dict(t=time.strftime("%H:%M:%S"), **etat()))
     off = pilot("cmd", "autonomy")
+    note("autonome_etats", etats=etats)
     note("autonome", demarrage=out, arret=off, journal=lines, carte=pilot("map", timeout=30)[-3000:], **etat())
 
 

@@ -178,7 +178,23 @@ def carto():
     note("carto", journal=lines, carte=pilot("map", timeout=30)[-3000:], **etat())
 
 
-ESSAIS = {"nacelle": nacelle, "pastilles": pastilles, "alignement": alignement, "ligne_droite": ligne_droite,
+def autonome(minutes=8):
+    """Mode autonome : il décide seul (explorer, relever une pièce, rentrer charger). On regarde ce qu'il fait."""
+    feed(); out = pilot("cmd", "autonomy"); lines = []
+    if "arrêté" in out:  # il était allumé : on le rallume
+        out = pilot("cmd", "autonomy")
+    t0 = time.time()
+    while time.time() - t0 < minutes * 60 and not stopped():
+        time.sleep(15); lines += feed()
+    off = pilot("cmd", "autonomy")
+    note("autonome", demarrage=out, arret=off, journal=lines, carte=pilot("map", timeout=30)[-3000:], **etat())
+
+
+def cable0():
+    note("cable", resultat=pilot("cmd", "cable"))
+
+
+ESSAIS = {"autonome": autonome, "cable": cable0, "nacelle": nacelle, "pastilles": pastilles, "alignement": alignement, "ligne_droite": ligne_droite,
           "rotations": rotations, "capteurs": capteurs, "scan": scan, "explorer": explorer, "accostage": accostage,
           "sortie": sortie, "brc": brc, "carto": carto}
 

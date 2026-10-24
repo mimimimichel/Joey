@@ -1,0 +1,7 @@
+{"resultat": "compteur du câble remis à zéro (tête droite devant, câble au repos)", "step": "cable", "t": "17:57:04"}
+{"essai": "cable", "secondes": 0, "step": "fin_essai", "t": "17:57:04"}
+{"essai": 1, "journal": [], "image": "rapports/campagne-2026-10-24-soir-2/alignement-1.jpg", "tete": "138° à droite, inclinée à 1°", "cable": "tête tournée de -51° par rapport au corps (limite ±185°)", "roues": "branchées, batterie 90 %, tous tes capteurs (proximité, mur, boutons)", "tel": "50", "step": "alignement", "t": "17:58:45"}
+{"essai": 2, "journal": [], "image": "rapports/campagne-2026-10-24-soir-2/alignement-2.jpg", "tete": "34° à gauche, inclinée à -73°", "cable": "tête tournée de -24° par rapport au corps (limite ±185°)", "roues": "branchées, batterie 90 %, tous tes capteurs (proximité, mur, boutons)", "tel": "50", "step": "alignement", "t": "17:59:09"}
+{"essai": "alignement", "secondes": 125, "step": "fin_essai", "t": "17:59:09"}
+{"raison": "câble tordu de -172°", "step": "arret", "t": "17:59:09"}
+{"step": "campagne_finie", "t": "17:59:09"}

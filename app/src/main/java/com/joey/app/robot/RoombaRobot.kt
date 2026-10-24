@@ -884,10 +884,13 @@ class RoombaRobot(
         val side = sensors?.let { if (it.bumpLeft && !it.bumpRight) -1 else if (it.bumpRight && !it.bumpLeft) 1 else null } ?: lastBumpSide
         // Reculer = s'éloigner du pare-chocs (le côté « devant » du Roomba, même si son visage regarde derrière).
         val back = drive(if (reversed) 0.15 + 0.05 * attempt else -(0.15 + 0.05 * attempt))
-        val angle = 40.0 + 20.0 * attempt
+        // Touché droit devant, ou déjà deux essais : demi-tour, il repart par où il est venu (la voie y est libre). Michael,
+        // 24/10 : « là où il n'est pas coincé, il faudrait qu'il manœuvre : faire demi-tour et repartir dans l'autre sens ».
+        val uTurn = side == 0 || attempt >= 2
+        val angle = if (uTurn) 180.0 else 40.0 + 20.0 * attempt
         val dir = when { side < 0 -> 1.0; side > 0 -> -1.0; attempt % 2 == 0 -> 1.0; else -> -1.0 }
         val t = turn(dir * angle)
-        return "je me dégage : $back, puis $t (${if (dir > 0) "vers la droite" else "vers la gauche"})"
+        return "je me dégage : $back, puis ${if (uTurn) "demi-tour ($t)" else t} (${if (dir > 0) "vers la droite" else "vers la gauche"})"
     }
 
     // ---- base de charge --------------------------------------------------------------------------------

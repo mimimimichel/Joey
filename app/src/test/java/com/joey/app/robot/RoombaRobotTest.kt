@@ -21,6 +21,8 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
     var hole: ((Double, Double) -> Boolean)? = null
     var maxInHole = 0.0
     var bumpAuto = false
+    /** Côté du pare-chocs enfoncé (bits du paquet 7 : 1 droite, 2 gauche, 3 les deux). */
+    var bumpBits = 3
     var bumps = 0
     var slipR = 1.0
     var mute = false    // fil qui bouge : il n'entend plus rien
@@ -57,7 +59,9 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
             // Le pare-chocs (le demi-cercle avant, à 17-18 cm du centre) touche-t-il un obstacle après ce mouvement ? Tous les
             // 10° : un pied de chaise de 4 cm ne passe pas entre deux points de contrôle.
             val nx = x + d * cos(Math.toRadians(h)); val ny = y + d * sin(Math.toRadians(h)); val nh = h + dth
-            val hit = (-80..80 step 10).any { a -> w(nx + 0.175 * cos(Math.toRadians(nh + a)), ny + 0.175 * sin(Math.toRadians(nh + a))) }
+            val hits = (-80..80 step 10).filter { a -> w(nx + 0.175 * cos(Math.toRadians(nh + a)), ny + 0.175 * sin(Math.toRadians(nh + a))) }
+            val hit = hits.isNotEmpty()
+            if (hit) bumpBits = when { hits.all { it > 0 } -> 1; hits.all { it < 0 } -> 2; else -> 3 }
             if (hit && d > 0) {
                 if (!bumpAuto) bumps++
                 bumpAuto = true
@@ -114,9 +118,9 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         val out = ArrayList<Int>()
         for (id in ids) {
             when (id) {
-                7 -> out.add(if (bump || bumpAuto) 3 else 0)
+                7 -> out.add(if (bump) 3 else if (bumpAuto) bumpBits else 0)
                 // Groupe 1 (paquets 7 à 16) : pare-chocs, mur, 4 vides, mur virtuel, surintensité, saleté, octet libre.
-                1 -> { out.add(if (bump || bumpAuto) 3 else 0); out.add(0); out.add(if (cliff) 1 else 0); repeat(3) { out.add(0) }
+                1 -> { out.add(if (bump) 3 else if (bumpAuto) bumpBits else 0); out.add(0); out.add(if (cliff) 1 else 0); repeat(3) { out.add(0) }
                     out.add(0); out.add(0); out.add(0); out.add(0) }
                 9 -> out.add(if (cliff) 1 else 0); 10, 11, 12 -> out.add(0)
                 21 -> out.add(if (onBase) 2 else 0)
@@ -318,7 +322,19 @@ class RoombaRobotTest {
         val u = r.unstick(0)
         assertTrue(u, u.contains("dégage"))
         assertTrue("x ${f.x}", f.x < 0) // il a reculé
-        assertTrue("cap ${f.h}", abs(abs(f.h) - 40) < 8) // puis tourné
+        // Bloqué de face (pas de côté touché) : demi-tour, il repart par où il est venu.
+        assertTrue("cap ${f.h} / $u", abs(abs(f.h) - 180) < 12 && u.contains("demi-tour"))
+        r.disconnect()
+    }
+
+    /** Touché sur un côté : il tourne de l'autre côté (40°), sans demi-tour. */
+    @Test fun touchedOnTheSideTurnsAway() {
+        val (f, r) = connected()
+        f.wall = { x, y -> x > 0.3 && y > 0.0 } // obstacle devant à droite
+        val res = r.drive(0.6)
+        assertTrue(res, res.contains("touché") || res.contains("bloqué") || res.contains("obstacle"))
+        val u = r.unstick(0)
+        assertTrue("cap ${f.h} / $u", abs(abs(f.h) - 40) < 10 && !u.contains("demi-tour"))
         r.disconnect()
     }
 

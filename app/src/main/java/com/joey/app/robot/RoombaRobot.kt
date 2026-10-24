@@ -356,7 +356,9 @@ class RoombaRobot(
             runCatching {
                 if (s.bump && prev?.bump != true)
                     onContact?.invoke("pare-chocs", if (s.bumpLeft && !s.bumpRight) -1 else if (s.bumpRight && !s.bumpLeft) 1 else 0)
-                if (s.cliff && prev?.cliff != true && driving) onContact?.invoke("vide", 0)
+                // Roues soulevées : quelqu'un le porte, le « vide » est le sien, pas une marche (24/10 : soulevé et reposé sur
+                // sa base, il y avait noté deux vides, et le chemin du retour était bouché).
+                if (s.cliff && prev?.cliff != true && driving && !s.wheelDrop && prev?.wheelDrop != true) onContact?.invoke("vide", 0)
                 val lb = s.lightBumper and 0x3F
                 if (lb != 0 && ((prev?.lightBumper ?: 0) and 0x3F) == 0)
                     onContact?.invoke("proche", if (lb and 0x3C == 0 && lb and 0x03 != 0) -1 else if (lb and 0x0F == 0) 1 else 0)

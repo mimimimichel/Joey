@@ -2201,11 +2201,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val v = cable.value
         val now = System.currentTimeMillis()
         if (kotlin.math.abs(v) < 120 || !gimbal.ready || _state.value.busy || roadGaze.active || now - unwindAt < 8000) return
+        if (now < unwindPausedUntil) return
         unwindAt = now
         val delta = -kotlin.math.sign(v) * minOf(100.0, kotlin.math.abs(v) - 20)
         log("🧵 Câble tordu de %.0f° : je tourne la tête de %.0f° pour le dérouler".format(v, delta))
-        moveAsync(holdMs = 1000) { head.look(delta, null, timeoutMs = 5000); "câble déroulé" }
+        moveAsync(holdMs = 1000) {
+            head.look(delta, null, timeoutMs = 5000)
+            // La tête n'a pas bougé (nacelle en veille, moteurs relâchés : 24/10 au soir, dix essais pour rien) : on le dit
+            // une fois et on attend 2 min avant de réessayer.
+            if (kotlin.math.abs(cable.value - v) < 15) {
+                unwindPausedUntil = System.currentTimeMillis() + 120_000
+                log("⚠️ Ma tête ne bouge pas : la nacelle est en veille ou éteinte ? (un appui sur son bouton la rallume)")
+                "la nacelle ne répond pas"
+            } else "câble déroulé"
+        }
     }
+    @Volatile private var unwindPausedUntil = 0L
 
     /** La nacelle a été vue en mode suivi (la tête suit le corps) : l'alignement ne peut pas se faire en tournant le corps. */
     @Volatile private var nacelleFollows = false

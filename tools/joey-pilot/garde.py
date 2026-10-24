@@ -27,6 +27,8 @@ def halt(why):
     print("ARRÊT :", why, flush=True)
 
 
+# La série remet d'abord le compteur du câble à zéro : pas de relevé avant 15 s.
+time.sleep(15)
 while not os.path.exists(STOP):
     out = pilot("tool", "etat", "{}")
     c = re.search(r'tournée de (-?\d+)°', out)

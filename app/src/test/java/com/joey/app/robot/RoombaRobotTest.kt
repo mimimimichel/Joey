@@ -29,6 +29,8 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
     /** Le vrai (firmware stm32v2-v3.9.7) annonce son mode avec un cran de plus : passif 2, sécurité 3, complet 4. */
     var modeReportOffset = 0
     var off = false
+    /** Comme le vrai le 24/10 à 17 h 04 : sur sa base, ses roues ne tournent pas en mode complet (seul CLEAN le sort). */
+    var wheelsLockedOnBase = false
     /** Programme de nettoyage lancé (CLEAN) : il recule hors de sa base, brosses en marche. */
     var cleaning = false
     var cleans = 0
@@ -44,7 +46,7 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         val now = System.nanoTime()
         val dt = (now - last) / 1e9
         last = now
-        if (cleaning) { right = -150; left = -150 } else if (mode < 2) { right = 0; left = 0 }
+        if (cleaning) { right = -150; left = -150 } else if (mode < 2 || (wheelsLockedOnBase && onBase)) { right = 0; left = 0 }
         val dl = if (blocked) 0.0 else left / 1000.0 * dt; val dr = if (blocked) 0.0 else right / 1000.0 * dt
         // [slipR] : la roue droite compte un peu trop (tapis, roue usée) : l'odométrie dérive comme sur le vrai.
         countsL += dl * 1000 / RoombaOI.MM_PER_COUNT; countsR += dr * slipR * 1000 / RoombaOI.MM_PER_COUNT
@@ -386,6 +388,20 @@ class RoombaRobotTest {
         val (f, r) = connected()
         assertEquals(0, r.modeOffset)
         assertEquals(1, r.sensors?.oiMode)
+        r.disconnect()
+    }
+
+    /** 24/10, 17 h 04 : roues immobiles sur la base en mode complet ; il sort par CLEAN et coupe les brosses. */
+    @Test fun quitteSaBaseParCleanSiLesRouesNeTournentPas() {
+        val f = FakeRoomba()
+        f.onBase = true; f.wheelsLockedOnBase = true
+        val logs = java.util.Collections.synchronizedList(ArrayList<String>())
+        val r = RoombaRobot(f, log = { logs.add(it) })
+        r.connect()
+        Thread.sleep(200)
+        val res = r.drive(0.1)
+        assertTrue("$res / $logs", !f.onBase && f.cleans == 1 && !f.motorsOn && !f.cleaning)
+        assertTrue("$logs", logs.any { "toujours sur ma base" in it })
         r.disconnect()
     }
 

@@ -4894,6 +4894,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 prefs.edit().putString("sortie_base", m).apply(); roomba?.undock = m; "sortie de base : $m" }
             // Version du logiciel du Roomba (il redémarre pour l'écrire, ~7 s).
             "firmware" -> roomba?.let { r -> "Roomba : " + r.firmware() } ?: "pas de Roomba branché"
+            // Diagnostic : cmd oi ids=7,9,10 (paquets demandés au Roomba, octets bruts en retour).
+            "oi" -> roomba?.let { r -> r.rawQuery((q["ids"] ?: "7").split(",").mapNotNull { it.trim().toIntOrNull() }) } ?: "pas de Roomba branché"
+            // Câble détortillé à la main, tête tournée vers l'avant du Roomba : le compteur repart de zéro.
+            "cable" -> { cable.reset(); bodyRef = null; "compteur du câble remis à zéro (tête droite devant, câble au repos)" }
             // Le fil de réveil marche-t-il ? (il redémarre le Roomba, ~6 s)
             "brc" -> roomba?.let { r -> "Roomba : " + r.brcTest() } ?: "pas de Roomba branché"
             "pixels" -> { val n = (q["n"]?.toIntOrNull() ?: 56).coerceIn(0, 200); prefs.edit().putInt("yeux_pixels", n).apply()

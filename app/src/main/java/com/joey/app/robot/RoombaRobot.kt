@@ -464,14 +464,20 @@ class RoombaRobot(
             if (s != null) {
                 // Recule (sens du Roomba, quel que soit le montage du visage). Le mode complet coupe ses sécurités : on
                 // s'arrête si on l'arrête ou si on le soulève.
-                backOff(2500)
-                return null
+                val moved = backOff(2500)
+                val after = readSensors() ?: sensors
+                if (after?.onHomeBase != true) return null
+                // Toujours sur ses contacts, roues immobiles (24/10, 17 h 04 : posé à la main sur la base puis redémarré,
+                // il ne roulait pas en mode complet) : son propre programme sait quitter la base.
+                log("Roomba : toujours sur ma base après le recul en mode complet (roues : %.2f m)".format(moved))
+                if (undock == "complet") return "je n'arrive pas à quitter ma base (mes roues ne tournent pas en mode complet)"
+            } else {
+                log("Roomba : il s'est tu dès le mode complet sur sa base, je lui renvoie « start »")
+                val back = restart(3000) ?: return "le Roomba ne répond plus après le mode complet sur sa base"
+                log("Roomba : il répond de nouveau (mode ${back.modeName}, ${if (back.onHomeBase) "toujours sur sa base" else "hors de sa base"})")
+                if (!back.onHomeBase) return null
+                if (undock == "complet") return "je n'arrive pas à quitter ma base (le Roomba se tait en mode complet)"
             }
-            log("Roomba : il s'est tu dès le mode complet sur sa base, je lui renvoie « start »")
-            val back = restart(3000) ?: return "le Roomba ne répond plus après le mode complet sur sa base"
-            log("Roomba : il répond de nouveau (mode ${back.modeName}, ${if (back.onHomeBase) "toujours sur sa base" else "hors de sa base"})")
-            if (!back.onHomeBase) return null
-            if (undock == "complet") return "je n'arrive pas à quitter ma base (le Roomba se tait en mode complet)"
         }
         // Son propre programme de nettoyage le fait reculer hors de la base ; on reprend la main dès qu'il l'a quittée
         // (brosses et aspirateur tournent une seconde environ).
@@ -495,14 +501,16 @@ class RoombaRobot(
         return null
     }
 
-    /** Recule pendant [ms] ; s'arrête sur [stop] ou si une roue se soulève. */
-    private fun backOff(ms: Long) {
+    /** Recule pendant [ms] ; s'arrête sur [stop] ou si une roue se soulève. Rend la distance parcourue (roues). */
+    private fun backOff(ms: Long): Double {
         val g0 = stopGen
+        val d0 = odo.travelledM
         val end = System.currentTimeMillis() + ms
         while (System.currentTimeMillis() < end && stopGen == g0 && sensors?.wheelDrop != true) {
             wheels(if (reversed) 0.12 else -0.12, 0.0); sleeper(100)
         }
         wheels(0.0, 0.0)
+        return abs(odo.travelledM - d0)
     }
 
     /** Renvoie « start » jusqu'à ce qu'il réponde (il a pu redémarrer : 115 200 bauds, mode éteint). */
@@ -547,13 +555,6 @@ class RoombaRobot(
      * impulsions et on regarde à quelle vitesse il répond. Puis on le remet à 115 200 bauds (ordre 129, code 11).
      */
     fun brcTest(): String = synchronized(io) {
-        link.clearInput()
-        link.write(byteArrayOf(RoombaOI.RESET.toByte()))
-        sleeper(3000) // redémarrage (message d'accueil), puis les 2 s de la spécification
-        link.clearInput()
-        repeat(3) { link.setWakeLine(true); sleeper(200); link.setWakeLine(false); sleeper(200) }
-        lastWake = System.currentTimeMillis()
-        sleeper(400)
         fun answers(baud: Int): Boolean {
             runCatching { link.setBaud(baud) }
             sleeper(100)
@@ -562,6 +563,20 @@ class RoombaRobot(
             sleeper(150)
             return (0 until 3).any { readSensors() != null }
         }
+        link.clearInput()
+        link.write(byteArrayOf(RoombaOI.RESET.toByte()))
+        // Il redémarre : on attend qu'il réponde de nouveau (24/10 : plus de 3 s ; les impulsions envoyées pendant son
+        // démarrage ne comptaient pas), puis les 2 s de la spécification.
+        val t0 = System.currentTimeMillis()
+        sleeper(1500)
+        var back = false
+        while (!back && System.currentTimeMillis() - t0 < 12_000) { back = answers(115_200); if (!back) sleeper(300) }
+        val bootMs = System.currentTimeMillis() - t0
+        if (!back) { currentBaud = 115_200; driving = false; return@synchronized "il ne répond plus après le redémarrage (12 s) : test impossible" }
+        sleeper(2000)
+        repeat(3) { link.setWakeLine(true); sleeper(200); link.setWakeLine(false); sleeper(200) }
+        lastWake = System.currentTimeMillis()
+        sleeper(400)
         val at19200 = answers(19_200)
         if (at19200) { link.write(byteArrayOf(129.toByte(), 11)); sleeper(200) }
         val at115200 = answers(115_200)
@@ -571,7 +586,17 @@ class RoombaRobot(
         val verdict = if (at19200) "le fil de réveil MARCHE : après trois impulsions, il répondait à 19 200 bauds (remis à 115 200)"
         else "le fil de réveil ne fait rien : après trois impulsions, il ne répondait pas à 19 200 bauds" +
             (if (at115200) " mais toujours à 115 200 (le fil n'arrive pas jusqu'à lui, ou la carte ne pilote pas RTS)" else "")
-        verdict + if (at115200) "" else " ; ATTENTION : il ne répond plus à 115 200 bauds"
+        "$verdict (redémarrage : ${bootMs / 1000.0} s)" + if (at115200) "" else " ; ATTENTION : il ne répond plus à 115 200 bauds"
+    }
+
+    /** Diagnostic : envoie une demande de capteurs ([ids], groupes compris) et rend les octets reçus en 400 ms, en hexadécimal. */
+    fun rawQuery(ids: List<Int>): String = synchronized(io) {
+        link.clearInput()
+        link.write(byteArrayOf(RoombaOI.QUERY_LIST.toByte(), ids.size.toByte(), *ids.map { it.toByte() }.toByteArray()))
+        val got = ArrayList<Int>()
+        val end = System.currentTimeMillis() + 400
+        while (System.currentTimeMillis() < end) { val b = link.read(1, 50) ?: continue; got.add(b[0].toInt() and 0xFF) }
+        "${got.size} octets : " + got.joinToString(" ")
     }
 
     @Volatile private var singAt = 0L

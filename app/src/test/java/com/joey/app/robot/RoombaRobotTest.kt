@@ -33,6 +33,9 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
     var off = false
     /** Comme le vrai le 24/10 à 17 h 04 : sur sa base, ses roues ne tournent pas en mode complet (seul CLEAN le sort). */
     var wheelsLockedOnBase = false
+    /** Et même son programme CLEAN ne le fait pas bouger (24/10, 18 h 22) ; un redémarrage (opcode 7) le débloque. */
+    var cleanLocked = false
+    var resets = 0
     /** Programme de nettoyage lancé (CLEAN) : il recule hors de sa base, brosses en marche. */
     var cleaning = false
     var cleans = 0
@@ -48,7 +51,8 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         val now = System.nanoTime()
         val dt = (now - last) / 1e9
         last = now
-        if (cleaning) { right = -150; left = -150 } else if (mode < 2 || (wheelsLockedOnBase && onBase)) { right = 0; left = 0 }
+        if (cleaning && !(cleanLocked && onBase)) { right = -150; left = -150 }
+        else if (cleaning || mode < 2 || (wheelsLockedOnBase && onBase)) { right = 0; left = 0 }
         val dl = if (blocked) 0.0 else left / 1000.0 * dt; val dr = if (blocked) 0.0 else right / 1000.0 * dt
         // [slipR] : la roue droite compte un peu trop (tapis, roue usée) : l'odométrie dérive comme sur le vrai.
         countsL += dl * 1000 / RoombaOI.MM_PER_COUNT; countsR += dr * slipR * 1000 / RoombaOI.MM_PER_COUNT
@@ -88,7 +92,7 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         for (v in b) inBuf.add(v.toInt() and 0xFF)
         while (inBuf.isNotEmpty()) {
             val op = inBuf[0]
-            if (off && op != 128) { inBuf.removeAt(0); continue } // éteint : il n'attend que « start »
+            if (off && op != 128 && op != 7) { inBuf.removeAt(0); continue } // éteint : il n'attend que « start »
             val need = when (op) { 128, 131, 132, 143 -> 1; 145 -> 5; 138 -> 2; 141 -> 2; 140 -> if (inBuf.size >= 3) 3 + 2 * inBuf[2] else 99
                 149 -> if (inBuf.size >= 2) 2 + inBuf[1] else 99; else -> 1 }
             if (inBuf.size < need) return
@@ -96,6 +100,7 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
             repeat(need) { inBuf.removeAt(0) }
             when (op) {
                 128 -> { mode = 1; off = false }
+                7 -> { off = true; mode = 0; cleaning = false; wheelsLockedOnBase = false; cleanLocked = false; resets++ }
                 131 -> { mode = if (onBase) 1 else 2; cleaning = false }
                 132 -> if (silentAfterFullOnBase && onBase) { off = true; mode = 0 } else { mode = 3; cleaning = false }
                 135 -> { mode = 1; cleaning = true; cleans++; motorsOn = true }
@@ -418,6 +423,20 @@ class RoombaRobotTest {
         val res = r.drive(0.1)
         assertTrue("$res / $logs", !f.onBase && f.cleans == 1 && !f.motorsOn && !f.cleaning)
         assertTrue("$logs", logs.any { "toujours sur ma base" in it })
+        r.disconnect()
+    }
+
+    /** 24/10, 18 h 22 : sur sa base, ni le mode complet ni CLEAN ne font tourner ses moteurs ; il le redémarre. */
+    @Test fun quitteSaBaseEnRedemarrantLeRoomba() {
+        val f = FakeRoomba()
+        f.onBase = true; f.wheelsLockedOnBase = true; f.cleanLocked = true
+        val logs = java.util.Collections.synchronizedList(ArrayList<String>())
+        val r = RoombaRobot(f, log = { logs.add(it) })
+        r.connect()
+        Thread.sleep(200)
+        val res = r.drive(0.1)
+        assertTrue("$res / $logs", !f.onBase && f.resets == 1)
+        assertTrue("$logs", logs.any { "redémarre" in it })
         r.disconnect()
     }
 

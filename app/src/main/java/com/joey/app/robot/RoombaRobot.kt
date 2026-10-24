@@ -498,11 +498,32 @@ class RoombaRobot(
         send(RoombaOI.motors(false))
         send(RoombaOI.driveDirect(0, 0))
         vacuuming = false
-        if (!off) return "je n'arrive pas à quitter ma base (toujours sur ses contacts après 6 s)"
+        if (!off) {
+            // 24/10, 18 h 19 et 18 h 22 : après quelques minutes de charge, ni le mode complet ni CLEAN ne font tourner
+            // ses moteurs (le voyant CLEAN s'allume, aucun bruit). Dernier recours : on le redémarre, puis on recule.
+            if (System.currentTimeMillis() - resetTriedAt < 10 * 60_000L) return "je n'arrive pas à quitter ma base (toujours sur ses contacts après 6 s)"
+            resetTriedAt = System.currentTimeMillis()
+            log("Roomba : ses moteurs ne répondent pas sur la base, je le redémarre")
+            synchronized(io) { link.clearInput(); link.write(byteArrayOf(RoombaOI.RESET.toByte())) }
+            sleeper(1500)
+            val back = restart(30_000) ?: return "le Roomba ne répond plus après son redémarrage"
+            defineBabble()
+            if (!back.onHomeBase) return null
+            send(RoombaOI.full()); sleeper(100)
+            val moved = backOff(2500)
+            val after = readSensors() ?: sensors
+            log("Roomba : après le redémarrage, recul de %.2f m".format(moved))
+            if (after?.onHomeBase == true) return "je n'arrive pas à quitter ma base, même après l'avoir redémarré"
+            send(RoombaOI.safe())
+            return null
+        }
         // Encore un peu en arrière, pour dégager la base.
         backOff(1200)
         return null
     }
+
+    /** Dernier redémarrage de secours (un toutes les 10 min au plus : on ne boucle pas). */
+    @Volatile private var resetTriedAt = 0L
 
     /** Recule pendant [ms] ; s'arrête sur [stop] ou si une roue se soulève. Rend la distance parcourue (roues). */
     private fun backOff(ms: Long): Double {

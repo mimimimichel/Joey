@@ -56,6 +56,14 @@ install_on() {
   local version model
   version=$(grep -o '"versionName": "[^"]*"' "$REPO/app/build/outputs/apk/debug/output-metadata.json" | cut -d'"' -f4)
   model=$(adb -s "$dev" shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+  # Déjà installée à la main (développement sur ce PC) : on ne relance pas Joey pour rien (24/10 : chaque relance en
+  # plein essai coupait la liaison avec le Roomba).
+  local installed
+  installed=$(adb -s "$dev" shell dumpsys package com.joey.app 2>/dev/null | grep -m1 'versionName=' | cut -d= -f2 | tr -d '\r ')
+  if [ -n "$version" ] && [ "$installed" = "$version" ]; then
+    log "Joey $version déjà installé sur $model : rien à faire."
+    return 0
+  fi
   log "Installation de Joey $version sur $model ($dev)…"
   if adb -s "$dev" install -r "$apk" >>"$LOG" 2>&1; then
     # Exempté de la mise en veille profonde d'Android (sinon, écran éteint, il coupe le Wi-Fi malgré Joey)

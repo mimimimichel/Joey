@@ -2155,6 +2155,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         var last: Double? = null
         // 5 essais, correction amortie : la nacelle dépasse la cible (24/10, rejoué depuis le PC : 14° -> -11° -> 6°).
         var searchTurns = 0
+        // Rotation totale du corps bornée (24/10 : ~600° en dix essais au bord du tapis, il l'a embarqué).
+        var turnedTotal = 0.0
         for (attempt in 0 until 10) {
             head.look(null, marksTilt, timeoutMs = 1500)
             Thread.sleep(400)
@@ -2174,8 +2176,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // tourne de 60° (la tête reste fixe dans la pièce) et on regarde de nouveau, 5 fois au plus.
                 val spots = com.joey.app.senses.BodyMarks.find(px, w, h).size
                 log("🎯 Pastilles pas trouvées (inclinaison %.0f°, %d taches claires, image %d × %d)".format(pitch, spots, bmp.width, bmp.height))
-                if (searchTurns >= 5) break
+                // Déjà mesuré, et le corps vient de se tourner vers la tête : le repère est bon, on ne cherche pas plus loin
+                // (24/10, S10 : presque dans l'axe, les pastilles sortaient de l'image ; chercher défaisait l'alignement).
+                if (last != null) break
+                if (searchTurns >= 4 || turnedTotal + 60 > 240) break
                 searchTurns++
+                turnedTotal += 60
                 val t = r.turn(60.0)
                 if (t.startsWith("arrêté") || t == "interrompu") break
                 Thread.sleep(300)
@@ -2190,6 +2196,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // C'est le corps qui se tourne vers la tête : la nacelle, verrouillée, garde la tête fixe dans la pièce, et le
             // Roomba tourne juste. (Tourner la tête vers le corps ne marchait pas : la nacelle obéit mal aux petites
             // rotations, 24/10 : -18° -> -70° -> +38° -> -36° -> +39°, puis -80° -> -40° -> +37°.)
+            if (turnedTotal + kotlin.math.abs(res.panDeg) > 240) break
+            turnedTotal += kotlin.math.abs(res.panDeg)
             val turned = r.turn(res.panDeg)
             if (turned.startsWith("arrêté") || turned == "interrompu") break
             Thread.sleep(300)

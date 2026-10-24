@@ -93,6 +93,8 @@ class RoombaRobot(
     @Volatile internal var awakeAfterMs = 180_000L
     /** Il cherche sa base tout seul (mode passif, mais il roule) : on ne le dérange pas jusque-là. */
     @Volatile private var seekingDockUntil = 0L
+    /** Dernière fois qu'il a vu un code infrarouge de sa base (160 à 175). */
+    @Volatile private var lastDockIrAt = 0L
     private var awakeLogged = false
     /** La liaison vient de se couper (false) ou de revenir (true). */
     @Volatile var onLink: ((Boolean) -> Unit)? = null
@@ -343,7 +345,10 @@ class RoombaRobot(
                 val lb = s.lightBumper and 0x3F
                 if (lb != 0 && ((prev?.lightBumper ?: 0) and 0x3F) == 0)
                     onContact?.invoke("proche", if (lb and 0x3C == 0 && lb and 0x03 != 0) -1 else if (lb and 0x0F == 0) 1 else 0)
-                if (s.virtualWall == true && prev?.virtualWall != true) onContact?.invoke("mur virtuel", 0)
+                // Près de sa base, son faisceau compte comme « mur virtuel » (24/10 : dix à côté de la base, aucun mur virtuel dans
+                // la maison) : on ne le note pas, sinon la carte interdit l'abord de la base.
+                if (s.irOmni in 160..175) lastDockIrAt = now
+                if (s.virtualWall == true && prev?.virtualWall != true && now - lastDockIrAt > 3000) onContact?.invoke("mur virtuel", 0)
                 // Les capteurs fins, 5 fois par seconde au plus (pour la carte) : proximité (6 directions) et mur à droite.
                 if (now - fineAt > 200) {
                     fineAt = now
@@ -360,7 +365,8 @@ class RoombaRobot(
                 if (now - linkGoodSince > buttonQuietMs && now - connectedAt > buttonQuietMs) {
                     if (pressed and 1 != 0) onButton?.invoke("clean")
                     if (pressed and 2 != 0) onButton?.invoke("spot")
-                    if (pressed and 4 != 0) onButton?.invoke("dock")
+                    // Pendant qu'il rentre seul, le Roomba annonce son bouton DOCK (24/10) : ce n'est pas quelqu'un.
+                    if (pressed and 4 != 0 && now > seekingDockUntil) onButton?.invoke("dock")
                 }
             }
             // Roues en surintensité (coincées, même si elles patinent) : il est coincé.
@@ -423,6 +429,7 @@ class RoombaRobot(
         // Seulement les roues soulevées : le mode sécurité du Roomba s'arrête tout seul au bord d'un vide, et le
         // « vide » vu à l'arrêt était souvent faux (tapis sombre, robot penché) : il refusait de rouler pour rien.
         if (s.wheelDrop) return "je ne roule pas : roue soulevée (on m'a soulevé ?)"
+        seekingDockUntil = 0L // on roule : il ne cherche plus sa base
         if (!driving || s.oiMode != 2) {
             safetyNote = null
             send(RoombaOI.start())

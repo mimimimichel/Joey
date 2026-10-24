@@ -145,8 +145,16 @@ class RoombaRobot(
         link.clearInput()
         link.write(RoombaOI.querySensors(extended))
         val raw = link.read(RoombaOI.sensorBytes(extended), 250) ?: return null
-        RoombaOI.parseSensors(raw, extended)
+        RoombaOI.parseSensors(raw, extended, modeOffset)
     }
+
+    /**
+     * Décalage du mode annoncé (0 selon la norme, 1 pour ce Roomba : passif annoncé 2). Mesuré à la connexion, juste après
+     * « start » (qui met toujours en passif). Sans lui, ses réponses en mode complet (annoncé 4) passaient pour du bruit :
+     * la liaison semblait coupée à chaque sortie de base (24/10, trois fois sur trois).
+     */
+    @Volatile var modeOffset = 0
+        private set
 
     /** Essaie la liste complète des capteurs ; si le Roomba ne la comprend pas, on reste à celle de base. */
     private fun tryExtended(quiet: Boolean = false) {
@@ -170,9 +178,13 @@ class RoombaRobot(
     private var linkGoodSince = 0L
     @Volatile internal var extendedRetryMs = 30_000L
 
+    /**
+     * Impulsion basse de 1 s sur le fil de réveil (BRC). Une impulsion de 50 à 500 ms compte pour un changement de vitesse
+     * (trois de suite : 19 200 bauds) ; 1 s n'en compte jamais (exemple donné par iRobot : 1 s par minute le garde éveillé).
+     */
     fun wakePulse() {
         lastWake = System.currentTimeMillis()
-        runCatching { link.setWakeLine(true); sleeper(500); link.setWakeLine(false) }
+        runCatching { link.setWakeLine(true); sleeper(1000); link.setWakeLine(false) }
     }
 
     /** Réveille le Roomba, trouve la vitesse de liaison, lance la lecture des capteurs. Lève une exception claire sinon. */
@@ -190,8 +202,16 @@ class RoombaRobot(
             sleeper(100)
             send(RoombaOI.start())
             sleeper(150)
+            modeOffset = 1 // accepte passif annoncé 1 ou 2, puis on règle le décalage
             repeat(3) { if (s == null) s = readSensors() }
+            modeOffset = 0
             if (s != null) { baud = b; break }
+        }
+        // Juste après « start », il est passif : passif annoncé 1 (norme, lu comme 0 avec le décalage 1) ou 2 (ce Roomba).
+        s?.let { first ->
+            modeOffset = if (first.oiMode == 1) 1 else 0
+            s = readSensors() ?: first
+            if (modeOffset == 1) log("Roomba : il annonce son mode avec un cran de plus (passif = 2) : j'en tiens compte")
         }
         val ok = s ?: throw IllegalStateException(
             "la carte USB répond mais pas le Roomba. Vérifie : interrupteur de la carte sur 5V, TX -> trou 3, RX -> trou 4, " +

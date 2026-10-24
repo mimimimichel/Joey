@@ -26,6 +26,8 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
     var mute = false    // fil qui bouge : il n'entend plus rien
     /** Comme le vrai le 24/10 : le mode complet sur sa base le fait taire (mode éteint) jusqu'au prochain « start ». */
     var silentAfterFullOnBase = false
+    /** Le vrai (firmware stm32v2-v3.9.7) annonce son mode avec un cran de plus : passif 2, sécurité 3, complet 4. */
+    var modeReportOffset = 0
     var off = false
     /** Programme de nettoyage lancé (CLEAN) : il recule hors de sa base, brosses en marche. */
     var cleaning = false
@@ -118,7 +120,7 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
                 25 -> { out.add(0x07); out.add(0xD0) }
                 26 -> { out.add(0x0B); out.add(0xB8) }
                 34 -> out.add(if (onBase) 2 else 0)
-                35 -> out.add(mode)
+                35 -> out.add(mode + modeReportOffset)
                 43 -> { out.add(l shr 8); out.add(l and 0xFF) }
                 44 -> { out.add(r shr 8); out.add(r and 0xFF) }
                 45 -> out.add(0)
@@ -358,6 +360,29 @@ class RoombaRobotTest {
         assertTrue("$res / $logs", !f.onBase && f.cleans == 1)
         assertTrue("brosses coupées", !f.motorsOn && !f.cleaning)
         assertTrue("$logs", logs.any { "CLEAN" in it })
+        r.disconnect()
+    }
+
+    /** Le vrai Roomba du 24/10 : mode annoncé avec un cran de plus. Il le voit, et quitte sa base en mode complet. */
+    @Test fun modeAnnonceDecaleDUnCran() {
+        val f = FakeRoomba()
+        f.onBase = true; f.modeReportOffset = 1
+        val logs = java.util.Collections.synchronizedList(ArrayList<String>())
+        val r = RoombaRobot(f, log = { logs.add(it) })
+        r.connect()
+        Thread.sleep(200)
+        assertEquals(1, r.modeOffset)
+        assertEquals(1, r.sensors?.oiMode)
+        val res = r.drive(0.1)
+        assertTrue("$res / $logs", !f.onBase && f.cleans == 0 && logs.none { "s'est tu" in it || "coupée" in it })
+        assertEquals(2, r.sensors?.oiMode)
+        r.disconnect()
+    }
+
+    @Test fun modeAnnonceSelonLaNorme() {
+        val (f, r) = connected()
+        assertEquals(0, r.modeOffset)
+        assertEquals(1, r.sensors?.oiMode)
         r.disconnect()
     }
 

@@ -158,17 +158,21 @@ object RoombaOI {
         val modeName get() = when (oiMode) { 0 -> "éteint"; 1 -> "passif"; 2 -> "sécurité"; 3 -> "complet"; else -> "?" }
     }
 
-    /** Lit la réponse à [querySensors] ; null si la taille ou les valeurs sont incohérentes (mauvaise vitesse de liaison). */
-    fun parseSensors(b: ByteArray, extended: Boolean = false): Sensors? {
+    /**
+     * Lit la réponse à [querySensors] ; null si la taille ou les valeurs sont incohérentes (mauvaise vitesse de liaison).
+     * [modeOffset] : certains Roomba (firmware release-stm32v2-v3.9.7, 24/10/2026) annoncent leur mode avec un cran de
+     * plus (passif 2, sécurité 3, complet 4) ; le mode rendu est toujours celui de la norme (passif 1…).
+     */
+    fun parseSensors(b: ByteArray, extended: Boolean = false, modeOffset: Int = 0): Sensors? {
         if (b.size != sensorBytes(extended)) return null
         fun u8(i: Int) = b[i].toInt() and 0xFF
         fun u16(i: Int) = (u8(i) shl 8) or u8(i + 1)
         fun s16(i: Int) = u16(i).toShort().toInt()
         val bumps = u8(0)
-        val mode = u8(15)
+        val mode = u8(15) - modeOffset
         val chargingState = u8(5)
         // Contrôles de cohérence : bits inutilisés à zéro, mode et état de charge dans leurs plages
-        if (bumps and 0xF0 != 0 || mode > 3 || chargingState > 5) return null
+        if (bumps and 0xF0 != 0 || mode !in 0..3 || chargingState > 5) return null
         for (i in 1..4) if (u8(i) > 1) return null
         // Capteurs en plus : à partir de l'octet 21, dans l'ordre d'EXTRA_PACKETS (24 octets).
         val e = SENSOR_BYTES

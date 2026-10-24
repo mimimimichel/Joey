@@ -70,13 +70,29 @@ class WakeWord(
         mute(false)
     }
 
-    /** Les bips de la reconnaissance vocale à chaque relance : on les coupe pendant l'écoute. */
+    /** Volumes d'avant l'écoute (flux -> niveau), remis à la fin. */
+    private val savedVolumes = HashMap<Int, Int>()
+    private var muteFailLogged = false
+
+    /**
+     * Les bips de la reconnaissance vocale à chaque relance (toutes les ~3 s sans parole) : on les coupe pendant l'écoute.
+     * Ils passent par le flux des notifications (24/10, S8 : « usage=NOTIFICATION_EVENT »). Samsung refuse « couper le
+     * son » de ce flux sans l'accès « Ne pas déranger » (refus silencieux : le bip tournait en boucle) : on met aussi
+     * son volume à 0, et on le remet ensuite.
+     */
     private fun mute(on: Boolean) {
         if (on == muted) return
         muted = on
         val dir = if (on) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE
         for (stream in listOf(AudioManager.STREAM_SYSTEM, AudioManager.STREAM_NOTIFICATION)) {
             runCatching { audio.adjustStreamVolume(stream, dir, 0) }
+            if (on) {
+                val v = runCatching { audio.getStreamVolume(stream) }.getOrNull() ?: continue
+                if (v > 0) savedVolumes[stream] = v
+                runCatching { audio.setStreamVolume(stream, 0, 0) }.onFailure {
+                    if (!muteFailLogged) { muteFailLogged = true; log("Mot de réveil : je n'arrive pas à couper les bips (${it.javaClass.simpleName})") }
+                }
+            } else savedVolumes.remove(stream)?.let { v -> runCatching { audio.setStreamVolume(stream, v, 0) } }
         }
     }
 

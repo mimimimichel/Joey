@@ -570,9 +570,10 @@ class RoombaRobot(
         val t0 = System.currentTimeMillis()
         sleeper(1500)
         var back = false
-        while (!back && System.currentTimeMillis() - t0 < 12_000) { back = answers(115_200); if (!back) sleeper(300) }
+        // 24/10 : ~15 s (il recalibre sa batterie : « battery-current-zero »).
+        while (!back && System.currentTimeMillis() - t0 < 30_000) { back = answers(115_200); if (!back) sleeper(300) }
         val bootMs = System.currentTimeMillis() - t0
-        if (!back) { currentBaud = 115_200; driving = false; return@synchronized "il ne répond plus après le redémarrage (12 s) : test impossible" }
+        if (!back) { currentBaud = 115_200; driving = false; return@synchronized "il ne répond plus après le redémarrage (30 s) : test impossible" }
         sleeper(2000)
         repeat(3) { link.setWakeLine(true); sleeper(200); link.setWakeLine(false); sleeper(200) }
         lastWake = System.currentTimeMillis()

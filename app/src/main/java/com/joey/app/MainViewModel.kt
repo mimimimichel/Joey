@@ -968,7 +968,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Pas de sens à deviner : les capteurs disent où va la tête. Cible perdue : il finit d'aller là où il l'a vue.
      */
     private fun angleTrack(x: Float?, y: Float?, pose: Pair<Double, Double>?, abs: Double?, w: Int, h: Int, person: Boolean) {
-        follower.observeOnly = pose != null && !calibrating
+        // En mode test, la tête ne bouge que sur ordre du pilote (24/10 : ses coups d'œil tordaient le câble).
+        follower.observeOnly = (pose != null && !calibrating) || testQuiet
         if (pose == null) return
         val now = System.currentTimeMillis()
         if (x != null && y != null) {
@@ -1179,6 +1180,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     log(if (idle) "🔅 Personne depuis 5 min : je me mets en économie" else "🔆 Je me réveille de l'économie")
                 }
             }
+            // Mode test : ni coups d'œil, ni poses, ni initiatives (la tête ne bouge que sur ordre ; 24/10, « je m'ennuie »
+            // et les coups d'œil tordaient le câble jusqu'à éteindre la nacelle).
+            if (testQuiet) continue
             runCatching { conversationGaze(now, s) }
             runCatching { idlePose(now, s) }
             runCatching { initiatives(now, s) }
@@ -2144,7 +2148,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * La caméra est-elle au-dessus de l'axe de la nacelle ? Oui pour le S8+ ; le S10 a la sienne à ~10 cm de l'axe (coin de
      * l'écran) : seule la paire de pastilles reconnue par sa forme compte (24/10). Réglage « camera_centree ».
      */
-    private fun cameraCentered() = flag("camera_centree", android.os.Build.MODEL.startsWith("SM-G95"))
+    /** La nacelle a été vue en mode suivi (la tête suit le corps) : l'alignement ne peut pas se faire en tournant le corps. */
+    @Volatile private var nacelleFollows = false
+
+    // 24/10 au soir : le S8+, remonté sur la nacelle, a lui aussi la caméra décalée (le mât traverse l'image) ; les replis
+    // qui supposent l'axe sous la caméra inventaient des mesures (-64°) et le corps tournait jusqu'à tirer le câble.
+    private fun cameraCentered() = flag("camera_centree", false)
 
     /**
      * Inclinaison de la tête pour voir les repères du Roomba (24/10 : S8+ de -50° à -70° ; S10, caméra décalée, de -69° à
@@ -2165,6 +2174,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // 5 essais, correction amortie : la nacelle dépasse la cible (24/10, rejoué depuis le PC : 14° -> -11° -> 6°).
         var searchTurns = 0
         var headSearch = 0
+        // Dernier tour du corps vers la tête (pour voir si la tête l'a suivi : nacelle en mode suivi, pas verrouillée).
+        var lastTurn = 0.0; var beforeTurn: Double? = null
         // Rotation totale du corps bornée (24/10 : ~600° en dix essais au bord du tapis, il l'a embarqué).
         var turnedTotal = 0.0
         for (attempt in 0 until 10) {
@@ -2199,6 +2210,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     continue
                 }
                 if (searchTurns >= 1 || turnedTotal + 120 > 240) break
+                if (kotlin.math.abs(cable.value - 120) > 150) { log("🎯 Je ne tourne pas le corps : le câble serait trop tordu"); break }
                 head.look(40.0, null, timeoutMs = 2500) // à peu près où elle était
                 headSearch = 0
                 searchTurns++
@@ -2210,6 +2222,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             last = res.panDeg
             log("🎯 Essai ${attempt + 1} : tête à %+.0f° de l'axe du corps (inclinaison %.0f°)".format(res.panDeg, pitch))
+            // Le corps vient de tourner vers la tête et l'angle n'a presque pas changé : la tête a suivi le corps. La nacelle
+            // est en mode suivi (24/10, 17 h 18 : +16° trois fois de suite) ; tourner encore ne sert à rien.
+            val b4 = beforeTurn
+            if (b4 != null && kotlin.math.abs(lastTurn) > 10 && kotlin.math.abs(b4 - res.panDeg) < 0.4 * kotlin.math.abs(lastTurn)) {
+                log("⚠️ Ma tête suit mon corps : la nacelle est en mode suivi. Un appui sur son bouton la verrouille.")
+                nacelleFollows = true
+                val abs = head.absPan()
+                if (abs != null) setBodyRef(abs - res.panDeg, r.heading)
+                break
+            }
+            nacelleFollows = false
             val abs = head.absPan() ?: break
             setBodyRef(abs - res.panDeg, r.heading) // maintenant bodyPan() vaut l'angle mesuré
             cable.correct(res.panDeg) // le compteur du câble suit l'angle réel (au tour près)
@@ -2218,7 +2241,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // Roomba tourne juste. (Tourner la tête vers le corps ne marchait pas : la nacelle obéit mal aux petites
             // rotations, 24/10 : -18° -> -70° -> +38° -> -36° -> +39°, puis -80° -> -40° -> +37°.)
             if (turnedTotal + kotlin.math.abs(res.panDeg) > 240) break
+            // La tête reste fixe, le corps tourne : le câble se tord d'autant. Jamais au-delà de 150° (24/10 : il a tiré le
+            // câble jusqu'à éteindre la nacelle).
+            if (kotlin.math.abs(cable.value - res.panDeg) > 150) { log("🎯 Je ne tourne pas le corps : le câble serait trop tordu"); break }
             turnedTotal += kotlin.math.abs(res.panDeg)
+            beforeTurn = res.panDeg; lastTurn = res.panDeg
             val turned = r.turn(res.panDeg)
             if (turned.startsWith("arrêté") || turned == "interrompu") break
             Thread.sleep(300)
@@ -3331,7 +3358,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (cleared) { wake.stop(); return }
         val mic = androidx.core.content.ContextCompat.checkSelfPermission(getApplication(), android.Manifest.permission.RECORD_AUDIO) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
-        if (flag("wake_word", true) && live == null && mic && geminiKey.isNotBlank()) wake.start() else wake.stop()
+        // Mode test : il n'écoute pas (24/10 : le bip de la reconnaissance vocale tournait en boucle pendant les essais).
+        if (flag("wake_word", true) && live == null && mic && geminiKey.isNotBlank() && !testQuiet) wake.start() else wake.stop()
     }
 
     fun micPressed() {
@@ -4837,6 +4865,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!testQuiet) {
             testQuiet = true
             if (live != null) stopLive()
+            updateWake()
         }
         roomba?.muted = true // ni bips ni mélodies du Roomba pendant les essais
         if (!_state.value.testScreen) { _state.update { it.copy(testScreen = true) }; log("⬛ Mode test : écran noir, je me tais") }
@@ -4845,7 +4874,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** On l'appelle, on le touche, ou les tests sont finis : le visage revient. */
     fun endTestScreen() {
         testScreenUntil = 0L
+        val was = testQuiet
         testQuiet = false
+        if (was) updateWake()
         roomba?.muted = false
         if (_state.value.testScreen) { _state.update { it.copy(testScreen = false) }; log("🙂 Fin du mode test : visage rallumé") }
     }

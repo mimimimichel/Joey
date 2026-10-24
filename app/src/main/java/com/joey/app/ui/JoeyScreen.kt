@@ -96,6 +96,7 @@ fun JoeyScreen(vm: MainViewModel) {
             gazeX = gaze.first,
             gazeY = gaze.second,
             tilt = lean,
+            pixels = s.eyePixels,
             modifier = Modifier.fillMaxSize()
                 // Toucher : appui = commandes (et il sursaute), double appui = chatouilles, appui long = caresse.
                 .pointerInput(Unit) {

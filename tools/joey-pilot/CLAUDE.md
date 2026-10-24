@@ -26,6 +26,7 @@ Tout passe par `python3 joey.py …` (dans ce dossier). Lis `python3 joey.py` po
   Au premier trajet, le journal (`feed`) donne sa vitesse : « 🧠 Profondeur (MiDaS) : N ms par image ».
 - `cmd scan` : un tour d'horizon cartographique (12 images de profondeur sur 360°, recalées sur la carte) ;
   `cmd carto secondes=180` : cartographier par tours d'horizon (tour, frontière suivante, tour…). Puis `map`.
+- `cmd pixels n=56` : yeux pixelisés (plus petit = plus gros pixels) ; `n=0` pour des yeux lisses.
 - `say "…"` : lui parler (il répond à voix haute, comme si quelqu'un lui parlait).
 - `cmd stop` : **arrêt immédiat de tout**. `drive AVANT TOURNE SECONDES` : rouler à la main.
 

@@ -75,6 +75,8 @@ data class UiState(
     val headSpeed: Int = 100,
     /** Mode test (pilote PC) : écran noir, pour ne pas marquer l'écran AMOLED pendant des heures d'essais. */
     val testScreen: Boolean = false,
+    /** Yeux pixelisés : nombre de pixels en largeur (0 = yeux lisses). Réglage « yeux_pixels » (cmd pixels n=…). */
+    val eyePixels: Int = 56,
     val seesFace: Boolean = false,
     /** Ce qu'il cherche ou suit du regard en ce moment (null : les visages). */
     val tracking: String? = null,
@@ -266,6 +268,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             subtitles = flag("subtitles", false),
             followFace = flag("follow_face", true),
             wakeWord = flag("wake_word", true),
+            eyePixels = prefs.getInt("yeux_pixels", 56),
             watch = flag("watch", false),
             ntfyTopic = prefs.getString("ntfy_topic", "") ?: "",
             idleLife = flag("idle_life", true),
@@ -1303,6 +1306,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun touched() {
         setMood(Mood.ETONNE)
         roomba?.sing(com.joey.app.robot.RoombaRobot.Tune.R2D2)
+        lastTouchAt = System.currentTimeMillis()
+        lookAtToucher()
+    }
+
+    /** Dernier appui sur l'écran : quelqu'un est là, il ne part pas en sortie autonome. */
+    @Volatile private var lastTouchAt = 0L
+    @Volatile private var lastTouchLookAt = 0L
+
+    /**
+     * On touche l'écran : la personne est devant l'écran, donc dans l'axe de la tête, et penchée au-dessus de lui.
+     * Il lève les yeux vers elle avec un petit sursaut de la tête, puis le suivi du visage prend le relais.
+     * Les roues ne bougent pas (une main est sur lui).
+     */
+    private fun lookAtToucher() {
+        if (!gimbal.ready || _state.value.busy || following || dancing) return
+        val now = System.currentTimeMillis()
+        if (now - lastTouchLookAt < 3000) return
+        lastTouchLookAt = now
+        val faceNow = now - targetFaceAt < 1000
+        moveAsync(holdMs = 1500) {
+            val tilt = head.pose()?.second ?: 0.0
+            // Visage déjà vu : il le regarde déjà, juste le sursaut. Sinon il lève la tête vers le haut.
+            val up = if (faceNow) tilt else maxOf(tilt, 35.0)
+            head.look(null, up + 8, timeoutMs = 1500)
+            head.look(null, up - 4, timeoutMs = 700)
+            head.look(null, up, timeoutMs = 700)
+            "levé les yeux vers la personne qui me touche"
+        }
     }
 
     fun tickled() {
@@ -2487,7 +2518,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val snap = com.joey.app.life.AutonomyPolicy.Snapshot(
                     now = now,
                     hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY),
-                    autonomyOn = on, busy = busy, lastTalkAt = lastPersonTalkAt,
+                    autonomyOn = on, busy = busy, lastTalkAt = maxOf(lastPersonTalkAt, lastTouchAt),
                     roombaBattery = r.battery, phoneBattery = phoneBattery(), phoneCharging = phoneCharging(),
                     onBase = r.onBase, charging = r.charging, mapFromBase = gridAnchored,
                     personSince = seenSince, lastGreetAt = lastAutoGreetAt, lastFaceSeenAt = lastFaceSeenAt,
@@ -4827,6 +4858,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "dock" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 1000) { goHome() }; "il rentre à sa base" } }
             "center" -> { recenter(); "" }
             "test" -> { testScreenOn(); "mode test : écran noir" }
+            // Yeux pixelisés : cmd pixels n=56 (plus petit = plus gros pixels), n=0 pour des yeux lisses.
+            "pixels" -> { val n = (q["n"]?.toIntOrNull() ?: 56).coerceIn(0, 200); prefs.edit().putInt("yeux_pixels", n).apply()
+                _state.update { it.copy(eyePixels = n) }; if (n == 0) "yeux lisses" else "yeux pixelisés ($n pixels de large)" }
             // Cartographie : un tour d'horizon (cmd scan), ou la pièce par tours d'horizon (cmd carto, secondes=…).
             "scan" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 1000) { scanStation() }; "tour d'horizon" } }
             "carto" -> { if (r == null) "roues non branchées" else { val sec = (q["secondes"]?.toIntOrNull() ?: 180).coerceIn(30, 900)

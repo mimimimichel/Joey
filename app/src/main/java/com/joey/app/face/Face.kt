@@ -52,6 +52,11 @@ fun Face(
     modifier: Modifier = Modifier,
     /** Tête penchée (degrés) : il réfléchit, il est curieux. */
     tilt: Float = 0f,
+    /**
+     * Yeux pixelisés (style vieil écran à LED) : nombre de pixels en largeur, 0 = yeux lisses. Le visage est dessiné dans
+     * une toute petite image, agrandie sans lissage, avec un fin quadrillage entre les pixels.
+     */
+    pixels: Int = 0,
 ) {
     // Clignement : toutes les 2 à 6 s.
     val blink = remember { Animatable(1f) }
@@ -103,19 +108,35 @@ fun Face(
     val phase by dots.animateFloat(0f, 3f, infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "phase")
 
     Canvas(modifier) {
-        drawRect(Color.Black)
-        rotate(lean) {
-            drawFace(this, mood, activity, voice, listen * (1f - think), gx, gy, blink.value * (1f - 0.35f * think))
-            if (think > 0.01f) {
-                val unit = min(size.width / 2.3f, size.height / 1.45f)
-                val r = unit * 0.075f
-                val y = size.height / 2f + unit * 0.78f
-                for (i in 0..2) {
-                    val on = (1f - kotlin.math.abs(((phase - i + 3f) % 3f) - 0.5f) * 1.3f).coerceIn(0.25f, 1f)
-                    drawCircle(EYE.copy(alpha = think * on), r * (0.8f + 0.35f * on), Offset(size.width / 2f + (i - 1) * r * 3.4f, y))
+        val content: DrawScope.() -> Unit = {
+            drawRect(Color.Black)
+            rotate(lean) {
+                drawFace(this, mood, activity, voice, listen * (1f - think), gx, gy, blink.value * (1f - 0.35f * think))
+                if (think > 0.01f) {
+                    val unit = min(size.width / 2.3f, size.height / 1.45f)
+                    val r = unit * 0.075f
+                    val y = size.height / 2f + unit * 0.78f
+                    for (i in 0..2) {
+                        val on = (1f - kotlin.math.abs(((phase - i + 3f) % 3f) - 0.5f) * 1.3f).coerceIn(0.25f, 1f)
+                        drawCircle(EYE.copy(alpha = think * on), r * (0.8f + 0.35f * on), Offset(size.width / 2f + (i - 1) * r * 3.4f, y))
+                    }
                 }
             }
         }
+        if (pixels <= 0 || size.width < 2f || size.height < 2f) { content(); return@Canvas }
+        // Pixelisé : le même visage dessiné en petit, agrandi sans lissage.
+        val cols = pixels
+        val rows = kotlin.math.max(1, kotlin.math.round(cols * size.height / size.width).toInt())
+        val small = androidx.compose.ui.graphics.ImageBitmap(cols, rows)
+        androidx.compose.ui.graphics.drawscope.CanvasDrawScope().draw(this, layoutDirection,
+            androidx.compose.ui.graphics.Canvas(small), Size(cols.toFloat(), rows.toFloat()), content)
+        drawRect(Color.Black)
+        drawImage(small, dstSize = androidx.compose.ui.unit.IntSize(size.width.toInt(), size.height.toInt()),
+            filterQuality = androidx.compose.ui.graphics.FilterQuality.None)
+        // Fin quadrillage noir entre les pixels (l'écran à LED).
+        val cw = size.width / cols; val ch = size.height / rows
+        for (i in 1 until cols) drawLine(Color.Black, Offset(i * cw, 0f), Offset(i * cw, size.height), strokeWidth = cw * 0.14f)
+        for (j in 1 until rows) drawLine(Color.Black, Offset(0f, j * ch), Offset(size.width, j * ch), strokeWidth = ch * 0.14f)
     }
 }
 

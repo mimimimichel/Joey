@@ -213,7 +213,7 @@ class RoombaRobot(
     private var buttonsSent = 0
     @Volatile private var connectedAt = 0L
     /**
-     * Plus aucune réponse depuis 20 s malgré les réveils : la liaison série elle-même est bloquée (24/10 : seule une relance
+     * Plus aucune réponse depuis 8 s malgré les réveils : la liaison série elle-même est bloquée (24/10 : seule une relance
      * de l'app, qui rouvre la carte USB, l'a débloquée). L'app rouvre alors la carte (une fois par panne).
      */
     @Volatile var onDead: (() -> Unit)? = null
@@ -252,9 +252,9 @@ class RoombaRobot(
             if (s == null) {
                 failures++
                 if (failures == 1) failSince = now
-                if (!deadReported && failures > 10 && now - failSince > 20_000) {
+                if (!deadReported && failures > 10 && now - failSince > 8_000) {
                     deadReported = true
-                    log("Roomba : plus de réponse depuis 20 s, je rouvre la carte USB")
+                    log("Roomba : plus de réponse depuis 8 s, je rouvre la carte USB")
                     runCatching { onDead?.invoke() }
                 }
                 // Réveil : souvent au début, puis toutes les ~30 s (il était éteint : 92 messages en 3 min dans le journal).

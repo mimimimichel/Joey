@@ -2123,7 +2123,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         follower.pause(12_000)
         var last: Double? = null
         // 5 essais, correction amortie : la nacelle dépasse la cible (24/10, rejoué depuis le PC : 14° -> -11° -> 6°).
-        for (attempt in 0 until 5) {
+        var searchTurns = 0
+        for (attempt in 0 until 10) {
             head.look(null, marksTilt, timeoutMs = 1500)
             Thread.sleep(400)
             val asked = System.currentTimeMillis()
@@ -2136,7 +2137,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val small = android.graphics.Bitmap.createScaledBitmap(bmp, w, h, true)
             val px = IntArray(w * h); small.getPixels(px, 0, w, 0, 0, w, h)
             if (small !== bmp) small.recycle()
-            val res = com.joey.app.senses.BodyMarks.measure(px, w, h, pitch, hf, vf, arrow = flag("fleche", false)) ?: break
+            val res = com.joey.app.senses.BodyMarks.measure(px, w, h, pitch, hf, vf, arrow = flag("fleche", false))
+            if (res == null) {
+                // Invisibles : la tête regarde peut-être loin sur le côté (24/10 : -64°, pastilles hors de l'image). Le corps
+                // tourne de 60° (la tête reste fixe dans la pièce) et on regarde de nouveau, 5 fois au plus.
+                val spots = com.joey.app.senses.BodyMarks.find(px, w, h).size
+                log("🎯 Pastilles pas trouvées (inclinaison %.0f°, %d taches claires, image %d × %d)".format(pitch, spots, bmp.width, bmp.height))
+                if (searchTurns >= 5) break
+                searchTurns++
+                val t = r.turn(60.0)
+                if (t.startsWith("arrêté") || t == "interrompu") break
+                Thread.sleep(300)
+                continue
+            }
             last = res.panDeg
             log("🎯 Essai ${attempt + 1} : tête à %+.0f° de l'axe du corps (inclinaison %.0f°)".format(res.panDeg, pitch))
             val abs = head.absPan() ?: break

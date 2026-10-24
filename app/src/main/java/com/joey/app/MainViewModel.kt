@@ -1953,6 +1953,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 thread(isDaemon = true) { runCatching { log("🛞 " + dockAndVerify()) } }
             }
             if (phone > 20) warned.remove("phone_dock")
+            // Presque vide : roues arrêtées, mode passif. Si le téléphone s'éteint, le Roomba ne garde pas son dernier
+            // ordre de roues (il continuerait tout droit) ; en train de rentrer seul, on le laisse finir.
+            if (phone in 0..6 && !phoneCharging() && !rr.seekingDock && warned.add("phone_park")) {
+                log("🔋 Téléphone à $phone % : j'arrête mes roues avant de m'éteindre")
+                runCatching { rr.park() }
+            }
+            if (phone > 10) warned.remove("phone_park")
         }
         // La nuit (3 h - 5 h), sans conversation : ménage dans les souvenirs, une fois par jour.
         val cleanDay = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.FRENCH).format(Date())

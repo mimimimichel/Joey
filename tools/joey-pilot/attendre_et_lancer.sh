@@ -9,7 +9,10 @@ mkdir -p "$DIR"
 while true; do
   lvl=$("$ADB" -s "$ADB_DEV" shell dumpsys battery 2>/dev/null | awk '/level:/{print $2; exit}' | tr -d '\r')
   echo "$(date +%H:%M:%S) batterie ${lvl:-?} %" >> "$DIR/attente.log"
-  if [ -n "${lvl:-}" ] && [ "$lvl" -ge "$SEUIL" ]; then break; fi
+  # Batterie assez chargée ET Roomba branché (le téléphone n'a qu'une prise : en charge, le câble du Roomba est débranché).
+  roomba=$(cd "$HERE" && python3 joey.py state 2>/dev/null | grep '"roomba"' | grep -v null)
+  echo "$(date +%H:%M:%S) roomba ${roomba:-non branché}" >> "$DIR/attente.log"
+  if [ -n "${lvl:-}" ] && [ "$lvl" -ge "$SEUIL" ] && [ -n "$roomba" ]; then break; fi
   sleep 60
 done
 cd "$HERE"

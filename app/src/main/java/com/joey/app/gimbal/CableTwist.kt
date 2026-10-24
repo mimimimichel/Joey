@@ -37,6 +37,12 @@ class CableTwist(val limit: Double = LIMIT) {
     /** Mesure impossible un moment (tête à la verticale : le cap n'a plus de sens) : on reprendra à la suivante. */
     @Synchronized fun pause() { lastHead = null }
 
+    /**
+     * L'angle réel tête-corps vient d'être mesuré ([rel], ±180, par les pastilles du Roomba) : le compteur garde le même
+     * nombre de tours, mais prend cet angle (il dérivait : on ne sait jamais où la tête est vraiment sans repère).
+     */
+    @Synchronized fun correct(rel: Double) { value = rel + 360.0 * Math.round((value - rel) / 360.0) }
+
     /** La tête est remise droit devant (câble au repos). */
     @Synchronized fun reset() { value = 0.0 }
 

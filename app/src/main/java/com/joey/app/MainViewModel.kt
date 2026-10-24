@@ -2102,9 +2102,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun alignHeadByMarks(): Double? {
         val r = roomba ?: return null
         if (!gimbal.ready) return null
-        follower.pause(8000)
+        follower.pause(12_000)
         var last: Double? = null
-        for (attempt in 0 until 3) {
+        // 5 essais, correction amortie (80 %) : sur les petits angles la nacelle dépasse la cible (24/10, rejoué depuis le
+        // PC : 14° -> -11° -> 6°), sans amortir elle oscillait.
+        for (attempt in 0 until 5) {
             head.look(null, marksTilt, timeoutMs = 1500)
             Thread.sleep(400)
             val asked = System.currentTimeMillis()
@@ -2119,13 +2121,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (small !== bmp) small.recycle()
             val res = com.joey.app.senses.BodyMarks.measure(px, w, h, pitch, hf, vf, arrow = flag("fleche", false)) ?: break
             last = res.panDeg
+            log("🎯 Essai ${attempt + 1} : tête à %+.0f° de l'axe du corps (inclinaison %.0f°)".format(res.panDeg, pitch))
             val abs = head.absPan() ?: break
             setBodyRef(abs - res.panDeg, r.heading) // maintenant bodyPan() vaut l'angle mesuré
-            if (kotlin.math.abs(res.panDeg) < 4) break
-            head.look(-res.panDeg, marksTilt, timeoutMs = 2500)
+            cable.correct(res.panDeg) // le compteur du câble suit l'angle réel (au tour près)
+            if (kotlin.math.abs(res.panDeg) < 5) break
+            head.look(-0.8 * res.panDeg, marksTilt, timeoutMs = 2500)
         }
-        last?.let { log("🎯 Pastilles : tête à %+.0f° de l'axe du corps, remise dans l'axe".format(it)) }
-            ?: log("🎯 Pastilles invisibles : je recentre la nacelle")
+        if (last == null) log("🎯 Pastilles invisibles : je recentre la nacelle")
         return last
     }
 

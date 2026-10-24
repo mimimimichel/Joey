@@ -8,6 +8,9 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- Relancé tout seul quand le téléphone redémarre (BootReceiver) -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Rester joignable écran éteint (processeur et Wi-Fi éveillés) -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- Photos dans la galerie : nécessaire seulement jusqu'à Android 9 (Galaxy S8+) -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 

@@ -2184,6 +2184,44 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "maison relevée : ${done.size} pièce(s) — ${done.joinToString()} (sur ta carte, avec leur position)"
     }
 
+    // ---- rester joignable, même écran éteint ------------------------------------------------------------------------
+    // 24/10 : écran éteint et verrouillé, le téléphone coupait son Wi-Fi ; Joey ne répondait plus au PC et la mise à jour
+    // attendait. Tant que Joey tourne, le processeur et le Wi-Fi restent éveillés (l'installation automatique l'exempte
+    // aussi de la mise en veille profonde d'Android). Sans alimentation : relâché sous 15 % de batterie, pour l'économiser.
+    private var cpuLock: android.os.PowerManager.WakeLock? = null
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+
+    @Synchronized private fun setAwake(on: Boolean) {
+        val ctx = getApplication<Application>()
+        if (on) {
+            if (cpuLock?.isHeld != true) {
+                val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                cpuLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "joey:eveil").apply { setReferenceCounted(false); acquire() }
+            }
+            if (wifiLock?.isHeld != true) {
+                val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+                @Suppress("DEPRECATION")
+                wifiLock = wm.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "joey:wifi").apply { setReferenceCounted(false); acquire() }
+            }
+        } else {
+            runCatching { if (cpuLock?.isHeld == true) cpuLock?.release() }
+            runCatching { if (wifiLock?.isHeld == true) wifiLock?.release() }
+        }
+    }
+
+    private fun awakeLoop() {
+        var awake: Boolean? = null
+        while (!cleared) {
+            val want = phoneCharging() || phoneBattery() !in 0 until 15
+            if (want != awake) {
+                runCatching { setAwake(want) }.onFailure { log("Éveil : ${it.message}") }
+                if (awake != null || !want) log(if (want) "📶 Je reste éveillé (Wi-Fi compris)" else "🔋 Batterie à ${phoneBattery()} % : je laisse le téléphone dormir")
+                awake = want
+            }
+            Thread.sleep(60_000)
+        }
+    }
+
     // ---- mode autonome : quand on ne lui demande rien, il vit sa vie de robot ------------------------------------------
     @Volatile private var dockFailures = 0
     @Volatile private var lastDockFailAt = 0L
@@ -4247,6 +4285,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         thread(name = "vie", isDaemon = true) { lifeLoop() }
         thread(name = "autonome", isDaemon = true) { autonomyLoop() }
         thread(name = "profondeur", isDaemon = true) { depthLoop() }
+        thread(name = "eveil", isDaemon = true) { awakeLoop() }
         prefs.getString("speed_table", null)?.let { t ->
             runCatching {
                 head.setTable(t.split(",").map { it.split(":").let { (a, b) -> a.toInt() to b.toDouble() } })
@@ -4607,6 +4646,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         cleared = true
+        runCatching { setAwake(false) }
         upload.stop()
         wake.stop()
         headset?.stop()

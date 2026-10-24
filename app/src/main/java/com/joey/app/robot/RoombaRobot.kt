@@ -282,6 +282,12 @@ class RoombaRobot(
             sleeper(60)
             val s = runCatching { readSensors() }.getOrNull()
             val now = System.currentTimeMillis()
+            if (s == null && now < rebootUntil) {
+                // Redémarrage volontaire : il se tait pendant son démarrage. On lui renvoie « start » chaque seconde.
+                if (now - rebootStartAt > 1000) { rebootStartAt = now; runCatching { send(RoombaOI.start()) } }
+                continue
+            }
+            if (s != null && rebootUntil != 0L) rebootUntil = 0L
             if (s == null) {
                 failures++
                 if (failures == 1) failSince = now
@@ -504,9 +510,10 @@ class RoombaRobot(
             if (System.currentTimeMillis() - resetTriedAt < 10 * 60_000L) return "je n'arrive pas à quitter ma base (toujours sur ses contacts après 6 s)"
             resetTriedAt = System.currentTimeMillis()
             log("Roomba : ses moteurs ne répondent pas sur la base, je le redémarre")
-            synchronized(io) { link.clearInput(); link.write(byteArrayOf(RoombaOI.RESET.toByte())) }
+            sendReset()
             sleeper(1500)
             val back = restart(30_000) ?: return "le Roomba ne répond plus après son redémarrage"
+            rebootUntil = 0L
             defineBabble()
             if (!back.onHomeBase) return null
             send(RoombaOI.full()); sleeper(100)
@@ -520,6 +527,19 @@ class RoombaRobot(
         // Encore un peu en arrière, pour dégager la base.
         backOff(1200)
         return null
+    }
+
+    /**
+     * Redémarrage volontaire (ordre « reset ») en cours jusqu'à cette heure : le Roomba se tait ~15 s pendant son
+     * démarrage. Ce silence n'est pas une panne : pas de « liaison coupée », pas de réouverture de la carte USB
+     * (24/10, 18 h 41 : la réouverture avait interrompu la sortie de base).
+     */
+    @Volatile private var rebootUntil = 0L
+    private var rebootStartAt = 0L
+
+    private fun sendReset() {
+        rebootUntil = System.currentTimeMillis() + 35_000
+        synchronized(io) { link.clearInput(); link.write(byteArrayOf(RoombaOI.RESET.toByte())) }
     }
 
     /** Dernier redémarrage de secours (un toutes les 10 min au plus : on ne boucle pas). */
@@ -553,6 +573,7 @@ class RoombaRobot(
      * d'accueil en texte. (Avant release-3.8.2 / stm32-3.7.7, le fil de réveil ne le réveille pas sur sa base.)
      */
     fun firmware(): String = synchronized(io) {
+        rebootUntil = System.currentTimeMillis() + 35_000
         link.clearInput()
         link.write(byteArrayOf(RoombaOI.RESET.toByte()))
         val sb = StringBuilder()
@@ -587,6 +608,7 @@ class RoombaRobot(
             sleeper(150)
             return (0 until 3).any { readSensors() != null }
         }
+        rebootUntil = System.currentTimeMillis() + 35_000
         link.clearInput()
         link.write(byteArrayOf(RoombaOI.RESET.toByte()))
         // Il redémarre : on attend qu'il réponde de nouveau (24/10 : plus de 3 s ; les impulsions envoyées pendant son

@@ -1,0 +1,4 @@
+{"essai": 1, "journal": [], "image": "rapports/campagne-2026-10-24-soir-5/alignement-1.jpg", "tete": "9° à gauche, inclinée à -23°", "cable": "tête tournée de -4° par rapport au corps (limite ±185°)", "roues": "branchées, batterie 96 %, ta base est en vue (balises), tous tes capteurs (proximité, mur, boutons)", "tel": "23", "step": "alignement", "t": "18:42:08"}
+{"essai": "alignement", "secondes": 4, "step": "fin_essai", "t": "18:42:08"}
+{"raison": "batterie du téléphone à 23 %", "step": "arret", "t": "18:42:08"}
+{"step": "campagne_finie", "t": "18:42:08"}

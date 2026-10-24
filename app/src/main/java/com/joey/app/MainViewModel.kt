@@ -1995,6 +1995,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    @Volatile private var lastRoombaError: String? = null
+
+    /**
+     * Sans roues, il réessaie de lui-même toutes les 30 s (Roomba endormi puis réveillé, autorisation USB accordée plus
+     * tard…) : avant, après un échec au démarrage, il restait sans roues jusqu'à ce qu'on relance l'app.
+     */
+    private fun roombaRetryLoop() {
+        while (!cleared) {
+            Thread.sleep(30_000)
+            if (roomba == null && !roombaConnecting && flag("roomba_auto", true)) runCatching { connectRoomba(quiet = true) }
+        }
+    }
+
     fun connectRoomba(quiet: Boolean = false, restore: Triple<Double, Double, Double>? = null, restoreReversed: Boolean? = null) {
         if (roomba != null || roombaConnecting) return
         roombaConnecting = true
@@ -2004,6 +2017,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val r = com.joey.app.robot.RoombaRobot(link, ::log)
                 r.connect()
                 roomba = r
+                lastRoombaError = null
                 applyTuning(r)
                 restoreReversed?.let { r.reversed = it }
                 r.onDead = { reopenRoomba() }
@@ -2040,7 +2054,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 refreshRoomba()
             } catch (e: Exception) {
-                if (!quiet) { log("Roomba : ${e.message}"); message("Roomba : ${e.message}") }
+                // Toujours au journal (24/10 : un échec silencieux au démarrage laissait Joey sans roues, sans trace) ; le
+                // message à l'écran seulement si on l'a demandé.
+                val why = e.message ?: e.toString()
+                if (why != lastRoombaError) { log("Roomba : $why"); lastRoombaError = why }
+                if (!quiet) message("Roomba : $why")
             } finally {
                 roombaConnecting = false
             }
@@ -4446,6 +4464,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         thread(name = "autonome", isDaemon = true) { autonomyLoop() }
         thread(name = "profondeur", isDaemon = true) { depthLoop() }
         thread(name = "eveil", isDaemon = true) { awakeLoop() }
+        thread(name = "roomba-essais", isDaemon = true) { roombaRetryLoop() }
         prefs.getString("speed_table", null)?.let { t ->
             runCatching {
                 head.setTable(t.split(",").map { it.split(":").let { (a, b) -> a.toInt() to b.toDouble() } })

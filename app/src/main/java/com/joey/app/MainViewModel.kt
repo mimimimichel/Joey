@@ -505,6 +505,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val pitch = (if (gimbal.ready) head.pose()?.second else sensors.read()?.second) ?: run { floorClear = Double.NaN; return }
         val pan = if (gimbal.ready) bodyPan() ?: 99.0 else 0.0
         if (kotlin.math.abs(pan) > 20 || -pitch + vf / 2 < 15) { floorClear = Double.NaN; return }
+        // Tête très baissée (recalage sur les pastilles) : la caméra voit le Roomba lui-même, pas le sol devant. Le
+        // détecteur y voyait des « toilettes à -5 cm », et la carte se bouchait autour de lui (24/10, exploration).
+        if (pitch < -50) { floorClear = Double.NaN; return }
         val (w, h) = if (bmp.width >= bmp.height) 64 to 48 else 48 to 64
         val small = android.graphics.Bitmap.createScaledBitmap(bmp, w, h, true)
         val px = IntArray(w * h)
@@ -2148,6 +2151,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * La caméra est-elle au-dessus de l'axe de la nacelle ? Oui pour le S8+ ; le S10 a la sienne à ~10 cm de l'axe (coin de
      * l'écran) : seule la paire de pastilles reconnue par sa forme compte (24/10). Réglage « camera_centree ».
      */
+    @Volatile private var unwindAt = 0L
+
+    /**
+     * Le câble s'enroule quand le corps tourne et que la tête, verrouillée, reste fixe dans la pièce (24/10 : -219° après
+     * une minute d'exploration, la nacelle s'est éteinte). Au repos, au-delà de 120°, la tête tourne d'elle-même dans le
+     * sens qui le déroule.
+     */
+    private fun unwindCable() {
+        val v = cable.value
+        val now = System.currentTimeMillis()
+        if (kotlin.math.abs(v) < 120 || !gimbal.ready || _state.value.busy || roadGaze.active || now - unwindAt < 8000) return
+        unwindAt = now
+        val delta = -kotlin.math.sign(v) * minOf(100.0, kotlin.math.abs(v) - 20)
+        log("🧵 Câble tordu de %.0f° : je tourne la tête de %.0f° pour le dérouler".format(v, delta))
+        moveAsync(holdMs = 1000) { head.look(delta, null, timeoutMs = 5000); "câble déroulé" }
+    }
+
     /** La nacelle a été vue en mode suivi (la tête suit le corps) : l'alignement ne peut pas se faire en tournant le corps. */
     @Volatile private var nacelleFollows = false
 
@@ -4559,9 +4579,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             while (!cleared) {
                 runCatching {
                     val ph = sensors.read()
-                    // Tête presque à la verticale : son cap ne veut plus rien dire, on reprend après.
-                    if (ph != null && kotlin.math.abs(ph.second) < 70) cable.update(ph.first, roomba?.heading) else cable.pause()
+                    // Tête presque à la verticale : son cap ne veut plus rien dire, on reprend après. (Seuil à 85° et non
+                    // 70° : le recalage cherche les pastilles tête baissée à -72° en la tournant de ±70°, et ces tours
+                    // n'étaient pas comptés ; le compteur dérivait de 100° à chaque recalage, 24/10.)
+                    if (ph != null && kotlin.math.abs(ph.second) < 85) cable.update(ph.first, roomba?.heading) else cable.pause()
                 }
+                runCatching { unwindCable() }
                 runCatching { gridTick() }
                 Thread.sleep(100)
             }
@@ -4930,7 +4953,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // Câble détortillé à la main, tête tournée vers l'avant du Roomba : le compteur repart de zéro.
             "cable" -> { cable.reset(); bodyRef = null; "compteur du câble remis à zéro (tête droite devant, câble au repos)" }
             // Le fil de réveil marche-t-il ? (il redémarre le Roomba, ~6 s)
-            "brc" -> roomba?.let { r -> "Roomba : " + r.brcTest() } ?: "pas de Roomba branché"
+            "brc" -> roomba?.let { r -> ("Roomba : " + r.brcTest()).also { log("🔌 $it") } } ?: "pas de Roomba branché"
             "pixels" -> { val n = (q["n"]?.toIntOrNull() ?: 56).coerceIn(0, 200); prefs.edit().putInt("yeux_pixels", n).apply()
                 _state.update { it.copy(eyePixels = n) }; if (n == 0) "yeux lisses" else "yeux pixelisés ($n pixels de large)" }
             // Cartographie : un tour d'horizon (cmd scan), ou la pièce par tours d'horizon (cmd carto, secondes=…).

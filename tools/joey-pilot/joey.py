@@ -96,7 +96,8 @@ def main(argv):
     elif c == "cmd":
         # Paramètres en plus : joey.py cmd profondeur on=0
         extra = "".join("&" + urllib.parse.quote(a.split("=", 1)[0]) + "=" + urllib.parse.quote(a.split("=", 1)[1]) for a in rest[1:] if "=" in a)
-        print(get("/tab/cmd?c=" + rest[0] + extra).get("msg", ""))
+        # Certaines commandes durent (cmd brc : redémarrage du Roomba, jusqu'à ~45 s ; cmd firmware).
+        print(get("/tab/cmd?c=" + rest[0] + extra, timeout=120).get("msg", ""))
     elif c == "drive":
         f, t, secs = float(rest[0]), float(rest[1]), float(rest[2])
         end = time.time() + secs

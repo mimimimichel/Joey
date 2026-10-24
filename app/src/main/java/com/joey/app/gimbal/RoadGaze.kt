@@ -62,7 +62,10 @@ class RoadGaze(
     fun legStart(attempt: Int) {
         if (!active) return
         val age = refAgeMs()
-        if (attempt > 0 || age == null || age > 120_000) recenterNow()
+        // Recalage seulement sans repère ou s'il a plus de 5 min : après un choc et un dégagement, le repère tête-corps
+        // reste bon (les roues mesurent la rotation). Le recalage par les pastilles prend 5 à 10 s tête baissée, sans voir
+        // devant (24/10 : trois recalages en une minute d'exploration, trois chocs).
+        if (age == null || age > 300_000) recenterNow()
         var waited = 0L
         while (waited < 2500) {
             val bp = bodyPan() ?: break

@@ -2206,6 +2206,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     @Volatile private var unwindAt = 0L
     @Volatile private var gimbalLostAt = 0L
+    @Volatile private var dockPaused = false
 
     /**
      * Pendant qu'il cherche sa base, le Roomba tourne beaucoup sur lui-même ; la tête, verrouillée, resterait fixe et le
@@ -2214,8 +2215,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun followBodyWhileDocking() {
         val r = roomba ?: return
-        if (!gimbal.ready || !r.seekingDock || roadGaze.active) return
+        if (!gimbal.ready || !r.seekingDock || roadGaze.active) { dockPaused = false; return }
         val v = cable.value
+        // Le Roomba tourne plus vite (90°/s) que la nacelle (~40°/s) en cherchant le faisceau de sa base (24/10 : +195° en
+        // 30 s) : au-delà de 140°, l'accostage attend que la tête ait rattrapé le corps, puis reprend.
+        if (!dockPaused && kotlin.math.abs(v) > 140) {
+            dockPaused = true
+            r.pauseSeekDock()
+            log("🧵 Accostage en pause : câble tordu de %.0f°, ma tête rattrape mon corps".format(v))
+        } else if (dockPaused && kotlin.math.abs(v) < 40) {
+            dockPaused = false
+            r.resumeSeekDock()
+            log("🧵 Câble droit : je reprends l'accostage")
+        }
         if (kotlin.math.abs(v) < 10) return
         val p = head.pose() ?: return
         head.aim(Head.wrap(p.first - v), -15.0)

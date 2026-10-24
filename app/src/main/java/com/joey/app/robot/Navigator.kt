@@ -88,6 +88,8 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
         var cliffs = 0
         var attempt = 0
         var replans = 0
+        // Dernier chemin refusé par la vérification de route : (premier point visé, position d'où il était parti).
+        var lastRefused: Pair<Pair<Double, Double>, Pair<Double, Double>>? = null
         while (attempt < tries) {
             if (hypot(tx - r.x, ty - r.y) < 0.3) return "arrivé"
             val path = grid.plan(r.x, r.y, tx, ty) ?: return "pas de chemin sur ma carte (tout est bouché par là)"
@@ -96,7 +98,14 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
             val leg = path.drop(1).ifEmpty { listOf(tx to ty) }
             // Recalcul en route : la suite du chemin (le segment visé et le suivant) reste-t-elle libre sur la carte ? Au
             // plus 25 recalculs par trajet (une carte qui hésite ne le fait pas tourner en rond).
-            val check: ((Double, Double, Int) -> Boolean)? = if (replans < 25) { x, y, seg ->
+            // Le planificateur redonne le même chemin, aussitôt refusé, sans avoir avancé : la vérification juge plus
+            // sévèrement les abords d'un obstacle que le planificateur (24/10 : 25 recalculs du même segment en 50 s). On
+            // le suit sans le revérifier (le pare-chocs, la caméra et les capteurs de proximité restent actifs).
+            val same = lastRefused?.let { (p0, at) ->
+                val p = leg.first()
+                hypot(p.first - p0.first, p.second - p0.second) < 0.08 && hypot(r.x - at.first, r.y - at.second) < 0.10
+            } == true
+            val check: ((Double, Double, Int) -> Boolean)? = if (replans < 25 && !same) { x, y, seg ->
                 val a = leg.getOrNull(seg); val b = leg.getOrNull(seg + 1)
                 (a == null || grid.lineClear(x, y, a.first, a.second)) && (a == null || b == null || grid.lineClear(a.first, a.second, b.first, b.second))
             } else null
@@ -107,6 +116,7 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
             log("🧭 trajet ${attempt + 1} : ${path.size - 1} segment(s) vers (%.1f ; %.1f) -> $res".format(tx, ty))
             if (res.startsWith("chemin bouché")) {
                 replans++
+                lastRefused = leg.first() to before
                 if (travelled > budget) return "trajet trop long (%.1f m), je m'arrête".format(travelled)
                 continue // pas un échec : il recalcule avec ce qu'il vient de voir
             }

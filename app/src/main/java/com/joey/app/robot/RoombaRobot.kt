@@ -960,6 +960,19 @@ class RoombaRobot(
         return "je rentre à ma base de charge (je la cherche tout seul, ça peut prendre une ou deux minutes)"
     }
 
+    /** Accostage en pause (il ne bouge plus) : la tête rattrape le corps avant que le câble se torde trop. */
+    fun pauseSeekDock() {
+        if (!seekingDock) return
+        runCatching { send(RoombaOI.start()); sleeper(30); send(RoombaOI.safe()); sleeper(30); send(RoombaOI.driveDirect(0, 0)) }
+        driving = false
+    }
+
+    /** Reprend l'accostage (il recherche sa base). */
+    fun resumeSeekDock() {
+        if (!seekingDock) return
+        runCatching { send(RoombaOI.start()); send(RoombaOI.seekDock()) }
+    }
+
     // ---- s'exprimer : mélodies et voyants ---------------------------------------------------------------
     enum class Tune(val notes: List<Pair<Int, Int>>) {
         HELLO(listOf(72 to 10, 76 to 10, 79 to 10, 84 to 20)),

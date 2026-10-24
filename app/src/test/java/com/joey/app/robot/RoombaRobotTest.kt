@@ -24,6 +24,13 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
     var bumps = 0
     var slipR = 1.0
     var mute = false    // fil qui bouge : il n'entend plus rien
+    /** Comme le vrai le 24/10 : le mode complet sur sa base le fait taire (mode éteint) jusqu'au prochain « start ». */
+    var silentAfterFullOnBase = false
+    var off = false
+    /** Programme de nettoyage lancé (CLEAN) : il recule hors de sa base, brosses en marche. */
+    var cleaning = false
+    var cleans = 0
+    var motorsOn = false
     var x = 0.0; var y = 0.0; var h = 0.0 // vraie position (m, °)
     val songs = ArrayList<Int>()
     var curBaud = 0
@@ -35,7 +42,7 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         val now = System.nanoTime()
         val dt = (now - last) / 1e9
         last = now
-        if (mode < 2) { right = 0; left = 0 }
+        if (cleaning) { right = -150; left = -150 } else if (mode < 2) { right = 0; left = 0 }
         val dl = if (blocked) 0.0 else left / 1000.0 * dt; val dr = if (blocked) 0.0 else right / 1000.0 * dt
         // [slipR] : la roue droite compte un peu trop (tapis, roue usée) : l'odométrie dérive comme sur le vrai.
         countsL += dl * 1000 / RoombaOI.MM_PER_COUNT; countsR += dr * slipR * 1000 / RoombaOI.MM_PER_COUNT
@@ -73,15 +80,18 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         for (v in b) inBuf.add(v.toInt() and 0xFF)
         while (inBuf.isNotEmpty()) {
             val op = inBuf[0]
+            if (off && op != 128) { inBuf.removeAt(0); continue } // éteint : il n'attend que « start »
             val need = when (op) { 128, 131, 132, 143 -> 1; 145 -> 5; 138 -> 2; 141 -> 2; 140 -> if (inBuf.size >= 3) 3 + 2 * inBuf[2] else 99
                 149 -> if (inBuf.size >= 2) 2 + inBuf[1] else 99; else -> 1 }
             if (inBuf.size < need) return
             val c = inBuf.subList(0, need).toList()
             repeat(need) { inBuf.removeAt(0) }
             when (op) {
-                128 -> mode = 1
-                131 -> mode = if (onBase) 1 else 2
-                132 -> mode = 3
+                128 -> { mode = 1; off = false }
+                131 -> { mode = if (onBase) 1 else 2; cleaning = false }
+                132 -> if (silentAfterFullOnBase && onBase) { off = true; mode = 0 } else { mode = 3; cleaning = false }
+                135 -> { mode = 1; cleaning = true; cleans++; motorsOn = true }
+                138 -> motorsOn = c[1] != 0
                 143 -> mode = 1
                 145 -> if (mode >= 2) { right = ((c[1] shl 8) or c[2]).toShort().toInt(); left = ((c[3] shl 8) or c[4]).toShort().toInt() }
                 141 -> songs.add(c[1])
@@ -227,6 +237,7 @@ class RoombaRobotTest {
         Thread.sleep(250)
         assertTrue(r.obstacleNear)
         var pressed = ""
+        r.buttonQuietMs = 0
         r.onButton = { pressed = it }
         f.buttons = 1
         Thread.sleep(250)
@@ -332,6 +343,21 @@ class RoombaRobotTest {
         Thread.sleep(200)
         val res = r.drive(0.5)
         assertTrue(res, res.contains("vide"))
+        r.disconnect()
+    }
+
+    /** 24/10 : sur sa base, le mode complet le fait taire. Il le relance, quitte la base par CLEAN, coupe les brosses. */
+    @Test fun quitteSaBaseMemeSiLeModeCompletLeFaitTaire() {
+        val f = FakeRoomba()
+        f.onBase = true; f.silentAfterFullOnBase = true
+        val logs = java.util.Collections.synchronizedList(ArrayList<String>())
+        val r = RoombaRobot(f, log = { logs.add(it) })
+        r.connect()
+        Thread.sleep(200)
+        val res = r.drive(0.1)
+        assertTrue("$res / $logs", !f.onBase && f.cleans == 1)
+        assertTrue("brosses coupées", !f.motorsOn && !f.cleaning)
+        assertTrue("$logs", logs.any { "CLEAN" in it })
         r.disconnect()
     }
 

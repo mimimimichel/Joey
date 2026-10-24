@@ -13,6 +13,9 @@ object RoombaOI {
     const val FULL = 132
     const val POWER_DOWN = 133
     const val SEEK_DOCK = 143
+    const val CLEAN = 135
+    /** Redémarre le Roomba (comme une batterie retirée) ; il écrit alors sa version en texte. */
+    const val RESET = 7
     const val DRIVE_DIRECT = 145
     const val MOTORS = 138
     const val LEDS = 139
@@ -29,6 +32,7 @@ object RoombaOI {
     fun safe() = bytes(SAFE)
     fun full() = bytes(FULL)
     fun seekDock() = bytes(SEEK_DOCK)
+    fun clean() = bytes(CLEAN)
     fun powerDown() = bytes(POWER_DOWN)
 
     /** Vitesse de chaque roue (mm/s, + = en avant), bornée à ±500. */

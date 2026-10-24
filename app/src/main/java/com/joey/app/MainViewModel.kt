@@ -2254,6 +2254,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- il apprend : réglages, auto-tests des roues ------------------------------------------------------------
     private fun applyTuning(r: com.joey.app.robot.RoombaRobot) {
         r.reversed = flag("roomba_reversed", false)
+        r.undock = prefs.getString("sortie_base", "auto") ?: "auto"
         r.keepAwake = flag("roomba_awake", true)
         r.maxSpeed = tuning.get("vitesse")
         r.turnScale = tuning.get("echelle_rotation")
@@ -4859,6 +4860,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "center" -> { recenter(); "" }
             "test" -> { testScreenOn(); "mode test : écran noir" }
             // Yeux pixelisés : cmd pixels n=56 (plus petit = plus gros pixels), n=0 pour des yeux lisses.
+            // Sortie de base : cmd sortie mode=auto|complet|nettoyage (auto : mode complet, CLEAN s'il se tait).
+            "sortie" -> { val m = q["mode"]?.takeIf { it in setOf("auto", "complet", "nettoyage") } ?: "auto"
+                prefs.edit().putString("sortie_base", m).apply(); roomba?.undock = m; "sortie de base : $m" }
+            // Version du logiciel du Roomba (il redémarre pour l'écrire, ~7 s).
+            "firmware" -> roomba?.let { r -> "Roomba : " + r.firmware() } ?: "pas de Roomba branché"
             "pixels" -> { val n = (q["n"]?.toIntOrNull() ?: 56).coerceIn(0, 200); prefs.edit().putInt("yeux_pixels", n).apply()
                 _state.update { it.copy(eyePixels = n) }; if (n == 0) "yeux lisses" else "yeux pixelisés ($n pixels de large)" }
             // Cartographie : un tour d'horizon (cmd scan), ou la pièce par tours d'horizon (cmd carto, secondes=…).

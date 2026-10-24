@@ -66,6 +66,8 @@ class RoombaRobot(
     @Volatile var onProximity: ((Double, Double) -> Unit)? = null
     /** Un bouton du Roomba vient d'être appuyé : « clean », « spot » ou « dock ». */
     @Volatile var onButton: ((String) -> Unit)? = null
+    /** Boutons ignorés pendant ce temps après la connexion ou une coupure (faux appuis du 24/10). */
+    @Volatile internal var buttonQuietMs = 5000L
     /** Dernière fois que les balises infrarouges de la base ont été vues. */
     @Volatile var dockSeenAt = 0L
         private set
@@ -259,6 +261,11 @@ class RoombaRobot(
                 }
                 // Réveil : souvent au début, puis toutes les ~30 s (il était éteint : 92 messages en 3 min dans le journal).
                 if (failures == 3) runCatching { wheels(0.0, 0.0) } // ne jamais rouler à l'aveugle
+                // Silence soudain : il a pu redémarrer (mode éteint, 115 200 bauds) et attend « start » à la même vitesse.
+                // On le renvoie tout de suite, avant de chercher une autre vitesse (24/10 : 10 s de coupure sinon).
+                if (failures == 3 || failures == 6 || failures == 12) runCatching {
+                    send(RoombaOI.start()); if (driving && sensors?.onHomeBase != true) send(RoombaOI.safe())
+                }
                 if (failures == 10) runCatching { onLink?.invoke(false) }
                 if (failures == 10 || (failures > 10 && failures % 100 == 0)) {
                     if (failures == 10 || failures % 3000 == 0) log("Roomba : pas de réponse, je le réveille (est-il allumé ? un fil a bougé ?)")
@@ -286,6 +293,8 @@ class RoombaRobot(
                 }
                 continue
             }
+            if (failures >= 3) log("Roomba : il répond de nouveau après $failures lectures manquées (mode ${s.modeName}, " +
+                (if (s.onHomeBase) "sur sa base" else "hors de sa base") + ")")
             if (failures >= 10) {
                 // Liaison revenue : pendant la coupure il a pu recevoir un ordre tronqué, et lire un octet de vitesse comme
                 // une commande (24/10 : il a lancé son nettoyage « spot » et n'obéissait plus). Il reprend la main.
@@ -328,7 +337,7 @@ class RoombaRobot(
                 val pressed = held and buttonsSent.inv()
                 buttonsPrev = s.buttons
                 buttonsSent = held
-                if (now - linkGoodSince > 5000 && now - connectedAt > 5000) {
+                if (now - linkGoodSince > buttonQuietMs && now - connectedAt > buttonQuietMs) {
                     if (pressed and 1 != 0) onButton?.invoke("clean")
                     if (pressed and 2 != 0) onButton?.invoke("spot")
                     if (pressed and 4 != 0) onButton?.invoke("dock")
@@ -397,21 +406,99 @@ class RoombaRobot(
         if (!driving || s.oiMode != 2) {
             safetyNote = null
             send(RoombaOI.start())
-            if (s.onHomeBase) {
-                // Sur sa base, le mode sécurité le rendrait passif aussitôt : on recule d'abord en mode complet.
-                log("Roomba : je quitte ma base")
-                send(RoombaOI.full())
-                sleeper(100)
-                val end = System.currentTimeMillis() + 2500
-                // Recule (sens du Roomba, quel que soit le montage du visage).
-                while (System.currentTimeMillis() < end) { wheels(if (reversed) 0.12 else -0.12, 0.0); sleeper(100) }
-                wheels(0.0, 0.0)
-            }
+            if (s.onHomeBase) leaveBase()?.let { return it }
             send(RoombaOI.safe())
             sleeper(80)
             driving = true
         }
         return null
+    }
+
+    /**
+     * Façon de quitter la base : « auto » (mode complet, et le programme CLEAN du Roomba si le mode complet le fait
+     * taire), « complet » ou « nettoyage ». (24/10 : trois sorties sur trois, la liaison s'est tue juste après le mode
+     * complet sur la base, sans que les roues tournent.)
+     */
+    @Volatile var undock = "auto"
+
+    /** Quitte la base en reculant. null si c'est fait, sinon pourquoi pas. */
+    private fun leaveBase(): String? {
+        log("Roomba : je quitte ma base")
+        if (undock != "nettoyage") {
+            send(RoombaOI.full())
+            sleeper(100)
+            val s = readSensors()
+            if (s != null) {
+                val end = System.currentTimeMillis() + 2500
+                // Recule (sens du Roomba, quel que soit le montage du visage).
+                while (System.currentTimeMillis() < end) { wheels(if (reversed) 0.12 else -0.12, 0.0); sleeper(100) }
+                wheels(0.0, 0.0)
+                return null
+            }
+            log("Roomba : il s'est tu dès le mode complet sur sa base, je lui renvoie « start »")
+            val back = restart(3000) ?: return "le Roomba ne répond plus après le mode complet sur sa base"
+            log("Roomba : il répond de nouveau (mode ${back.modeName}, ${if (back.onHomeBase) "toujours sur sa base" else "hors de sa base"})")
+            if (!back.onHomeBase) return null
+            if (undock == "complet") return "je n'arrive pas à quitter ma base (le Roomba se tait en mode complet)"
+        }
+        // Son propre programme de nettoyage le fait reculer hors de la base ; on reprend la main dès qu'il l'a quittée
+        // (brosses et aspirateur tournent une seconde environ).
+        log("Roomba : je quitte ma base avec son programme CLEAN, puis je reprends la main")
+        send(RoombaOI.clean())
+        val end = System.currentTimeMillis() + 6000
+        var off = false
+        while (System.currentTimeMillis() < end) {
+            sleeper(100)
+            val s = readSensors() ?: continue
+            if (!s.onHomeBase) { off = true; break }
+        }
+        send(RoombaOI.start()); sleeper(30)
+        send(RoombaOI.safe()); sleeper(30)
+        send(RoombaOI.motors(false))
+        send(RoombaOI.driveDirect(0, 0))
+        vacuuming = false
+        if (!off) return "je n'arrive pas à quitter ma base (toujours sur ses contacts après 6 s)"
+        // Encore un peu en arrière, pour dégager la base.
+        val back = System.currentTimeMillis() + 1200
+        while (System.currentTimeMillis() < back) { wheels(if (reversed) 0.12 else -0.12, 0.0); sleeper(100) }
+        wheels(0.0, 0.0)
+        return null
+    }
+
+    /** Renvoie « start » jusqu'à ce qu'il réponde (il a pu redémarrer : 115 200 bauds, mode éteint). */
+    private fun restart(ms: Long): RoombaOI.Sensors? {
+        val end = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < end) {
+            send(RoombaOI.start())
+            sleeper(200)
+            readSensors()?.let { return it }
+        }
+        return null
+    }
+
+    /**
+     * Version du logiciel du Roomba. L'ordre « reset » le redémarre (comme une batterie retirée) et il écrit un message
+     * d'accueil en texte. (Avant release-3.8.2 / stm32-3.7.7, le fil de réveil ne le réveille pas sur sa base.)
+     */
+    fun firmware(): String = synchronized(io) {
+        link.clearInput()
+        link.write(byteArrayOf(RoombaOI.RESET.toByte()))
+        val sb = StringBuilder()
+        val end = System.currentTimeMillis() + 6000
+        while (System.currentTimeMillis() < end) {
+            val b = link.read(1, 300) ?: continue
+            val c = b[0].toInt() and 0xFF
+            if (c == 10 || c == 13 || c in 32..126) sb.append(c.toChar())
+        }
+        runCatching { link.setBaud(115_200) }
+        currentBaud = 115_200
+        sleeper(300)
+        link.write(RoombaOI.start())
+        sleeper(100)
+        driving = false
+        defineBabble()
+        val text = sb.toString().replace('\r', '\n').lines().map { it.trim() }.filter { it.isNotEmpty() }
+        text.firstOrNull { "release" in it || "tags" in it } ?: text.joinToString(" | ").take(400).ifEmpty { "aucun texte reçu" }
     }
 
     /** Arrête tout (les roues ; il reste en mode sécurité). */

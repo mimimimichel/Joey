@@ -79,3 +79,16 @@ Outils donnés à Gemini (premiers) : `avancer(m)`, `tourner(deg)`, `venir_vers_
 5. **À distance** : page de contrôle via Tailscale.
 6. **La tête** : nacelle SPG pilotée en Bluetooth (en parallèle dès qu'on a l'enregistrement), support imprimé pour son manche.
 7. Plus tard : alimentation par la batterie du Roomba.
+
+## Autonomie (24/10/2026, développement sur le PC de Michael)
+
+- Voir les obstacles : couleur du sol (`senses/FloorVision`), détecteur d'objets (chaises, tables, canapé, chien…,
+  distance par le bas de la boîte), profondeur MiDaS small (`senses/DepthSense` + `senses/DepthGround` : plan du sol
+  ajusté sur la carte de profondeur, ce qui dépasse est un obstacle). La plus prudente gagne ; sans avis, 0,2 m/s.
+- Carte (`robot/NavGrid`) : carreaux de 5 cm, marge dure = rayon + 3 cm, puis coût dégressif sur 20 cm ; trace des
+  passages (il peut toujours repasser où il est passé).
+- Décision (`life/AutonomyPolicy`) : recharger > saluer > se reposer > explorer ; accostage vérifié avec reprises.
+- Relancé seul au démarrage du téléphone (`BootReceiver`, Android 9).
+- Pas d'ARCore avec la caméra avant (il ne suit rien). Ne pas alimenter le téléphone par les broches 1-2 (fusible 200 mA).
+- Modèle `midas_small_256_fp16.tflite` : MiDaS v2.1 small (Intel ISL, licence MIT), version LiteRT de
+  litert-community/MiDaS-small.

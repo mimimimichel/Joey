@@ -116,6 +116,8 @@ class RoombaRobot(
         get() = odo.turnScale
         set(v) { odo.turnScale = v }
 
+    private var lastPathCheck = 0L
+
     /** Vitesse max en intérieur (m/s). */
     var maxSpeed = 0.4
     /** Vitesse quand la caméra ne voit pas devant (m/s) : un choc à cette vitesse est doux. */
@@ -469,6 +471,8 @@ class RoombaRobot(
      * endroit) le permet, plus lent dans les virages, près d'un obstacle et à l'arrivée ; accélérations douces.
      */
     fun followPath(path: List<Pair<Double, Double>>, cruise: Double = maxSpeed,
+                   /** La suite du chemin est-elle toujours libre ? (x, y, segment visé) ; non : il s'arrête pour recalculer. */
+                   pathCheck: ((Double, Double, Int) -> Boolean)? = null,
                    speedFactor: (Double, Double, Double) -> Double = { _, _, _ -> 1.0 }): String {
         ready()?.let { return it }
         cancel = false
@@ -489,6 +493,12 @@ class RoombaRobot(
                 val toGoal = hypot(goal.first - x, goal.second - y)
                 if (toGoal < 0.08 || (seg >= path.size - 1 && toGoal < 0.12)) break
                 if (!linkOk) { result = "arrêté : je ne sens plus mes roues (liaison avec le Roomba coupée)"; break }
+                // Un obstacle vient d'apparaître sur la carte en travers de la suite du chemin : on recalcule (comme Nav2).
+                val nowCheck = System.currentTimeMillis()
+                if (pathCheck != null && nowCheck - lastPathCheck > 400) {
+                    lastPathCheck = nowCheck
+                    if (!pathCheck(x, y, seg)) { wheels(0.0, 0.0); result = "chemin bouché devant, je recalcule"; break }
+                }
                 val s = sensors
                 if (s != null && s.oiMode == 1 && System.currentTimeMillis() - t0 > 400) {
                     result = "arrêté : " + (safetyNote ?: if (s.cliff) "vide détecté sous moi (bord de marche ?)" else "le Roomba a repris la main")

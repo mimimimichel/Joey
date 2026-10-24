@@ -8,7 +8,7 @@ Tout est ouvert sur le Wi-Fi de la maison (pas de code).
   joey.py state                  état (humeur, conversation, batteries, roues, carte, place libre devant…)
   joey.py feed [--all]           ce qu'il a pensé/fait depuis la dernière fois (entendu, dit, outils, résultats)
   joey.py say "texte"            lui parler (comme si on le lui disait)
-  joey.py cmd stop|come|explore|map|dock|vacuum|center|autonomy|sleep
+  joey.py cmd stop|come|explore|map|dock|vacuum|center|autonomy|sleep|test|visage|profondeur on=0/1
   joey.py drive AVANT TOURNE SECONDES   rouler à la main (-1..1 chacun), puis s'arrêter
   joey.py tool NOM '{"arg": 1}'  lancer un de ses outils et attendre le résultat (ex. tool avancer '{"metres":0.3}')
   joey.py frame [fichier.jpg]    enregistrer ce qu'il voit (à regarder ensuite)
@@ -94,7 +94,9 @@ def main(argv):
     elif c == "say":
         print(get("/tab/say?t=" + urllib.parse.quote(" ".join(rest))).get("msg", ""))
     elif c == "cmd":
-        print(get("/tab/cmd?c=" + rest[0]).get("msg", ""))
+        # Paramètres en plus : joey.py cmd profondeur on=0
+        extra = "".join("&" + urllib.parse.quote(a.split("=", 1)[0]) + "=" + urllib.parse.quote(a.split("=", 1)[1]) for a in rest[1:] if "=" in a)
+        print(get("/tab/cmd?c=" + rest[0] + extra).get("msg", ""))
     elif c == "drive":
         f, t, secs = float(rest[0]), float(rest[1]), float(rest[2])
         end = time.time() + secs
@@ -130,6 +132,8 @@ def main(argv):
         print(m["info"], "| x vers le haut (devant au départ), y vers la droite, 1 caractère = %d cm" % round(cell * k * 100))
         for i in range(ri + rad, ri - rad - 1, -1):
             print("".join("R" if (i, j) == (ri, rj) else grid.get((i, j), " ") for j in range(rj - rad, rj + rad + 1)).rstrip())
+        for p in m.get("rooms", []):
+            print("zone %d (%.0f m²)%s : centre x=%.1f y=%.1f" % (p["id"] + 1, p["m2"], (" " + p["n"]) if p.get("n") else "", p["x"], p["y"]))
         for p in m.get("places", []):
             print("pièce %s : x=%.1f y=%.1f" % (p["n"], p["x"], p["y"]))
         for p in m.get("people", []):

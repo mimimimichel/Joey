@@ -86,16 +86,31 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
         var lastStop: Pair<Double, Double>? = null
         var dodge = 0
         var cliffs = 0
-        for (attempt in 0 until tries) {
+        var attempt = 0
+        var replans = 0
+        while (attempt < tries) {
             if (hypot(tx - r.x, ty - r.y) < 0.3) return "arrivé"
             val path = grid.plan(r.x, r.y, tx, ty) ?: return "pas de chemin sur ma carte (tout est bouché par là)"
             beforeLeg(attempt)
             val before = r.x to r.y
-            val res = r.followPath(path.drop(1).ifEmpty { listOf(tx to ty) }, r.maxSpeed) { x, y, h ->
+            val leg = path.drop(1).ifEmpty { listOf(tx to ty) }
+            // Recalcul en route : la suite du chemin (le segment visé et le suivant) reste-t-elle libre sur la carte ? Au
+            // plus 25 recalculs par trajet (une carte qui hésite ne le fait pas tourner en rond).
+            val check: ((Double, Double, Int) -> Boolean)? = if (replans < 25) { x, y, seg ->
+                val a = leg.getOrNull(seg); val b = leg.getOrNull(seg + 1)
+                (a == null || grid.lineClear(x, y, a.first, a.second)) && (a == null || b == null || grid.lineClear(a.first, a.second, b.first, b.second))
+            } else null
+            val res = r.followPath(leg, r.maxSpeed, check) { x, y, h ->
                 grid.speedFactor(x, y, h + if (r.reversed) 180.0 else 0.0).let { if (r.reversed) minOf(it, 0.6) else it }
             }
             travelled += hypot(r.x - before.first, r.y - before.second)
             log("🧭 trajet ${attempt + 1} : ${path.size - 1} segment(s) vers (%.1f ; %.1f) -> $res".format(tx, ty))
+            if (res.startsWith("chemin bouché")) {
+                replans++
+                if (travelled > budget) return "trajet trop long (%.1f m), je m'arrête".format(travelled)
+                continue // pas un échec : il recalcule avec ce qu'il vient de voir
+            }
+            attempt++
             when {
                 // Un vide (marche, escalier) : noté sur la carte comme infranchissable ; il recule, se tourne et cherche un
                 // autre chemin (comme un aspirateur robot), et n'abandonne qu'après plusieurs vides.
@@ -136,11 +151,28 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
      * proche vers laquelle un chemin existe. Renvoie le résultat du trajet, ou null s'il n'y a plus de frontière :
      * tout ce qui est accessible est connu.
      */
+    // ---- pièces ---------------------------------------------------------------------------------------------------
+    @Volatile private var roomsCache: Rooms.Result? = null
+    @Volatile private var roomsAt = 0L
+
+    /** La carte découpée en pièces (recalculée au plus toutes les 30 s). */
+    fun rooms(): Rooms.Result {
+        val now = System.currentTimeMillis()
+        roomsCache?.let { if (now - roomsAt < 30_000) return it }
+        val r = Rooms.segment(grid.freeKeys(), grid.cell)
+        roomsCache = r; roomsAt = now
+        return r
+    }
+
     fun frontierStep(budget: Double = 3.0, beforeLeg: (Int) -> Unit = {}): String? {
         val x = robot.x; val y = robot.y
+        // Il finit la pièce où il est avant d'aller ailleurs (sinon il faisait des allers-retours d'une pièce à l'autre).
+        val rooms = runCatching { rooms() }.getOrNull()
+        val here = rooms?.let { Rooms.nearestRoom(it, x, y) }
         val f = grid.frontiers(x, y, minSize = 4)
             .filter { (fx, fy) -> hypot(fx - x, fy - y) > 0.5 && failedFrontiers.none { hypot(it.first - fx, it.second - fy) < 0.5 } }
-            .take(6)
+            .take(8)
+            .sortedBy { (fx, fy) -> if (here != null && rooms.roomAt(fx, fy) == here) 0 else 1 }
             .firstOrNull { grid.plan(x, y, it.first, it.second) != null } ?: return null
         log("🧭 vers l'inconnu : (%.1f ; %.1f)".format(f.first, f.second))
         val res = navigateTo(f.first, f.second, tries = 3, budget = budget, beforeLeg = beforeLeg)

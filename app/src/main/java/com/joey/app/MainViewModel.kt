@@ -362,6 +362,51 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- voir l'obstacle avant de le toucher (la caméra regarde le sol devant) ------------------------------------
     private val floorVision = com.joey.app.senses.FloorVision()
+    // Profondeur par réseau (MiDaS small) : voit ce que la couleur du sol ne voit pas (un pied de chaise sur un tapis).
+    private val depth = com.joey.app.senses.DepthSense(app, ::log)
+    private val depthGround = com.joey.app.senses.DepthGround()
+    @Volatile private var depthClear = Double.NaN
+    @Volatile private var depthAt = 0L
+
+    /**
+     * Pendant qu'il roule : la profondeur de la dernière image, 3 à 4 fois par seconde (sur un fil à part : 0,2 à 0,5 s par
+     * image sur le S8+). Elle s'ajoute à la couleur du sol et au détecteur d'objets pour s'arrêter avant le choc, et trace la
+     * carte. Coupable par le réglage « profondeur ».
+     */
+    private fun depthLoop() {
+        var logged = false
+        while (!cleared) {
+            runCatching {
+                val r = roomba
+                val now = System.currentTimeMillis()
+                val moving = r != null && (now - r.movingAt < 1500 || roadGaze.active)
+                if (r == null || !moving || !flag("profondeur", true) || !depth.available) { Thread.sleep(200); return@runCatching }
+                val shotAt = camera.frameAt
+                val bmp = camera.frame(400) ?: run { Thread.sleep(100); return@runCatching }
+                val (hf, vf) = camera.fov(bmp.width, bmp.height)
+                val pitch = (if (gimbal.ready) head.pose()?.second else sensors.read()?.second) ?: run { Thread.sleep(150); return@runCatching }
+                val pan = if (gimbal.ready) bodyPan() ?: 99.0 else 0.0
+                // Comme pour la couleur du sol : la caméra doit regarder dans l'axe du corps, et voir le sol.
+                if (kotlin.math.abs(pan) > 20 || -pitch + vf / 2 < 15) { depthClear = Double.NaN; Thread.sleep(150); return@runCatching }
+                val heading = r.heading
+                val inv = depth.estimate(bmp) ?: run { Thread.sleep(500); return@runCatching }
+                val res = depthGround.analyse(inv, com.joey.app.senses.DepthSense.SIZE, com.joey.app.senses.DepthSense.SIZE, pitch, hf, vf)
+                depthClear = if (res.ok) res.clearAhead else Double.NaN
+                depthAt = shotAt
+                if (!logged) { logged = true; log("🧠 Profondeur (MiDaS) : ${depth.lastMs} ms par image") }
+                if (res.ok) nav?.vision(heading + (if (gimbal.ready) pan else 0.0), res.rays.map { it.bearing to it.distance })
+                Thread.sleep(maxOf(20L, 250 - depth.lastMs))
+            }.onFailure { Thread.sleep(1000) }
+        }
+    }
+
+    /** Place libre devant (m) : la plus prudente de la couleur du sol (et des objets) et de la profondeur, si elles sont récentes. */
+    private fun clearAhead(maxAgeMs: Long = 400): Double? {
+        val now = System.currentTimeMillis()
+        val c = floorClear.takeIf { !it.isNaN() && now - floorAt < maxAgeMs }
+        val d = depthClear.takeIf { !it.isNaN() && now - depthAt < maxAgeMs + 500 }
+        return when { c == null -> d; d == null -> c; else -> minOf(c, d) }
+    }
     @Volatile private var floorClear = Double.NaN
     @Volatile private var floorAt = 0L
     private var floorFrameAt = 0L
@@ -1867,10 +1912,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 r.gyroHeading = { if (gimbal.ready) null else sensors.read()?.takeIf { kotlin.math.abs(it.second) < 60 }?.first }
                 // Ce que la caméra voit de sol libre devant (récent seulement) : il ralentit et s'arrête avant le choc.
                 r.cautiousWhenBlind = true
-                r.visionClear = {
-                    val c = floorClear
-                    if (System.currentTimeMillis() - floorAt < 400 && !c.isNaN()) c else null
-                }
+                r.visionClear = { clearAhead() }
                 // Les boutons du Roomba deviennent des commandes.
                 r.onButton = { b -> runCatching { roombaButton(r, b) } }
                 log("🛞 Roomba branché : j'ai des roues !")
@@ -2098,27 +2140,41 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * « Cartographie la maison » : il relève la pièce où il est (nommée d'après ce qu'il y voit : salon, chambre…),
      * part explorer ailleurs, relève la suivante… jusqu'à 5 pièces ou 8 minutes.
      */
+    /**
+     * Relève la pièce où il est (tour du regard avec Gemini) et la nomme d'après ce qu'il y voit : « chambre », ou
+     * « chambre 2 » si une autre chambre est déjà ailleurs. Renvoie son nom, ou null si le relevé a échoué.
+     */
+    private fun mapAndNameHere(n: Int = 1): String? {
+        val tmp = "pièce $n (provisoire)"
+        mapHere(tmp)
+        val p = houseMap.place(tmp) ?: return null
+        var name = p.kind.ifBlank { "pièce" }
+        val near = { q: com.joey.app.brain.HouseMap.Place -> q.x != null && p.x != null && q.frame == p.frame &&
+            kotlin.math.hypot(q.x!! - p.x!!, q.y!! - p.y!!) < 2.5 }
+        var k = 2
+        while (houseMap.place(name)?.let { it.name != tmp && !near(it) } == true) name = "${p.kind} ${k++}"
+        houseMap.put(name, p.kind, p.description, p.items, p.x, p.y, p.frame)
+        houseMap.remove(tmp)
+        currentPlace = name
+        return name
+    }
+
+    /** Il est dans une pièce de sa carte qui n'a pas encore de nom (aucun lieu relevé dedans). */
+    private fun inUnnamedRoom(): Boolean {
+        val r = roomba ?: return false
+        val rooms = nav?.rooms() ?: return false
+        val here = com.joey.app.robot.Rooms.nearestRoom(rooms, r.x, r.y) ?: return false
+        return houseMap.all().none { p -> p.frame == gridFrame && p.x != null && p.y != null && rooms.roomAt(p.x!!, p.y!!) == here }
+    }
+
     private fun mapHouse(): String {
         val r = roomba ?: return mapHere("ici")
         val t0 = System.currentTimeMillis()
         val done = ArrayList<String>()
         for (i in 0 until 5) {
             if (System.currentTimeMillis() - t0 > 8 * 60_000) break
-            val tmp = "pièce ${i + 1} (provisoire)"
             log("🗺 Pièce ${i + 1}")
-            mapHere(tmp)
-            houseMap.place(tmp)?.let { p ->
-                // Son nom : ce qu'il y a vu (« chambre »), ou « chambre 2 » si une autre chambre est déjà ailleurs.
-                var name = p.kind.ifBlank { "pièce" }
-                val near = { q: com.joey.app.brain.HouseMap.Place -> q.x != null && p.x != null && q.frame == p.frame &&
-                    kotlin.math.hypot(q.x!! - p.x!!, q.y!! - p.y!!) < 2.5 }
-                var k = 2
-                while (houseMap.place(name)?.let { it.name != tmp && !near(it) } == true) name = "${p.kind} ${k++}"
-                houseMap.put(name, p.kind, p.description, p.items, p.x, p.y, p.frame)
-                houseMap.remove(tmp)
-                currentPlace = name
-                if (name !in done) done.add(name)
-            }
+            mapAndNameHere(i + 1)?.let { name -> if (name !in done) done.add(name) }
             if (i == 4) break
             // Ailleurs : il part explorer un moment avant le relevé suivant.
             val e = explore(null, 45)
@@ -2233,6 +2289,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         missionStart = r.x to r.y
                         moveSync(holdMs = 1000, timeoutMs = (a.seconds + 15 * 60).toLong() * 1000) {
                             val e = explore(null, a.seconds)
+                            // Une pièce nouvelle (sans nom sur sa carte) : il en fait le tour du regard et la nomme (Gemini).
+                            if (canTurnGaze && flag("camera", true) && geminiKey.isNotBlank() && runCatching { inUnnamedRoom() }.getOrDefault(false)) {
+                                log("🗺 Pièce nouvelle : je la relève")
+                                mapAndNameHere()?.let { log("🗺 C'est : $it") }
+                            }
                             val back = if (fromBase) dockAndVerify() else missionStart?.let { navigateTo(it.first, it.second) } ?: ""
                             missionStart = null
                             frontiersAt = 0L
@@ -4007,6 +4068,47 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 log("🧠 Oublié : ${gone.joinToString(" / ")}")
                 mapOf("result" to if (gone.isEmpty()) "rien à oublier sur « $q »" else "oublié : " + gone.joinToString(" ; "))
             }
+            // Pour le pilote PC (pas proposé à Gemini) : les capteurs bruts du Roomba pendant quelques secondes, min et max
+            // (vérifier sur le vrai robot les détecteurs de proximité, la roulette avant, les balises de la base…).
+            "capteurs" -> {
+                val r = roomba ?: return mapOf("result" to noWheels)
+                val secs = ((args["secondes"] as? Number)?.toDouble() ?: 3.0).coerceIn(0.5, 30.0)
+                val light = Array(6) { IntArray(2) { if (it == 0) Int.MAX_VALUE else Int.MIN_VALUE } }
+                val ir = sortedSetOf<Int>(); var stasisOn = 0; var n = 0
+                var wallMax = 0; var cliff = false; var bump = false; var drop = false; var over = 0; var virt = false
+                var curMin = Int.MAX_VALUE; var curMax = Int.MIN_VALUE
+                val end = System.currentTimeMillis() + (secs * 1000).toLong()
+                var last: Any? = null
+                while (System.currentTimeMillis() < end) {
+                    val x = r.sensors
+                    if (x != null && x !== last) {
+                        last = x; n++
+                        x.lightSignals?.forEachIndexed { k, v -> light[k][0] = minOf(light[k][0], v); light[k][1] = maxOf(light[k][1], v) }
+                        listOf(x.irOmni, x.irLeft, x.irRight).filter { it != 0 }.forEach { ir.add(it) }
+                        if ((x.stasis ?: 0) and 1 == 1) stasisOn++
+                        wallMax = maxOf(wallMax, x.wallSignal); cliff = cliff || x.cliff; bump = bump || x.bump
+                        drop = drop || x.wheelDropLeft || x.wheelDropRight; over = over or x.overcurrent; virt = virt || x.virtualWall == true
+                        curMin = minOf(curMin, x.currentMa); curMax = maxOf(curMax, x.currentMa)
+                    }
+                    Thread.sleep(30)
+                }
+                val x = r.sensors
+                mapOf(
+                    "lectures" to n,
+                    "proximite_min_max" to (if (x?.lightSignals == null) "non lus (capteurs de base seulement)" else
+                        com.joey.app.robot.RoombaOI.LIGHT_ANGLES.indices.joinToString(" ; ") { k ->
+                            "%+.0f° : %d-%d".format(com.joey.app.robot.RoombaOI.LIGHT_ANGLES[k], light[k][0], light[k][1]) }),
+                    "proximite_bits" to (x?.lightBumper ?: -1),
+                    "mur_intensite_max" to wallMax,
+                    "roulette_avant_tourne" to "$stasisOn/$n lectures",
+                    "infrarouge_codes" to ir.joinToString(),
+                    "vide" to cliff, "pare_chocs" to bump, "roue_soulevee" to drop, "mur_virtuel" to virt,
+                    "surintensite_bits" to over,
+                    "courant_batterie_ma" to "$curMin..$curMax",
+                    "batterie" to "${x?.voltageMv ?: 0} mV, ${x?.chargeMah ?: 0}/${x?.capacityMah ?: 0} mAh, charge ${x?.chargingState ?: -1}",
+                    "mode" to (x?.oiMode ?: -1), "sur_la_base" to (x?.onHomeBase ?: false),
+                )
+            }
             "etat" -> {
                 val pose = head.pose()
                 mapOf(
@@ -4142,6 +4244,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (flag("tablet", true)) thread(name = "tablette", isDaemon = true) { Thread.sleep(3000); if (!cleared) runCatching { setHeadset(true, quiet = true) } }
         thread(name = "vie", isDaemon = true) { lifeLoop() }
         thread(name = "autonome", isDaemon = true) { autonomyLoop() }
+        thread(name = "profondeur", isDaemon = true) { depthLoop() }
         prefs.getString("speed_table", null)?.let { t ->
             runCatching {
                 head.setTable(t.split(",").map { it.split(":").let { (a, b) -> a.toInt() to b.toDouble() } })
@@ -4335,7 +4438,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun tabletState(since: Long): String {
         val s = _state.value
         val r = roomba
-        val ahead = floorClear.takeIf { !it.isNaN() && System.currentTimeMillis() - floorAt < 1000 }
+        val ahead = clearAhead(1000)
         return org.json.JSONObject()
             .put("version", BuildConfig.VERSION_NAME)
             .put("mood", s.mood.name.lowercase())
@@ -4373,6 +4476,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             p.items.filter { it.x != null }.take(30).forEach { items.put(org.json.JSONObject().put("n", it.name).put("x", it.x).put("y", it.y)) }
         }
         o.put("places", places).put("items", items)
+        // Les pièces de sa carte, nommées d'après les lieux qu'il connaît (« salon »…) quand l'un d'eux y est.
+        runCatching {
+            val rr = nav?.rooms()
+            if (rr != null) o.put("rooms", org.json.JSONArray().also { a ->
+                rr.rooms.forEach { room ->
+                    val name = houseMap.all().firstOrNull { p -> p.frame == gridFrame && p.x != null && p.y != null && rr.roomAt(p.x!!, p.y!!) == room.id }?.name
+                    a.put(org.json.JSONObject().put("id", room.id).put("m2", room.area).put("x", room.cx).put("y", room.cy).put("n", name ?: ""))
+                }
+            })
+        }
         o.put("people", org.json.JSONArray().also { a -> personSeenAt.forEach { (n, v) ->
             if (System.currentTimeMillis() - v.third < 3 * 3600_000L) a.put(org.json.JSONObject().put("n", n.replaceFirstChar { it.uppercase() }).put("x", v.first).put("y", v.second)) } })
         return o.toString()
@@ -4462,6 +4575,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "dock" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 1000) { goHome() }; "il rentre à sa base" } }
             "center" -> { recenter(); "" }
             "test" -> { testScreenOn(); "mode test : écran noir" }
+            // Profondeur (MiDaS) : cmd profondeur&on=0 la coupe (si elle voit des obstacles qui n'existent pas), on=1 la rallume.
+            "profondeur" -> { val on = q["on"] != "0"; prefs.edit().putBoolean("profondeur", on).apply()
+                log("🧠 Profondeur ${if (on) "activée" else "coupée"}"); "profondeur ${if (on) "activée" else "coupée"}" }
             "visage" -> { endTestScreen(); "visage rallumé" }
             "come" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 3000) { comeHere() }; "il vient vers toi (vers la personne qu'il voit)" } }
             "explore" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 3000) { explore(null, 120) }; "il explore (2 min)" } }

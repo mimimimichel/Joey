@@ -361,6 +361,9 @@ class NavGrid(val cell: Double = 0.05) {
         return when (unknown) { 0 -> 1.0; 1 -> 0.8; else -> 0.6 }
     }
 
+    /** Les carreaux libres connus (copie), pour découper la carte en pièces ([Rooms]). */
+    fun freeKeys(): Set<Long> = synchronized(cells) { cells.entries.filter { it.value < CLEAR && it.key !in cliffs }.mapTo(HashSet()) { it.key } }
+
     /** Part de la surface connue (m²) : pour dire « j'ai exploré 18 m² ». */
     fun knownArea(): Double = synchronized(cells) { cells.values.count { it < CLEAR } * cell * cell }
 

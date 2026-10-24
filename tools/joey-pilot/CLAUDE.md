@@ -20,6 +20,10 @@ Tout passe par `python3 joey.py …` (dans ce dossier). Lis `python3 joey.py` po
   (liste `TOOLS`). Exemples : `tool etat`, `tool avancer '{"metres":0.3}'`, `tool tourner_corps '{"degres":90}'`,
   `tool chercher '{"objet":"le chien"}'`, `tool explorer '{"objectif":"la cuisine","secondes":60}'`,
   `tool tester_roues`, `tool aller_a '{"lieu":"salon"}'`, `tool revenir`, `tool se_degager`.
+- `tool capteurs '{"secondes":5}'` : capteurs bruts du Roomba pendant 5 s (min-max des 6 détecteurs de proximité,
+  roulette avant, codes infrarouges de la base, courants…). Réservé au pilote : Gemini ne le voit pas.
+- `cmd profondeur on=0` / `on=1` : couper ou rallumer la profondeur MiDaS (si elle voit des obstacles imaginaires).
+  Au premier trajet, le journal (`feed`) donne sa vitesse : « 🧠 Profondeur (MiDaS) : N ms par image ».
 - `say "…"` : lui parler (il répond à voix haute, comme si quelqu'un lui parlait).
 - `cmd stop` : **arrêt immédiat de tout**. `drive AVANT TOURNE SECONDES` : rouler à la main.
 

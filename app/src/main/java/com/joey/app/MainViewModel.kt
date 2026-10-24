@@ -1767,7 +1767,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         roomba?.let { rr ->
             if (phone in 0..12 && !phoneCharging() && !rr.onBase && !following && !_state.value.busy && warned.add("phone_dock")) {
                 log("🔋 Téléphone à $phone % : je rentre à ma base")
-                thread(isDaemon = true) { runCatching { log("🛞 " + goHome()) } }
+                thread(isDaemon = true) { runCatching { log("🛞 " + dockAndVerify()) } }
             }
             if (phone > 20) warned.remove("phone_dock")
         }
@@ -1783,7 +1783,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         warn("roomba", rb in 0..14 && r?.charging == false, "La batterie de mes roues est à $rb %, je rentre à ma base.")
         if (r != null && rb in 0..14 && !r.charging && !r.onBase && !following && !_state.value.busy && warned.contains("roomba") &&
             warned.add("roomba_dock")) {
-            thread(isDaemon = true) { runCatching { log("🛞 " + goHome()) } }
+            thread(isDaemon = true) { runCatching { log("🛞 " + dockAndVerify()) } }
         }
         if (rb > 30) warned.remove("roomba_dock")
         // Journal du jour : le soir à 21 h 30, une fois.
@@ -2129,64 +2129,119 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---- mode autonome : quand on ne lui demande rien, il vit sa vie de robot ------------------------------------------
+    @Volatile private var dockFailures = 0
+    @Volatile private var lastDockFailAt = 0L
+    @Volatile private var lastAutoExploreAt = System.currentTimeMillis() - 25 * 60_000L
+    @Volatile private var lastAutoGreetAt = 0L
+    private var frontiersCache = true
+    private var frontiersAt = 0L
+
     /**
-     * Toutes les 15 s, s'il est libre (pas de conversation en cours, pas de mission), de jour, avec ses roues et de la
-     * batterie : quelqu'un vient d'arriver -> il va le voir et le salue ; personne depuis 10 min et sa carte n'a pas
-     * grandi depuis 30 min -> petite exploration (75 s), puis retour (à sa base s'il en venait). Batterie faible : la
-     * base (déjà géré par l'horloge).
+     * Rentre à sa base et vérifie qu'il y est vraiment (sur la base ou en charge), au lieu d'envoyer la commande et de
+     * passer à autre chose. Raté : il recule, fait demi-tour et réessaie une fois ; raté encore, il prévient Michael et
+     * attend de plus en plus longtemps avant de retenter (règle d'autonomie).
+     */
+    private fun dockAndVerify(): String {
+        val r = roomba ?: return noWheels
+        if (r.onBase || r.charging) { dockFailures = 0; return "déjà sur ma base" }
+        for (attempt in 1..2) {
+            val start = goHome()
+            log("🏠 $start")
+            if (start.startsWith("le Roomba ne répond pas")) break
+            val end = System.currentTimeMillis() + 5 * 60_000L
+            while (System.currentTimeMillis() < end && !cleared && roomba === r) {
+                if (r.onBase || r.charging) {
+                    dockFailures = 0
+                    log("🏠 Je suis sur ma base (batterie des roues : ${r.battery ?: "?"} %)")
+                    return "je suis sur ma base, en charge"
+                }
+                Thread.sleep(1000)
+            }
+            if (attempt == 1 && roomba === r) {
+                log("🏠 Je n'ai pas trouvé ma base : je recule, je me retourne et je réessaie")
+                runCatching { r.drive(-0.3); r.turn(180.0) }
+            }
+        }
+        dockFailures++
+        lastDockFailAt = System.currentTimeMillis()
+        val wait = com.joey.app.life.AutonomyPolicy.dockBackoffMs(dockFailures) / 60_000
+        log("🏠 Je n'arrive pas à rentrer à ma base ($dockFailures fois) : je réessaierai dans $wait min")
+        watch.notify("🏠 Joey n'arrive pas à rentrer à sa base (roues : ${r.battery ?: "?"} %, téléphone : ${phoneBattery()} %). " +
+            "Nouvel essai dans $wait min.", null)
+        return "je n'ai pas réussi à rentrer à ma base"
+    }
+
+    /** Il reste des frontières sur sa carte (la maison n'est pas toute connue) ; recalculé au plus une fois par minute. */
+    private fun frontiersLeft(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - frontiersAt > 60_000) {
+            frontiersAt = now
+            frontiersCache = nav?.frontiersLeft() ?: true
+        }
+        return frontiersCache
+    }
+
+    /**
+     * Toutes les 10 s : la règle d'autonomie ([com.joey.app.life.AutonomyPolicy]) décide (se recharger, saluer,
+     * explorer, se reposer), et il le fait.
      */
     private fun autonomyLoop() {
-        var lastExploreAt = System.currentTimeMillis() - 25 * 60_000L
-        var lastVisitAt = 0L
         var seenSince = 0L
-        var lastChargeTry = 0L
+        var lastLabel = ""
         while (!cleared) {
-            Thread.sleep(15_000)
+            Thread.sleep(10_000)
             runCatching {
-                if (!flag("autonomy", false)) return@runCatching
                 val r = roomba ?: return@runCatching
                 val s = _state.value
                 val now = System.currentTimeMillis()
-                val h = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
-                if (s.busy || following || dancing || s.live == LiveState.SPEAKING) return@runCatching
-                val battery = r.battery ?: 100
-                // Batterie faible, loin de sa base : il y rentre de lui-même se recharger (comme un aspirateur robot), à
-                // toute heure ; s'il n'y arrive pas, il réessaie dans 10 minutes.
-                if (battery < 25 && !r.charging && !r.onBase && now - lastChargeTry > 10 * 60_000L) {
-                    lastChargeTry = now
-                    log("🤖 Autonome : batterie à $battery %, je rentre me recharger")
-                    remark("La batterie de tes roues est à $battery % : dis-le en quelques mots, tu rentres te recharger à ta base.",
-                        minGapMs = 0)
-                    log("🔋 " + moveSync(holdMs = 1000, timeoutMs = 4 * 60_000L) { goHome() })
-                    return@runCatching
-                }
-                if (h !in 8..21) return@runCatching
-                if (now - lastPersonTalkAt < 120_000) return@runCatching // on lui parle : il reste là
-                if (battery < 30 || (r.charging && battery < 80)) return@runCatching
-                // Quelqu'un est là depuis peu (pas encore salué) : il va le voir.
                 if (follower.sees) { if (seenSince == 0L) seenSince = now } else seenSince = 0L
-                if (seenSince != 0L && now - seenSince < 30_000 && now - lastVisitAt > 20 * 60_000L) {
-                    lastVisitAt = now
-                    log("🤖 Autonome : je vais voir qui est là")
-                    val res = moveSync(holdMs = 3000, timeoutMs = 90_000) { comeHere() }
-                    if (res.startsWith("je suis arrivé")) remark("Tu es allé de toi-même voir la personne qui vient d'arriver : " +
-                        "salue-la, en quelques mots, avec ton caractère.", minGapMs = 0)
-                    return@runCatching
-                }
-                // Personne autour : il agrandit sa carte, puis revient.
-                if (now - lastExploreAt > 30 * 60_000L && now - lastFaceSeenAt > 10 * 60_000L) {
-                    lastExploreAt = now
-                    val fromBase = r.onBase
-                    log("🤖 Autonome : je vais agrandir ma carte" + if (fromBase) " (puis je rentre à ma base)" else "")
-                    missionStart = r.x to r.y
-                    moveSync(holdMs = 1000, timeoutMs = 5 * 60_000L) {
-                        val e = explore(null, 75)
-                        val back = if (fromBase) goHome() else missionStart?.let { navigateTo(it.first, it.second) } ?: ""
-                        missionStart = null
-                        log("🤖 $e ; retour : $back")
-                        e
+                val on = flag("autonomy", false)
+                val busy = s.busy || following || dancing || s.live == LiveState.SPEAKING
+                val snap = com.joey.app.life.AutonomyPolicy.Snapshot(
+                    now = now,
+                    hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY),
+                    autonomyOn = on, busy = busy, lastTalkAt = lastPersonTalkAt,
+                    roombaBattery = r.battery, phoneBattery = phoneBattery(), phoneCharging = phoneCharging(),
+                    onBase = r.onBase, charging = r.charging, mapFromBase = gridAnchored,
+                    personSince = seenSince, lastGreetAt = lastAutoGreetAt, lastFaceSeenAt = lastFaceSeenAt,
+                    lastExploreAt = lastAutoExploreAt,
+                    frontiersLeft = if (on && !busy) frontiersLeft() else true,
+                    lastDockFailAt = lastDockFailAt, dockFailures = dockFailures,
+                )
+                val a = com.joey.app.life.AutonomyPolicy.decide(snap)
+                val label = a.toString()
+                when (a) {
+                    is com.joey.app.life.AutonomyPolicy.Action.None -> {}
+                    is com.joey.app.life.AutonomyPolicy.Action.Rest -> if (label != lastLabel) log("🤖 Autonome : ${a.reason}")
+                    is com.joey.app.life.AutonomyPolicy.Action.Charge -> {
+                        log("🤖 Autonome : ${a.reason}, je rentre me recharger")
+                        if (!com.joey.app.life.AutonomyPolicy.night(snap.hour))
+                            remark("Dis en quelques mots que tu rentres te recharger à ta base (${a.reason}).", minGapMs = 0)
+                        log("🔋 " + moveSync(holdMs = 1000, timeoutMs = 12 * 60_000L) { dockAndVerify() })
+                    }
+                    is com.joey.app.life.AutonomyPolicy.Action.Greet -> {
+                        lastAutoGreetAt = now
+                        log("🤖 Autonome : je vais voir qui est là")
+                        val res = moveSync(holdMs = 3000, timeoutMs = 90_000) { comeHere() }
+                        if (res.startsWith("je suis arrivé")) remark("Tu es allé de toi-même voir la personne qui vient d'arriver : " +
+                            "salue-la, en quelques mots, avec ton caractère.", minGapMs = 0)
+                    }
+                    is com.joey.app.life.AutonomyPolicy.Action.Explore -> {
+                        lastAutoExploreAt = now
+                        val fromBase = r.onBase || gridAnchored
+                        log("🤖 Autonome : j'explore ${a.seconds} s (${a.reason})" + if (fromBase) ", puis je rentre à ma base" else "")
+                        missionStart = r.x to r.y
+                        moveSync(holdMs = 1000, timeoutMs = (a.seconds + 15 * 60).toLong() * 1000) {
+                            val e = explore(null, a.seconds)
+                            val back = if (fromBase) dockAndVerify() else missionStart?.let { navigateTo(it.first, it.second) } ?: ""
+                            missionStart = null
+                            frontiersAt = 0L
+                            log("🤖 $e ; retour : $back")
+                            e
+                        }
                     }
                 }
+                lastLabel = label
             }
         }
     }

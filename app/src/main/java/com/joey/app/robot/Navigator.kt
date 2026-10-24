@@ -148,6 +148,13 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
         return res
     }
 
+    /** Il reste des frontières (pas encore ratées) à plus de 50 cm : la maison n'est pas toute connue. */
+    fun frontiersLeft(): Boolean {
+        val x = robot.x; val y = robot.y
+        return grid.frontiers(x, y, minSize = 4)
+            .any { (fx, fy) -> hypot(fx - x, fy - y) > 0.5 && failedFrontiers.none { hypot(it.first - fx, it.second - fy) < 0.5 } }
+    }
+
     /** Cap (degrés, + = droite) pour regarder le point (x, y) depuis là où il est. */
     fun bearingTo(x: Double, y: Double) = Math.toDegrees(atan2(y - robot.y, x - robot.x))
 

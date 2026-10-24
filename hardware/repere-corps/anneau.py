@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Joey : anneau d'orientation (autour du mât, sur le capot du Roomba), en quatre quarts.
+"""Joey : anneau d'orientation (autour du mât, sur le capot du Roomba), d'un seul tenant (Ø 228 mm : il passe sur le
+plateau de 256 mm de la Centauri Carbon 2).
 
 Anneau noir (comme le capot) de 1,2 mm, symboles blancs en relief de 1 mm par-dessus (changement de filament à 1,2 mm
 de hauteur). Un symbole différent à chaque point cardinal : quelle que soit la direction de la tête, la caméra en voit
@@ -9,8 +10,7 @@ au moins un et sait lequel.
   arrière : deux points
   gauche  : trois points
 Python pur. Usage : python3 anneau.py [rayon_interieur_mm] [rayon_exterieur_mm]
-Écrit anneau-quart-avant.stl, -droite, -arriere, -gauche (chaque quart porte son symbole en son milieu) et
-apercu_anneau.png. Les quarts se touchent bout à bout : coller l'avant dans l'axe du Roomba, puis les autres à la suite.
+Écrit anneau.stl et apercu_anneau.png. À coller centré sur le mât, la pointe « avant » dans l'axe du Roomba.
 """
 import math, os, struct, sys
 
@@ -124,7 +124,7 @@ def preview(path):
         f = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
     except OSError:
         f = None
-    d.text((10, 10), "Joey : anneau Ø %.0f à %.0f mm, 4 quarts. Avant en haut." % (2 * R_IN, 2 * R_OUT), fill=(200, 200, 200), font=f)
+    d.text((10, 10), "Joey : anneau Ø %.0f à %.0f mm, d'un seul tenant. Avant en haut." % (2 * R_IN, 2 * R_OUT), fill=(200, 200, 200), font=f)
     for name, a in QUARTS.items():
         r = R_OUT + 22
         x, y = r * math.cos(math.radians(a)), r * math.sin(math.radians(a))
@@ -134,7 +134,9 @@ def preview(path):
 
 
 if __name__ == "__main__":
+    tris = []
     for name in QUARTS:
-        write_stl(os.path.join(HERE, "anneau-quart-%s.stl" % name), quart(name))
+        tris += quart(name)
+    write_stl(os.path.join(HERE, "anneau.stl"), tris)
     preview(os.path.join(HERE, "apercu_anneau.png"))
-    print("rayons %.0f-%.0f mm, 4 quarts écrits" % (R_IN, R_OUT))
+    print("rayons %.0f-%.0f mm, anneau d'un seul tenant écrit (%d triangles)" % (R_IN, R_OUT, len(tris)))

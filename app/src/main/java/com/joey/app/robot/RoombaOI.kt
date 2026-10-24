@@ -240,6 +240,9 @@ class Odometry {
 
     fun reset() { x = 0.0; y = 0.0; headingDeg = 0.0; travelledM = 0.0 }
 
+    /** Recale la position (après un recalage sur la carte, une étiquette…), sans toucher à la distance parcourue. */
+    fun setPose(nx: Double, ny: Double, nh: Double) { x = nx; y = ny; headingDeg = com.joey.app.gimbal.Head.wrap(nh) }
+
     /** Nouveaux compteurs ; renvoie (distance m, rotation °) depuis la lecture précédente. */
     fun update(leftCounts: Int, rightCounts: Int): Pair<Double, Double> {
         val pl = lastL; val pr = lastR

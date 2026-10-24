@@ -24,6 +24,8 @@ Tout passe par `python3 joey.py …` (dans ce dossier). Lis `python3 joey.py` po
   roulette avant, codes infrarouges de la base, courants…). Réservé au pilote : Gemini ne le voit pas.
 - `cmd profondeur on=0` / `on=1` : couper ou rallumer la profondeur MiDaS (si elle voit des obstacles imaginaires).
   Au premier trajet, le journal (`feed`) donne sa vitesse : « 🧠 Profondeur (MiDaS) : N ms par image ».
+- `cmd scan` : un tour d'horizon cartographique (12 images de profondeur sur 360°, recalées sur la carte) ;
+  `cmd carto secondes=180` : cartographier par tours d'horizon (tour, frontière suivante, tour…). Puis `map`.
 - `say "…"` : lui parler (il répond à voix haute, comme si quelqu'un lui parlait).
 - `cmd stop` : **arrêt immédiat de tout**. `drive AVANT TOURNE SECONDES` : rouler à la main.
 
@@ -40,8 +42,9 @@ Tout passe par `python3 joey.py …` (dans ce dossier). Lis `python3 joey.py` po
 - Depuis le 24/10/2026, le développement se fait sur ce PC (dossier `~/projets/joey-dev`, jamais dans le clone de
   l'installation automatique, qu'elle remet à zéro) : tu peux corriger, tester, pousser sur la branche. La routine
   cloud de nuit est en pause.
-- Pendant les tests, l'écran du téléphone reste noir (AMOLED) : tout appel `tool` l'éteint pour 10 min ;
-  `cmd visage` le rallume, `cmd test` l'éteint. « Joey » (mot de réveil) ou un appui sur l'écran le rallument aussi.
+- Pendant les tests, l'écran du téléphone reste noir (AMOLED) et Joey se tait (pas de conversation ni de remarques) :
+  tout appel `tool` déclenche ce mode pour 10 min ; `say` (essai de conversation) lui rend la parole. `cmd visage`
+  en sort, `cmd test` y entre. « Joey » (mot de réveil) ou un appui sur l'écran en sortent aussi.
 
 ## Comment tester
 
@@ -63,7 +66,6 @@ Idées de campagne (choisis selon l'état de la maison, ce que Michael demande, 
 
 À la fin (ou toutes les 20 minutes) :
 - Écris le rapport dans `rapports/AAAA-MM-JJ-HHMM.md` (garde les images utiles à côté).
-- Envoie l'essentiel à Joey pour que Claude (cloud) le lise cette nuit et corrige :
-  `tool demander_amelioration '{"demande":"[test PC] … ce qui ne va pas, avec l'exemple précis …"}'` (une demande par
-  problème, précise et reproductible).
+- Le développement se fait sur ce PC (`~/projets/joey-dev`) : corrige directement, tests compris, plutôt que
+  d'envoyer des demandes au cloud (routine de nuit en pause).
 - Résume à Michael en quelques lignes, en commençant par le plus important.

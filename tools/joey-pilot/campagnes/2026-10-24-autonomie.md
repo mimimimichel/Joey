@@ -30,6 +30,12 @@ Chaque essai : ce qu'on fait, ce qu'on attend, ce qui s'est passé (feed + image
 - `tool explorer '{"secondes":180}'`, puis `map` : la carte grandit ; les zones (pièces) s'affichent sous la carte.
 - `tool revenir`.
 
+## 4 bis. Cartographie par tours d'horizon (v0.72)
+- `cmd scan` immobile au milieu du salon : le feed dit « Tour d'horizon : 12 images, N bords vus » ; `map` : les murs
+  apparaissent tout autour (pas seulement devant).
+- `cmd carto secondes=240`, puis `map` : la pièce entière, murs droits ; noter les recalages (« recalé de X cm »).
+- Sans nacelle (téléphone fixé, si Michael l'enlève) : refaire `cmd carto` et comparer la netteté.
+
 ## 5. Accostage
 - Joey à 2-3 m de sa base (carte partie de la base : le poser d'abord sur la base, puis l'en faire sortir).
 - `cmd dock`, puis `state` toutes les 20 s : « sur sa base » en moins de 5 min ?

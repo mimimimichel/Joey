@@ -22,6 +22,7 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
     var maxInHole = 0.0
     var bumpAuto = false
     var bumps = 0
+    var slipR = 1.0
     var mute = false    // fil qui bouge : il n'entend plus rien
     var x = 0.0; var y = 0.0; var h = 0.0 // vraie position (m, °)
     val songs = ArrayList<Int>()
@@ -36,7 +37,8 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         last = now
         if (mode < 2) { right = 0; left = 0 }
         val dl = if (blocked) 0.0 else left / 1000.0 * dt; val dr = if (blocked) 0.0 else right / 1000.0 * dt
-        countsL += dl * 1000 / RoombaOI.MM_PER_COUNT; countsR += dr * 1000 / RoombaOI.MM_PER_COUNT
+        // [slipR] : la roue droite compte un peu trop (tapis, roue usée) : l'odométrie dérive comme sur le vrai.
+        countsL += dl * 1000 / RoombaOI.MM_PER_COUNT; countsR += dr * slipR * 1000 / RoombaOI.MM_PER_COUNT
         val d = (dl + dr) / 2
         val dth = Math.toDegrees((dl - dr) / 0.235)
         val w = wall

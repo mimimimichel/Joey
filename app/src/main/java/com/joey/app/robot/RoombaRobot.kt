@@ -82,6 +82,8 @@ class RoombaRobot(
 
     /** Repart de zéro (posé sur sa base : la base devient l'origine de la carte). */
     fun resetOdometry() = odo.reset()
+    /** Recale sa position sur la carte (recalage d'un tour d'horizon, étiquette). */
+    fun setPose(x: Double, y: Double, headingDeg: Double) = odo.setPose(x, y, headingDeg)
     /** Le garder éveillé (mode sécurité au repos) : sinon il s'endort au bout de 5 min. */
     @Volatile var keepAwake = true
     private var passiveSince = 0L
@@ -202,6 +204,32 @@ class RoombaRobot(
         sing(Tune.HELLO)
     }
 
+    private var idleRef: Triple<Double, Double, Long>? = null
+    /**
+     * Plus aucune réponse depuis 20 s malgré les réveils : la liaison série elle-même est bloquée (24/10 : seule une relance
+     * de l'app, qui rouvre la carte USB, l'a débloquée). L'app rouvre alors la carte (une fois par panne).
+     */
+    @Volatile var onDead: (() -> Unit)? = null
+    private var failSince = 0L
+    private var deadReported = false
+    @Volatile private var retakeAt = 0L
+
+    /**
+     * Reprendre la main : mode sécurité, roues à zéro, brosses coupées (un nettoyage lancé par erreur s'arrête). Sur sa base,
+     * il reste en mode passif (sinon il ne charge plus).
+     */
+    private fun retakeControl(why: String, onBase: Boolean) {
+        val now = System.currentTimeMillis()
+        if (now - retakeAt < 2000) return
+        retakeAt = now
+        runCatching {
+            send(RoombaOI.start()); sleeper(30)
+            if (!onBase) { send(RoombaOI.safe()); sleeper(30); send(RoombaOI.driveDirect(0, 0)); send(RoombaOI.motors(false)); driving = true }
+            vacuuming = false
+        }
+        log("Roomba : je reprends la main ($why)")
+    }
+
     fun disconnect() {
         running = false
         runCatching { send(RoombaOI.driveDirect(0, 0)); send(RoombaOI.start()) }
@@ -216,6 +244,12 @@ class RoombaRobot(
             val now = System.currentTimeMillis()
             if (s == null) {
                 failures++
+                if (failures == 1) failSince = now
+                if (!deadReported && failures > 10 && now - failSince > 20_000) {
+                    deadReported = true
+                    log("Roomba : plus de réponse depuis 20 s, je rouvre la carte USB")
+                    runCatching { onDead?.invoke() }
+                }
                 // Réveil : souvent au début, puis toutes les ~30 s (il était éteint : 92 messages en 3 min dans le journal).
                 if (failures == 3) runCatching { wheels(0.0, 0.0) } // ne jamais rouler à l'aveugle
                 if (failures == 10) runCatching { onLink?.invoke(false) }
@@ -245,9 +279,15 @@ class RoombaRobot(
                 }
                 continue
             }
-            if (failures >= 10) runCatching { onLink?.invoke(true) }
+            if (failures >= 10) {
+                // Liaison revenue : pendant la coupure il a pu recevoir un ordre tronqué, et lire un octet de vitesse comme
+                // une commande (24/10 : il a lancé son nettoyage « spot » et n'obéissait plus). Il reprend la main.
+                retakeControl("liaison revenue", s.onHomeBase)
+                runCatching { onLink?.invoke(true) }
+            }
             if (failures > 0) linkGoodSince = now
             failures = 0
+            deadReported = false
             if (extendedLost && !extended && now - linkGoodSince > extendedRetryMs && extendedRetries < 5) {
                 extendedRetries++
                 tryExtended(quiet = true)
@@ -296,6 +336,16 @@ class RoombaRobot(
             } else passiveSince = 0L
             if (s.bump) lastBumpSide = if (s.bumpLeft && !s.bumpRight) -1 else if (s.bumpRight && !s.bumpLeft) 1 else 0
             odo.update(s.leftCounts, s.rightCounts)
+            // Il roule alors que personne ne le lui demande (nettoyage lancé par erreur, bouton CLEAN…) : il reprend la main.
+            val idle = now - movingAt > 1500 && now > seekingDockUntil
+            if (idle) {
+                val ref = idleRef
+                if (ref == null || now - ref.third > 1000) idleRef = Triple(odo.travelledM, odo.headingDeg, now)
+                else if (odo.travelledM - ref.first > 0.08 || abs(com.joey.app.gimbal.Head.wrap(odo.headingDeg - ref.second)) > 25) {
+                    retakeControl("je roulais tout seul (nettoyage lancé par erreur ?)", s.onHomeBase)
+                    idleRef = null
+                }
+            } else idleRef = null
             // En route, il repasse en mode passif de lui-même (vide, roue soulevée, base) : on arrête tout.
             if (driving && prev?.oiMode == 2 && s.oiMode == 1) {
                 safetyNote = when {
@@ -659,8 +709,11 @@ class RoombaRobot(
         R2D2(listOf(84 to 4, 88 to 4, 79 to 4, 91 to 6, 86 to 4, 95 to 8)),
     }
 
+    /** Silence (mode test) : ni mélodies ni babil. */
+    @Volatile var muted = false
+
     fun sing(t: Tune) {
-        if (!running) return
+        if (!running || muted) return
         runCatching { send(RoombaOI.song(2, t.notes)); send(RoombaOI.play(2)) }
     }
 
@@ -680,7 +733,7 @@ class RoombaRobot(
     /** Une syllabe de babil, grave ou aiguë selon [note] ; pas plus de 3 par seconde, et jamais si la liaison peine. */
     fun chirp(note: Int) {
         val now = System.currentTimeMillis()
-        if (!running || !linkOk || now - chirpAt < 330) return
+        if (!running || muted || !linkOk || now - chirpAt < 330) return
         chirpAt = now
         runCatching { send(RoombaOI.play(if (note < 80) 3 else 4)) }
     }

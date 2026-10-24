@@ -400,6 +400,87 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Un tour d'horizon cartographique (méthode des aspirateurs à lidar) : il tourne sur lui-même par pas de 30° et, à
+     * chaque pas, la profondeur (MiDaS) donne la distance du premier obstacle dans 32 directions. L'ensemble est recalé
+     * sur sa carte ([com.joey.app.robot.ScanMatcher] : sa position, qui dérive, est corrigée), puis ajouté à la carte. Sans
+     * nacelle, le gyroscope du téléphone donne déjà le bon cap : le recalage ne touche l'angle que de quelques degrés.
+     */
+    private fun scanStation(steps: Int = 12): String {
+        val r = roomba ?: return noWheels
+        if (!depth.available) return "profondeur indisponible"
+        val h0 = r.heading
+        val views = ArrayList<Pair<Double, List<Pair<Double, Double>>>>()
+        // Avec la nacelle (verrouillée : elle ne suit pas le corps), le corps reste immobile et c'est la tête qui fait le tour,
+        // de -165° à +165° (le câble ne supporte pas plus) : le repère tête-corps, pris une fois par les pastilles, reste juste
+        // puisque le corps ne bouge pas, et le gyroscope du téléphone mesure chaque angle de la tête.
+        if (gimbal.ready) {
+            if (!calibrateBody()) return "tour d'horizon impossible : je ne sais pas où regarde ma tête"
+            head.look(-165.0, -22.0, timeoutMs = 6000)
+        }
+        for (k in 0 until steps) {
+            if (cleared || roomba !== r) break
+            if (gimbal.ready) {
+                if (k > 0) head.look(330.0 / (steps - 1), -22.0, timeoutMs = 2500)
+                Thread.sleep(250)
+            } else {
+                if (k > 0) { val res = r.turn(360.0 / steps); if (res.startsWith("arrêté") || res == "interrompu") return "tour d'horizon interrompu : $res" }
+                Thread.sleep(350)
+            }
+            val shotAt = System.currentTimeMillis()
+            var bmp: android.graphics.Bitmap? = null
+            while (System.currentTimeMillis() - shotAt < 1500) { if (camera.frameAt > shotAt) { bmp = camera.frame(500); break }; Thread.sleep(30) }
+            val img = bmp ?: continue
+            val (hf, vf) = camera.fov(img.width, img.height)
+            val pitch = (if (gimbal.ready) head.pose()?.second else sensors.read()?.second) ?: continue
+            val inv = depth.estimate(img) ?: continue
+            val res = depthGround.analyse(inv, com.joey.app.senses.DepthSense.SIZE, com.joey.app.senses.DepthSense.SIZE, pitch, hf, vf, columns = 32)
+            if (!res.ok) continue
+            val camRel = Head.wrap(r.heading - h0) + (if (gimbal.ready) bodyPan() ?: continue else 0.0)
+            views.add(camRel to res.rays.map { it.bearing to it.distance })
+        }
+        if (gimbal.ready) head.look(-165.0, -22.0, timeoutMs = 6000) // la tête revient dans l'axe (le câble se détord)
+        if (views.size < steps / 2) return "tour d'horizon raté (${views.size} images utiles sur $steps)"
+        // Les bords vus, en vecteurs depuis sa position, dans le repère de la carte tel qu'il le croit.
+        val pts = views.flatMap { (rel, rays) -> rays.filter { !it.second.isInfinite() && it.second < 3.0 }.map { (b, d) ->
+            val a = Math.toRadians(h0 + rel + b); d * kotlin.math.cos(a) to d * kotlin.math.sin(a) } }
+        var fixed = ""
+        var dth = 0.0
+        com.joey.app.robot.ScanMatcher.match(grid.occupiedKeys(), grid.cell, r.x, r.y, pts, maxTurnDeg = if (gimbal.ready) 20.0 else 4.0)?.let { f ->
+            r.setPose(r.x + f.dx, r.y + f.dy, r.heading + f.dthDeg)
+            dth = f.dthDeg
+            fixed = ", recalé de %.0f cm et %.0f°".format(kotlin.math.hypot(f.dx, f.dy) * 100, f.dthDeg)
+        }
+        // Ajout à la carte depuis la pose corrigée (même cap de départ corrigé pour tous les pas).
+        views.forEach { (rel, rays) -> nav?.vision(h0 + dth + rel, rays) }
+        val msg = "tour d'horizon : ${views.size} images, ${pts.size} bords vus$fixed"
+        log("🗺 ${msg.replaceFirstChar { it.uppercase() }}")
+        return msg
+    }
+
+    /**
+     * Cartographier la pièce (et au-delà) par tours d'horizon : un tour, puis la frontière la plus proche (le bord du
+     * connu), un tour, et ainsi de suite, jusqu'à [maxSec] secondes ou plus de frontière (tout est connu).
+     */
+    private fun mapByScans(maxSec: Int): String = withRoadGaze {
+        val n = nav ?: return@withRoadGaze noWheels
+        val t0 = System.currentTimeMillis()
+        val area0 = grid.knownArea()
+        var stations = 0
+        log("🗺 Je cartographie par tours d'horizon")
+        scanStation().let { stations++; if (it.startsWith("tour d'horizon interrompu")) return@withRoadGaze it }
+        var end = "temps écoulé"
+        while (System.currentTimeMillis() - t0 < maxSec * 1000L && !cleared) {
+            val res = n.frontierStep(budget = 3.0) { roadLegStart(it) }
+            if (res == null) { end = "plus rien d'inconnu à portée"; break }
+            if (res.startsWith("arrêté")) { end = res; break }
+            val sc = scanStation(); stations++
+            if (sc.startsWith("tour d'horizon interrompu")) { end = sc; break }
+        }
+        frontiersAt = 0L
+        "carte : $stations tours d'horizon, %.0f m² de plus (%.0f m² connus) ; $end".format(grid.knownArea() - area0, grid.knownArea())
+    }
+
     /** Place libre devant (m) : la plus prudente de la couleur du sol (et des objets) et de la profondeur, si elles sont récentes. */
     private fun clearAhead(maxAgeMs: Long = 400): Double? {
         val now = System.currentTimeMillis()
@@ -1768,6 +1849,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * les [minGapMs]. Sinon on ne dit rien (il réagit déjà avec son visage et sa tête).
      */
     private fun remark(text: String, minGapMs: Long = 45_000) {
+        if (testQuiet) return
         val l = live ?: return
         val now = System.currentTimeMillis()
         if (now - lastRemarkAt < minGapMs || now - lastPersonTalkAt < 4000 || _state.value.live != LiveState.LISTENING) return
@@ -1776,6 +1858,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun speakUp(text: String) {
+        if (testQuiet) { log("🔇 (mode test) $text".take(160)); return }
         val l = live
         if (l != null) { l.event(text, reply = true); return }
         if (geminiKey.isBlank()) return
@@ -1889,7 +1972,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var following = false
 
     /** Branche le Roomba par la carte USB-série (en arrière-plan). [quiet] : pas de message si rien n'est branché. */
-    fun connectRoomba(quiet: Boolean = false) {
+    /**
+     * La liaison série est bloquée (plus de réponse depuis 20 s) : on referme et rouvre la carte USB, sans perdre la carte ni
+     * la position (24/10 : il a fallu relancer l'app à la main pour débloquer la liaison).
+     */
+    private fun reopenRoomba() {
+        val old = roomba ?: return
+        val pose = Triple(old.x, old.y, old.heading)
+        val rev = old.reversed
+        thread(name = "roomba-reouverture", isDaemon = true) {
+            runCatching { old.disconnect() }
+            if (roomba === old) roomba = null
+            refreshRoomba()
+            Thread.sleep(1500)
+            // Plusieurs essais (toutes les 10 s pendant 5 min) : le Roomba peut mettre un moment à répondre de nouveau.
+            for (attempt in 0 until 30) {
+                if (cleared || roomba != null) break
+                connectRoomba(quiet = true, restore = pose, restoreReversed = rev)
+                Thread.sleep(10_000)
+            }
+            if (roomba == null) log("🛞 Le Roomba ne répond toujours pas : vérifie qu'il est allumé et que les fils sont en place")
+        }
+    }
+
+    fun connectRoomba(quiet: Boolean = false, restore: Triple<Double, Double, Double>? = null, restoreReversed: Boolean? = null) {
         if (roomba != null || roombaConnecting) return
         roombaConnecting = true
         thread(name = "roomba", isDaemon = true) {
@@ -1899,10 +2005,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 r.connect()
                 roomba = r
                 applyTuning(r)
-                bodyRef = null // nouvelles roues, nouveau repère
+                restoreReversed?.let { r.reversed = it }
+                r.onDead = { reopenRoomba() }
                 val n = com.joey.app.robot.Navigator(r, grid, ::log)
                 nav = n
-                anchorGrid(r)
+                if (restore != null) {
+                    // Réouverture après une panne de liaison : même carte, même position (pas un nouveau départ).
+                    r.setPose(restore.first, restore.second, restore.third)
+                    log("🛞 Carte USB rouverte : je garde ma carte et ma position")
+                } else {
+                    bodyRef = null // nouvelles roues, nouveau repère
+                    anchorGrid(r)
+                }
                 r.onContact = { kind, side -> runCatching { n.contact(kind, side) } }
                 // Ses détecteurs de proximité et son capteur de mur dessinent les obstacles sur la carte avant qu'il les touche.
                 r.onProximity = { angle, d -> runCatching { n.proximity(angle, d) } }
@@ -1968,10 +2082,51 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val r = roomba ?: return false
         if (!gimbal.ready) return false
         follower.pause(2500) // le suivi ne doit pas tirer la tête pendant qu'elle se recentre
+        // D'abord les pastilles du Roomba (le vrai axe du corps) ; sinon le recentrage de la nacelle (24/10 : il laissait
+        // la tête à +30° ou -15° de l'axe, selon les fois).
+        if (flag("pastilles", true) && alignHeadByMarks() != null) return true
         head.center()
         val abs = head.absPan() ?: return false
         setBodyRef(abs, r.heading)
         return true
+    }
+
+    /** Inclinaison de la tête pour voir les repères du Roomba (séance du 24/10 : visibles de -50° à -70°). */
+    private val marksTilt = -60.0
+
+    /**
+     * La tête se baisse vers le Roomba, les deux pastilles blanches de l'axe donnent l'angle exact entre la tête et le corps
+     * ([com.joey.app.senses.BodyMarks]) : le repère tête-corps est repris, puis la tête se tourne dans l'axe (3 essais au
+     * plus, jusqu'à moins de 4°). Renvoie le dernier angle mesuré, ou null si les pastilles restent invisibles.
+     */
+    private fun alignHeadByMarks(): Double? {
+        val r = roomba ?: return null
+        if (!gimbal.ready) return null
+        follower.pause(8000)
+        var last: Double? = null
+        for (attempt in 0 until 3) {
+            head.look(null, marksTilt, timeoutMs = 1500)
+            Thread.sleep(400)
+            val asked = System.currentTimeMillis()
+            var img: android.graphics.Bitmap? = null
+            while (System.currentTimeMillis() - asked < 1500) { if (camera.frameAt > asked) { img = camera.frame(500); break }; Thread.sleep(30) }
+            val bmp = img ?: break
+            val (hf, vf) = camera.fov(bmp.width, bmp.height)
+            val pitch = head.pose()?.second ?: marksTilt
+            val w = 320; val h = (320.0 * bmp.height / bmp.width).toInt().coerceAtLeast(120)
+            val small = android.graphics.Bitmap.createScaledBitmap(bmp, w, h, true)
+            val px = IntArray(w * h); small.getPixels(px, 0, w, 0, 0, w, h)
+            if (small !== bmp) small.recycle()
+            val res = com.joey.app.senses.BodyMarks.measure(px, w, h, pitch, hf, vf, arrow = flag("fleche", false)) ?: break
+            last = res.panDeg
+            val abs = head.absPan() ?: break
+            setBodyRef(abs - res.panDeg, r.heading) // maintenant bodyPan() vaut l'angle mesuré
+            if (kotlin.math.abs(res.panDeg) < 4) break
+            head.look(-res.panDeg, marksTilt, timeoutMs = 2500)
+        }
+        last?.let { log("🎯 Pastilles : tête à %+.0f° de l'axe du corps, remise dans l'axe".format(it)) }
+            ?: log("🎯 Pastilles invisibles : je recentre la nacelle")
+        return last
     }
 
     /** Où regarde la tête par rapport à l'avant du Roomba (+ = droite), ou null si on ne sait pas. */
@@ -2326,7 +2481,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         log("🤖 Autonome : j'explore ${a.seconds} s (${a.reason})" + if (fromBase) ", puis je rentre à ma base" else "")
                         missionStart = r.x to r.y
                         moveSync(holdMs = 1000, timeoutMs = (a.seconds + 15 * 60).toLong() * 1000) {
-                            val e = explore(null, a.seconds)
+                            // Avec la profondeur : cartographie par tours d'horizon (carte nette) ; sinon, exploration simple.
+                            val e = if (depth.available && flag("profondeur", true)) mapByScans(a.seconds) else explore(null, a.seconds)
                             // Une pièce nouvelle (sans nom sur sa carte) : il en fait le tour du regard et la nomme (Gemini).
                             if (canTurnGaze && flag("camera", true) && geminiKey.isNotBlank() && runCatching { inUnnamedRoom() }.getOrDefault(false)) {
                                 log("🗺 Pièce nouvelle : je la relève")
@@ -3037,7 +3193,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun recenter() = background("centrer") {
         // Comme avant un trajet : le suivi du visage ne tire pas la tête pendant qu'elle se recentre, puis on reprend le repère.
-        if (roomba != null && calibrateBody()) "tête droite devant" else head.center()
+        if (roomba != null && calibrateBody()) { head.look(null, 0.0, timeoutMs = 1500); "tête droite devant" } else head.center()
     }
     fun nod() = background("oui") { head.nod() }
     fun shake() = background("non") { head.shake() }
@@ -3091,6 +3247,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun startLive() {
         if (cleared) return
+        if (testQuiet) { log("🔇 Mode test : pas de conversation (dis « Joey » ou cmd visage pour en sortir)"); return }
         convStarts++
         wake.stop()
         lastTalkAt = System.currentTimeMillis()
@@ -3600,7 +3757,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val r = moveSync(holdMs = if (dir == "devant") 1000 else 7000) {
                     // « Devant » avec les roues : la nacelle se remet dans l'axe du corps (sa propre commande, sans dérive)
                     // et le repère tête-corps est repris.
-                    if (dir.lowercase() == "devant" && roomba != null && calibrateBody()) "tête droite devant, dans l'axe de ton corps"
+                    if (dir.lowercase() == "devant" && roomba != null && calibrateBody()) { head.look(null, 0.0, timeoutMs = 1500); "tête droite devant, dans l'axe de ton corps" }
                     else head.lookDirection(dir, deg)
                 }
                 live?.sendFrameNow()
@@ -4536,6 +4693,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun tabletSay(text: String): String {
         val t = text.trim()
         if (t.isEmpty()) return org.json.JSONObject().put("msg", "").toString()
+        // Un essai de conversation (pilote PC ou tablette) : il reprend la parole, même en mode test.
+        if (testQuiet) { testQuiet = false; log("🗣 Essai de conversation : je reprends la parole") }
         journal.write("toi", "(tablette) $t")
         val l = live
         if (l != null) { l.userText(t); return org.json.JSONObject().put("msg", "").toString() }
@@ -4565,16 +4724,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Le pilote PC travaille : écran noir pendant 10 min (prolongé à chaque appel). */
+    /** Mode test : il se tait aussi (pas de conversation ni de remarques à voix haute), sauf pour un essai de conversation. */
+    @Volatile private var testQuiet = false
+
+    /** Le pilote PC travaille : écran noir et silence pendant 10 min (prolongé à chaque appel). */
     fun testScreenOn(minutes: Int = 10) {
         testScreenUntil = System.currentTimeMillis() + minutes * 60_000L
         testScreenWatch
-        if (!_state.value.testScreen) { _state.update { it.copy(testScreen = true) }; log("⬛ Mode test : écran noir") }
+        if (!testQuiet) {
+            testQuiet = true
+            if (live != null) stopLive()
+        }
+        roomba?.muted = true // ni bips ni mélodies du Roomba pendant les essais
+        if (!_state.value.testScreen) { _state.update { it.copy(testScreen = true) }; log("⬛ Mode test : écran noir, je me tais") }
     }
 
     /** On l'appelle, on le touche, ou les tests sont finis : le visage revient. */
     fun endTestScreen() {
         testScreenUntil = 0L
+        testQuiet = false
+        roomba?.muted = false
         if (_state.value.testScreen) { _state.update { it.copy(testScreen = false) }; log("🙂 Fin du mode test : visage rallumé") }
     }
 
@@ -4616,7 +4785,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "dock" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 1000) { goHome() }; "il rentre à sa base" } }
             "center" -> { recenter(); "" }
             "test" -> { testScreenOn(); "mode test : écran noir" }
+            // Cartographie : un tour d'horizon (cmd scan), ou la pièce par tours d'horizon (cmd carto, secondes=…).
+            "scan" -> { if (r == null) "roues non branchées" else { moveAsync(holdMs = 1000) { scanStation() }; "tour d'horizon" } }
+            "carto" -> { if (r == null) "roues non branchées" else { val sec = (q["secondes"]?.toIntOrNull() ?: 180).coerceIn(30, 900)
+                moveAsync(holdMs = 1000) { mapByScans(sec) }; "cartographie par tours d'horizon ($sec s)" } }
             // Profondeur (MiDaS) : cmd profondeur&on=0 la coupe (si elle voit des obstacles qui n'existent pas), on=1 la rallume.
+            // La flèche imprimée est collée sur le Roomba (cmd fleche on=1) : il s'en sert pour trouver l'axe du corps.
+            "fleche" -> { val on = q["on"] != "0"; prefs.edit().putBoolean("fleche", on).apply(); "flèche ${if (on) "utilisée" else "ignorée"}" }
             "profondeur" -> { val on = q["on"] != "0"; prefs.edit().putBoolean("profondeur", on).apply()
                 log("🧠 Profondeur ${if (on) "activée" else "coupée"}"); "profondeur ${if (on) "activée" else "coupée"}" }
             "visage" -> { endTestScreen(); "visage rallumé" }

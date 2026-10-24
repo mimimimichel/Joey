@@ -361,6 +361,9 @@ class NavGrid(val cell: Double = 0.05) {
         return when (unknown) { 0 -> 1.0; 1 -> 0.8; else -> 0.6 }
     }
 
+    /** Les carreaux occupés (copie), pour recaler un tour d'horizon sur la carte ([ScanMatcher]). */
+    fun occupiedKeys(): Set<Long> = synchronized(cells) { cells.entries.filter { it.value > OCC }.mapTo(HashSet()) { it.key } }
+
     /** Les carreaux libres connus (copie), pour découper la carte en pièces ([Rooms]). */
     fun freeKeys(): Set<Long> = synchronized(cells) { cells.entries.filter { it.value < CLEAR && it.key !in cliffs }.mapTo(HashSet()) { it.key } }
 

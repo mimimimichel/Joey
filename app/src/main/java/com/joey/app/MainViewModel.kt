@@ -4304,8 +4304,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun tabletMap(): String {
         val r = roomba
         val x = r?.x ?: 0.0; val y = r?.y ?: 0.0
-        val (cells, cliffs) = grid.around(x, y, 45)
-        val o = org.json.JSONObject().put("cell", grid.cell).put("radius", 45).put("rx", x).put("ry", y).put("rh", r?.heading ?: 0.0)
+        val radius = (4.5 / grid.cell).toInt() // 4,5 m autour de lui, quelle que soit la taille des carreaux
+        val (cells, cliffs) = grid.around(x, y, radius)
+        val o = org.json.JSONObject().put("cell", grid.cell).put("radius", radius).put("rx", x).put("ry", y).put("rh", r?.heading ?: 0.0)
             .put("base", gridAnchored)
             .put("info", if (r == null) "roues non branchées" else "%.0f m² connus%s".format(grid.knownArea(), if (gridAnchored) ", repère = la base" else ""))
         o.put("cells", org.json.JSONArray().also { a -> cells.forEach { c -> a.put(org.json.JSONArray().put(c.first).put(c.second).put(c.third.toDouble())) } })

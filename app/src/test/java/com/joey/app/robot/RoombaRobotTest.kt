@@ -41,9 +41,10 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         val dth = Math.toDegrees((dl - dr) / 0.235)
         val w = wall
         if (w != null) {
-            // Le pare-chocs (à 18 cm du centre, sur ±40°) touche-t-il un obstacle après ce mouvement ?
+            // Le pare-chocs (le demi-cercle avant, à 17-18 cm du centre) touche-t-il un obstacle après ce mouvement ? Tous les
+            // 10° : un pied de chaise de 4 cm ne passe pas entre deux points de contrôle.
             val nx = x + d * cos(Math.toRadians(h)); val ny = y + d * sin(Math.toRadians(h)); val nh = h + dth
-            val hit = listOf(-40.0, 0.0, 40.0).any { a -> w(nx + 0.18 * cos(Math.toRadians(nh + a)), ny + 0.18 * sin(Math.toRadians(nh + a))) }
+            val hit = (-80..80 step 10).any { a -> w(nx + 0.175 * cos(Math.toRadians(nh + a)), ny + 0.175 * sin(Math.toRadians(nh + a))) }
             if (hit && d > 0) {
                 if (!bumpAuto) bumps++
                 bumpAuto = true

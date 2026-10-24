@@ -47,7 +47,9 @@ class NavGridTest {
         var y = -1.5
         while (y <= 1.5) { g.markCliff(1.82, y, 0.0); y += 0.05 }
         val p = g.plan(0.5, 0.0, 3.5, 0.0)
-        assertTrue("$p", p == null || p.none { it.first in 1.95..2.1 })
+        // Il peut contourner le bout de la marche (dans l'inconnu, au-delà de 1,5 m), jamais passer dessus.
+        assertTrue("$p", p == null || p.none { it.first in 1.95..2.2 && kotlin.math.abs(it.second) <= 1.5 })
+        if (p != null) for ((a, b) in p.zipWithNext()) assertTrue("$a -> $b", g.lineClear(a.first, a.second, b.first, b.second))
     }
 
     @Test fun frontieresAuxBordsDuConnu() {
@@ -100,5 +102,23 @@ class NavGridTest {
         assertTrue("$back", hypot(back.last().first, back.last().second) < 0.25)
         // Le retour reste dans le passage (pas à travers les pieds).
         assertTrue("$back", back.all { kotlin.math.abs(it.second) < 0.2 })
+    }
+
+    /** La carte de la maison gardée avant la 0.67 (carreaux de 10 cm) se recharge en carreaux de 5 cm, sans rien perdre. */
+    @Test fun rechargeUneCarteDe10cm() {
+        val old = NavGrid(0.1)
+        var x = 0.0
+        while (x <= 2.0) { old.markRobot(x, 0.0); x += 0.1 }
+        repeat(3) { old.markObstacle(2.0, 0.0, 0.0) }
+        old.markCliff(0.0, 0.0, 180.0)
+        val f = java.io.File.createTempFile("carte", ".json")
+        old.save(f)
+        val g = NavGrid()
+        assertTrue(g.load(f))
+        assertTrue("libre", g.free(g.idx(1.0), g.idx(0.0)))
+        assertTrue("obstacle", g.occupied(g.idx(2.23), g.idx(0.0)))
+        assertTrue("surface", kotlin.math.abs(g.knownArea() - old.knownArea()) < 0.05)
+        assertNotNull(g.plan(0.2, 0.0, 1.8, 0.0))
+        f.delete()
     }
 }

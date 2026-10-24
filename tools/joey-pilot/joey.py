@@ -113,15 +113,21 @@ def main(argv):
         print(os.path.abspath(out))
     elif c == "map":
         m = get("/tab/map")
+        # Un caractère = 10 cm, quelle que soit la taille des carreaux (5 cm depuis la 0.67) : on regroupe.
         cell = m["cell"]
-        ri, rj = int(m["rx"] // cell), int(m["ry"] // cell)
+        k = max(1, round(0.1 / cell))
+        ri, rj = int(m["rx"] // cell) // k, int(m["ry"] // cell) // k
         grid = {}
+        rank = {" ": 0, ".": 1, "#": 2, "!": 3}
+        def put(key, ch):
+            if rank[ch] > rank[grid.get(key, " ")]:
+                grid[key] = ch
         for i, j, v in m["cells"]:
-            grid[(i, j)] = "#" if v > 1.5 else ("." if v < -0.9 else " ")
+            put((i // k, j // k), "#" if v > 1.5 else ("." if v < -0.9 else " "))
         for i, j in m["cliffs"]:
-            grid[(i, j)] = "!"
+            put((i // k, j // k), "!")
         rad = 25
-        print(m["info"], "| x vers le haut (devant au départ), y vers la droite, 1 caractère = %d cm" % round(cell * 100))
+        print(m["info"], "| x vers le haut (devant au départ), y vers la droite, 1 caractère = %d cm" % round(cell * k * 100))
         for i in range(ri + rad, ri - rad - 1, -1):
             print("".join("R" if (i, j) == (ri, rj) else grid.get((i, j), " ") for j in range(rj - rad, rj + rad + 1)).rstrip())
         for p in m.get("places", []):

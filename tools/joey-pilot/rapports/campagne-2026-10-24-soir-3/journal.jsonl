@@ -1,0 +1,6 @@
+{"resultat": "compteur du câble remis à zéro (tête droite devant, câble au repos)", "step": "cable", "t": "18:06:56"}
+{"essai": "cable", "secondes": 0, "step": "fin_essai", "t": "18:06:56"}
+{"reussi": false, "secondes": 98, "journal": [], "tete": "176° à gauche, inclinée à -15°", "cable": "tête tournée de -353° par rapport au corps (limite ±185°)", "roues": "branchées, batterie 82 %, tous tes capteurs (proximité, mur, boutons)", "tel": "44", "step": "accostage", "t": "18:08:36"}
+{"essai": "accostage", "secondes": 100, "step": "fin_essai", "t": "18:08:36"}
+{"raison": "câble tordu de -365°", "step": "arret", "t": "18:08:36"}
+{"step": "campagne_finie", "t": "18:08:36"}

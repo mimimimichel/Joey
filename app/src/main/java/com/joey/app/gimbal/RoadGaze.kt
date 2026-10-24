@@ -20,6 +20,8 @@ class RoadGaze(
     private val recenter: () -> Unit,
     private val refAgeMs: () -> Long?,
     private val sleep: (Long) -> Unit = { Thread.sleep(it) },
+    /** Tête par rapport au corps d'après le compteur du câble (zéro = position neutre), si le repère manque. */
+    private val twist: () -> Double? = { null },
 ) {
     /** Inclinaison de la tête pendant les trajets (vers le sol devant). */
     val tilt = -22.0
@@ -50,7 +52,9 @@ class RoadGaze(
     /** Souvent (dans la boucle de la tête) : vise l'avant du corps. */
     fun tick() {
         if (!active || recentering) return
-        val bp = bodyPan() ?: return
+        // Sans repère tête-corps, la tête suit au moins le corps d'après le câble (24/10 : figée dans la pièce pendant
+        // les virages, le câble s'enroulait jusqu'à éteindre la nacelle).
+        val bp = bodyPan() ?: twist() ?: return
         val p = pose() ?: return
         aim(Head.wrap(p.first - bp), tilt)
     }

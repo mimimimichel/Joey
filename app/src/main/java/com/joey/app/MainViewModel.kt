@@ -146,6 +146,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         stopAim = { head.stopAim() },
         recenter = { calibrateBody() },
         refAgeMs = { bodyRef?.let { System.currentTimeMillis() - it.third } },
+        twist = { if (gimbal.ready) cable.value else null },
     )
 
     /** Ce qu'il apprend de ce qu'on lui dit : réglages ajustés, règles de conduite. */
@@ -222,6 +223,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         saveAddress = { prefs.edit().putString("gimbal_address", it).apply() },
         onState = { s ->
             _state.update { it.copy(gimbal = s) }
+            // Michael, 24/10 : quand il allume la nacelle et qu'elle se connecte, il la met en position neutre (le câble
+            // peut faire plus d'un demi-tour de chaque côté) : c'est le zéro du câble. Une coupure Bluetooth de quelques
+            // secondes ne compte pas (la nacelle n'a pas bougé).
+            val nowMs = System.currentTimeMillis()
+            if (s != GimbalState.READY) { if (gimbalLostAt == 0L) gimbalLostAt = nowMs }
+            else {
+                val lost = gimbalLostAt; gimbalLostAt = 0L
+                if (lost == 0L || nowMs - lost > 15_000) {
+                    runCatching { cable.reset(); bodyRef = null }
+                    log("🧵 Nacelle connectée : sa position actuelle est le zéro du câble")
+                }
+            }
             // Première connexion : Joey « s'étire » pour mesurer la vitesse réelle de sa tête.
             if (s == GimbalState.READY && !calibrating && (prefs.getInt("calib_version", 0) < CALIB_VERSION ||
                     sensors.available && prefs.getInt("phone_pan_sign", 0) == 0)) {
@@ -2152,6 +2165,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * l'écran) : seule la paire de pastilles reconnue par sa forme compte (24/10). Réglage « camera_centree ».
      */
     @Volatile private var unwindAt = 0L
+    @Volatile private var gimbalLostAt = 0L
+
+    /**
+     * Pendant qu'il cherche sa base, le Roomba tourne beaucoup sur lui-même ; la tête, verrouillée, resterait fixe et le
+     * câble s'enroulerait (24/10 : un tour complet en 5 s). La tête suit donc le corps : elle vise la position neutre
+     * du câble.
+     */
+    private fun followBodyWhileDocking() {
+        val r = roomba ?: return
+        if (!gimbal.ready || !r.seekingDock || roadGaze.active) return
+        val v = cable.value
+        if (kotlin.math.abs(v) < 10) return
+        val p = head.pose() ?: return
+        head.aim(Head.wrap(p.first - v), -15.0)
+    }
 
     /**
      * Le câble s'enroule quand le corps tourne et que la tête, verrouillée, reste fixe dans la pièce (24/10 : -219° après
@@ -2194,6 +2222,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // 5 essais, correction amortie : la nacelle dépasse la cible (24/10, rejoué depuis le PC : 14° -> -11° -> 6°).
         var searchTurns = 0
         var headSearch = 0
+        var searchMoves: List<Double>? = null
         // Dernier tour du corps vers la tête (pour voir si la tête l'a suivi : nacelle en mode suivi, pas verrouillée).
         var lastTurn = 0.0; var beforeTurn: Double? = null
         // Rotation totale du corps bornée (24/10 : ~600° en dix essais au bord du tapis, il l'a embarqué).
@@ -2223,16 +2252,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (last != null) break
                 // D'abord la tête seule, d'un côté puis de l'autre (la nacelle dépasse : ~40° demandés font ~70°), sans
                 // tourner le corps ; puis le corps d'un tiers de tour, et la tête recommence.
-                if (headSearch < 2) {
+                // Où chercher : d'abord là où le compteur du câble place l'avant du corps (il compte la tête par rapport
+                // au corps ; 24/10 au soir, la tête regardait l'arrière et la recherche à ±70° ne trouvait rien), puis
+                // de part et d'autre, par petits pas (la nacelle dépasse les grands ordres : -80° demandés en faisaient -220°).
+                val moves = searchMoves ?: buildList {
+                    if (kotlin.math.abs(cable.value) > 40) add((-cable.value).coerceIn(-150.0, 150.0))
+                    add(35.0); add(-70.0)
+                }.also { searchMoves = it }
+                if (headSearch < moves.size) {
+                    val m = moves[headSearch]
                     headSearch++
-                    head.look(if (headSearch == 1) 40.0 else -80.0, null, timeoutMs = 2500)
+                    // Jamais au-delà de la limite du câble.
+                    if (kotlin.math.abs(cable.value + m) < 160) head.look(m, null, timeoutMs = 3000)
                     Thread.sleep(300)
                     continue
                 }
                 if (searchTurns >= 1 || turnedTotal + 120 > 240) break
                 if (kotlin.math.abs(cable.value - 120) > 150) { log("🎯 Je ne tourne pas le corps : le câble serait trop tordu"); break }
-                head.look(40.0, null, timeoutMs = 2500) // à peu près où elle était
-                headSearch = 0
+                head.look(35.0, null, timeoutMs = 2500) // à peu près où elle était
+                headSearch = 0; searchMoves = null
                 searchTurns++
                 turnedTotal += 120
                 val t = r.turn(120.0)
@@ -4585,6 +4623,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     if (ph != null && kotlin.math.abs(ph.second) < 85) cable.update(ph.first, roomba?.heading) else cable.pause()
                 }
                 runCatching { unwindCable() }
+                runCatching { followBodyWhileDocking() }
                 runCatching { gridTick() }
                 Thread.sleep(100)
             }

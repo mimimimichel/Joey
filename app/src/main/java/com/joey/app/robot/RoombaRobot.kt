@@ -93,6 +93,9 @@ class RoombaRobot(
     @Volatile internal var awakeAfterMs = 180_000L
     /** Il cherche sa base tout seul (mode passif, mais il roule) : on ne le dérange pas jusque-là. */
     @Volatile private var seekingDockUntil = 0L
+    /** Il cherche sa base tout seul (il tourne beaucoup sur lui-même). */
+    val seekingDock: Boolean get() = System.currentTimeMillis() < seekingDockUntil
+
     /** Dernière fois qu'il a vu un code infrarouge de sa base (160 à 175). */
     @Volatile private var lastDockIrAt = 0L
     private var awakeLogged = false

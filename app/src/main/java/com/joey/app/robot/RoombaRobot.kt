@@ -528,6 +528,39 @@ class RoombaRobot(
         text.firstOrNull { "release" in it || "tags" in it } ?: text.joinToString(" | ").take(400).ifEmpty { "aucun texte reçu" }
     }
 
+    /**
+     * Le fil de réveil (BRC, trou 5) marche-t-il ? Spécification iRobot : après la mise en marche, attendre 2 s, puis trois
+     * impulsions basses de 50 à 500 ms font passer le Roomba à 19 200 bauds. On le redémarre (reset), on envoie les trois
+     * impulsions et on regarde à quelle vitesse il répond. Puis on le remet à 115 200 bauds (ordre 129, code 11).
+     */
+    fun brcTest(): String = synchronized(io) {
+        link.clearInput()
+        link.write(byteArrayOf(RoombaOI.RESET.toByte()))
+        sleeper(3000) // redémarrage (message d'accueil), puis les 2 s de la spécification
+        link.clearInput()
+        repeat(3) { link.setWakeLine(true); sleeper(200); link.setWakeLine(false); sleeper(200) }
+        lastWake = System.currentTimeMillis()
+        sleeper(400)
+        fun answers(baud: Int): Boolean {
+            runCatching { link.setBaud(baud) }
+            sleeper(100)
+            link.clearInput()
+            link.write(RoombaOI.start())
+            sleeper(150)
+            return (0 until 3).any { readSensors() != null }
+        }
+        val at19200 = answers(19_200)
+        if (at19200) { link.write(byteArrayOf(129.toByte(), 11)); sleeper(200) }
+        val at115200 = answers(115_200)
+        currentBaud = 115_200
+        driving = false
+        defineBabble()
+        val verdict = if (at19200) "le fil de réveil MARCHE : après trois impulsions, il répondait à 19 200 bauds (remis à 115 200)"
+        else "le fil de réveil ne fait rien : après trois impulsions, il ne répondait pas à 19 200 bauds" +
+            (if (at115200) " mais toujours à 115 200 (le fil n'arrive pas jusqu'à lui, ou la carte ne pilote pas RTS)" else "")
+        verdict + if (at115200) "" else " ; ATTENTION : il ne répond plus à 115 200 bauds"
+    }
+
     /** Arrête tout (les roues ; il reste en mode sécurité). */
     fun stop() {
         cancel = true
@@ -842,6 +875,9 @@ class RoombaRobot(
 
     fun sing(t: Tune) {
         if (!running || muted) return
+        // Écrire une mélodie le rend muet ~2 s (24/10 : 6 lectures manquées après chaque mélodie) : jamais en roulant, il
+        // s'arrêterait net faute de capteurs.
+        if (System.currentTimeMillis() - movingAt < 1500) return
         runCatching { send(RoombaOI.song(2, t.notes)); send(RoombaOI.play(2)) }
     }
 

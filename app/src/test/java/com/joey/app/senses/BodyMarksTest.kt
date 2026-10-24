@@ -76,6 +76,28 @@ class BodyMarksTest {
         }
     }
 
+    /**
+     * S10 (24/10, après-midi) : sa caméra est à ~10 cm de l'axe de la nacelle, le mât passe dans l'image, des fils et la
+     * carte USB traînent sur le capot. Les angles attendus viennent des rotations de la nacelle entre les images
+     * (f1 -> f4 : 39° ; f4 -> f8/f9 : 36°). Sans pastilles en vue : rien, jamais une fausse mesure.
+     */
+    private fun s10(name: String, pitch: Double) = BodyMarks.measure(px("s10-$name"), w, h, pitch, 68.0, 53.7, centered = false)
+
+    @Test fun s10LesPastillesDonnentLAngle() {
+        val f1 = s10("f1", -71.0); val f4 = s10("f4", -69.0); val f8 = s10("f8", -74.0); val f9 = s10("f9", -82.0)
+        assertTrue("f1 $f1", f1 != null && f1.panDeg in 20.0..40.0)
+        assertTrue("f4 $f4", f4 != null && f4.panDeg in -16.0..2.0)
+        assertTrue("f8 $f8", f8 != null && f8.panDeg in -54.0..-34.0)
+        assertTrue("f9 $f9", f9 != null && f9.panDeg in -54.0..-34.0)
+        // Les écarts suivent les rotations de la nacelle (à 6° près).
+        assertTrue("f1-f4 ${f1!!.panDeg - f4!!.panDeg}", kotlin.math.abs(f1.panDeg - f4.panDeg - 39) < 6)
+        assertTrue("f4-f8 ${f4.panDeg - f8!!.panDeg}", kotlin.math.abs(f4.panDeg - f8.panDeg - 36) < 6)
+    }
+
+    @Test fun s10SansPastillesRien() {
+        for ((n, p) in listOf("f10" to -55.0, "f13" to -58.0, "f14" to -71.0, "f17" to -74.0)) assertNull(n, s10(n, p))
+    }
+
     /** Tête 70° environ à gauche du corps (après un « recentrage » de la nacelle, 24/10) : pastilles au bord droit. */
     @Test fun teteTresTourneeAGauche() {
         val r = pan("align-1", -79.0)

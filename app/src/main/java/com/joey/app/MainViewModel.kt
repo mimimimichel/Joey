@@ -2140,8 +2140,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
-    /** Inclinaison de la tête pour voir les repères du Roomba (séance du 24/10 : visibles de -50° à -70°). */
-    private val marksTilt = -60.0
+    /**
+     * La caméra est-elle au-dessus de l'axe de la nacelle ? Oui pour le S8+ ; le S10 a la sienne à ~10 cm de l'axe (coin de
+     * l'écran) : seule la paire de pastilles reconnue par sa forme compte (24/10). Réglage « camera_centree ».
+     */
+    private fun cameraCentered() = flag("camera_centree", android.os.Build.MODEL.startsWith("SM-G95"))
+
+    /**
+     * Inclinaison de la tête pour voir les repères du Roomba (24/10 : S8+ de -50° à -70° ; S10, caméra décalée, de -69° à
+     * -82°, à -60° elles sortaient de l'image).
+     */
+    private val marksTilt get() = if (cameraCentered()) -60.0 else -72.0
 
     /**
      * La tête se baisse vers le Roomba, les deux pastilles blanches de l'axe donnent l'angle exact entre la tête et le corps
@@ -2170,7 +2179,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val small = android.graphics.Bitmap.createScaledBitmap(bmp, w, h, true)
             val px = IntArray(w * h); small.getPixels(px, 0, w, 0, 0, w, h)
             if (small !== bmp) small.recycle()
-            val res = com.joey.app.senses.BodyMarks.measure(px, w, h, pitch, hf, vf, arrow = flag("fleche", false))
+            val res = com.joey.app.senses.BodyMarks.measure(px, w, h, pitch, hf, vf, arrow = flag("fleche", false),
+                centered = cameraCentered())
             if (res == null) {
                 // Invisibles : la tête regarde peut-être loin sur le côté (24/10 : -64°, pastilles hors de l'image). Le corps
                 // tourne de 60° (la tête reste fixe dans la pièce) et on regarde de nouveau, 5 fois au plus.
@@ -4873,6 +4883,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 prefs.edit().putString("sortie_base", m).apply(); roomba?.undock = m; "sortie de base : $m" }
             // Version du logiciel du Roomba (il redémarre pour l'écrire, ~7 s).
             "firmware" -> roomba?.let { r -> "Roomba : " + r.firmware() } ?: "pas de Roomba branché"
+            // Le fil de réveil marche-t-il ? (il redémarre le Roomba, ~6 s)
+            "brc" -> roomba?.let { r -> "Roomba : " + r.brcTest() } ?: "pas de Roomba branché"
             "pixels" -> { val n = (q["n"]?.toIntOrNull() ?: 56).coerceIn(0, 200); prefs.edit().putInt("yeux_pixels", n).apply()
                 _state.update { it.copy(eyePixels = n) }; if (n == 0) "yeux lisses" else "yeux pixelisés ($n pixels de large)" }
             // Cartographie : un tour d'horizon (cmd scan), ou la pièce par tours d'horizon (cmd carto, secondes=…).

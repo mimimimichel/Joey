@@ -17,7 +17,9 @@ object BodyMarks {
     /** Une tache claire : centre, taille (pixels) ; [strict] = entourée par le Roomba sur au moins 60 % de son pourtour. */
     data class Mark(val x: Double, val y: Double, val size: Int, val strict: Boolean = true,
                     /** Direction du grand axe (vecteur unitaire dans l'image) et allongement (grand / petit axe). */
-                    val ax: Double = 0.0, val ay: Double = 0.0, val elong: Double = 1.0)
+                    val ax: Double = 0.0, val ay: Double = 0.0, val elong: Double = 1.0,
+                    /** Luminosité et couleur moyennes (0-255) : une pastille est d'un blanc franc. */
+                    val lum: Double = 0.0, val chr: Double = 0.0)
     /** [panDeg] : où regarde la tête par rapport à l'avant du corps (+ = à droite) ; [front] : la pastille de l'avant. */
     data class Result(val panDeg: Double, val front: Mark, val back: Mark)
 
@@ -33,7 +35,10 @@ object BodyMarks {
      * avec ce qui l'entoure (le noir du Roomba), pas un seuil fixe. Un reflet sur le parquet clair n'est pas entouré de
      * sombre : il ne compte pas.
      */
-    fun find(px: IntArray, w: Int, h: Int): List<Mark> {
+    fun find(px: IntArray, w: Int, h: Int): List<Mark> = analyze(px, w, h).first
+
+    /** Les taches (comme [find]) et l'intérieur du Roomba (masque refermé). */
+    private fun analyze(px: IntArray, w: Int, h: Int): Pair<List<Mark>, BooleanArray> {
         // Le Roomba : la grande zone sombre qui touche le bas de l'image (la tête baissée, il occupe le bas). Seules comptent
         // les taches claires prises dedans (24/10, idée de Michael : à ce niveau, le seul clair sur le Roomba, ce sont les
         // pastilles) ; le parquet clair au-delà de son bord ne compte pas.
@@ -67,7 +72,11 @@ object BodyMarks {
                 }
             }
         }
-        val bright = BooleanArray(w * h) { k -> luma(px[k]) > maxOf(110.0, dark + 10) && chroma(px[k]) < 45 }
+        // L'intérieur du Roomba : la zone sombre refermée (petits trous bouchés, dont les pastilles), sans le sol au-delà de
+        // son bord. (24/10, S10 : la pastille du bord, collée contre le tapis clair, se fondait en une grande tache avec lui
+        // et disparaissait.)
+        val inside = closedInside(body, w, h, 6)
+        val bright = BooleanArray(w * h) { k -> inside[k] && luma(px[k]) > maxOf(110.0, dark + 10) && chroma(px[k]) < 45 }
         val seen = BooleanArray(w * h)
         val out = ArrayList<Pair<Mark, Double>>()
         val stack = IntArray(w * h)
@@ -76,10 +85,10 @@ object BodyMarks {
             if (!bright[start] || seen[start]) continue
             var n = 0; var sp = 0; stack[sp++] = start; seen[start] = true
             var sx = 0.0; var sy = 0.0; var sl = 0.0; var x0 = w; var x1 = 0; var y0 = h; var y1 = 0
-            var maxL = 0.0
+            var maxL = 0.0; var sc = 0.0
             while (sp > 0) {
                 val k = stack[--sp]; members[n] = k; n++
-                maxL = maxOf(maxL, luma(px[k]))
+                maxL = maxOf(maxL, luma(px[k])); sc += chroma(px[k])
                 val x = k % w; val y = k / w
                 sx += x; sy += y; sl += luma(px[k]); x0 = minOf(x0, x); x1 = maxOf(x1, x); y0 = minOf(y0, y); y1 = maxOf(y1, y)
                 if (n > w * h / 40) break // une grande zone claire (parquet, mur) : pas une pastille
@@ -121,10 +130,90 @@ object BodyMarks {
             val tr = (sxx + syy) / n; val det = (sxx * syy - sxy * sxy) / (n.toDouble() * n)
             val disc = kotlin.math.sqrt(maxOf(0.0, tr * tr / 4 - det))
             val l1 = tr / 2 + disc; val l2 = maxOf(1e-6, tr / 2 - disc)
-            out.add(Mark(mx, my, n, dark >= 0.6 * total, kotlin.math.cos(th), kotlin.math.sin(th), kotlin.math.sqrt(l1 / l2)) to
+            out.add(Mark(mx, my, n, dark >= 0.6 * total, kotlin.math.cos(th), kotlin.math.sin(th), kotlin.math.sqrt(l1 / l2), mean, sc / n) to
                 mean / maxOf(1.0, ringSum / total))
         }
-        return out.sortedByDescending { it.second }.map { it.first }
+        return out.sortedByDescending { it.second }.map { it.first } to inside
+    }
+
+    /** Masque refermé : dilatation de [r] pixels, trous bouchés (ce que le dehors ne rejoint pas), puis érosion de [r]. */
+    private fun closedInside(mask: BooleanArray, w: Int, h: Int, r: Int): BooleanArray {
+        fun grow(src: BooleanArray, value: Boolean): BooleanArray {
+            // value = true : dilatation (un voisin vrai suffit) ; false : érosion (un voisin faux suffit à éteindre).
+            val tmp = BooleanArray(w * h); val out = BooleanArray(w * h)
+            for (y in 0 until h) for (x in 0 until w) {
+                var any = false
+                for (dx in -r..r) { val nx = x + dx; if (nx in 0 until w && src[y * w + nx] == value) { any = true; break } }
+                tmp[y * w + x] = if (any) value else !value
+            }
+            for (y in 0 until h) for (x in 0 until w) {
+                var any = false
+                for (dy in -r..r) { val ny = y + dy; if (ny in 0 until h && tmp[ny * w + x] == value) { any = true; break } }
+                out[y * w + x] = if (any) value else !value
+            }
+            return out
+        }
+        val dil = grow(mask, true)
+        // Trous : les pixels hors du masque que le bord de l'image ne rejoint pas.
+        val outside = BooleanArray(w * h); val st = IntArray(w * h); var sp = 0
+        for (x in 0 until w) for (y in intArrayOf(0, h - 1)) { val k = y * w + x; if (!dil[k] && !outside[k]) { outside[k] = true; st[sp++] = k } }
+        for (y in 0 until h) for (x in intArrayOf(0, w - 1)) { val k = y * w + x; if (!dil[k] && !outside[k]) { outside[k] = true; st[sp++] = k } }
+        while (sp > 0) {
+            val k = st[--sp]; val x = k % w; val y = k / w
+            if (x > 0 && !dil[k - 1] && !outside[k - 1]) { outside[k - 1] = true; st[sp++] = k - 1 }
+            if (x < w - 1 && !dil[k + 1] && !outside[k + 1]) { outside[k + 1] = true; st[sp++] = k + 1 }
+            if (y > 0 && !dil[k - w] && !outside[k - w]) { outside[k - w] = true; st[sp++] = k - w }
+            if (y < h - 1 && !dil[k + w] && !outside[k + w]) { outside[k + w] = true; st[sp++] = k + w }
+        }
+        val filled = BooleanArray(w * h) { !outside[it] }
+        return grow(filled, false)
+    }
+
+    /**
+     * La paire par sa forme (24/10, S10) : la pastille de l'anneau est allongée en travers de l'axe ; celle du bord, devant
+     * elle (plus loin du centre), est ramassée ou allongée le long de l'axe. L'avant ne dépend donc pas de la place de la
+     * caméra (sur le S10, elle est à ~10 cm de l'axe de la nacelle : la droite des pastilles ne passe pas sous elle).
+     */
+    private fun shapePair(marks: List<Mark>, inside: BooleanArray, w: Int, h: Int,
+                          ground: (Mark) -> Pair<Double, Double>?): Pair<Mark, Mark>? {
+        val cand = marks.filter { it.size >= 8 && it.chr <= 15 }.take(20)
+        if (cand.isEmpty()) return null
+        // Blanc franc : au moins 170, et pas loin de la tache la plus claire (l'exposition varie d'une image à l'autre).
+        val white = maxOf(170.0, 0.85 * cand.maxOf { it.lum })
+        fun isInside(x: Double, y: Double): Boolean? {
+            val ix = x.toInt(); val iy = y.toInt()
+            if (ix < 0 || iy < 0 || ix >= w || iy >= h) return null
+            return inside[iy * w + ix]
+        }
+        var best: Pair<Mark, Mark>? = null; var bestScore = Double.MAX_VALUE
+        for (inner in cand) {
+            if (!inner.strict || inner.size < 15 || inner.elong < 1.8 || inner.elong > 5.0 || inner.lum < white) continue
+            val gi = ground(inner) ?: continue
+            for (outer in cand) {
+                if (outer === inner || outer.lum < white - 25) continue
+                val dx = outer.x - inner.x; val dy = outer.y - inner.y
+                val d = hypot(dx, dy)
+                if (d < 0.05 * w || d > 0.25 * w) continue
+                val ratio = maxOf(outer.size, inner.size).toDouble() / minOf(outer.size, inner.size)
+                if (ratio > 4) continue
+                val ux = dx / d; val uy = dy / d
+                val across = abs(inner.ax * ux + inner.ay * uy) // 0 : l'allongement est bien en travers de l'axe
+                if (across > 0.45) continue
+                // Celle du bord n'est pas allongée en travers (sinon ce sont deux bandes parallèles : reflets, fils).
+                if (outer.elong >= 1.8 && abs(outer.ax * ux + outer.ay * uy) < 0.6) continue
+                // Écart sur le capot (hauteur de la caméra = 1) : ~0,18 (4,5 cm sous une caméra à 25 cm).
+                val go = ground(outer) ?: continue
+                val gd = hypot(go.first - gi.first, go.second - gi.second)
+                if (gd < 0.08 || gd > 0.40) continue
+                // Le bord du Roomba juste après la pastille de l'avant : un peu plus loin, on sort du Roomba (ou de
+                // l'image). Entre les deux, on est sur le Roomba. (La bague claire du mât, près du centre, échoue.)
+                if (isInside(outer.x + 0.8 * dx, outer.y + 0.8 * dy) == true) continue
+                if (isInside(inner.x + 0.5 * dx, inner.y + 0.5 * dy) == false) continue
+                val score = across + 0.3 * (ratio - 1) + (if (outer.strict) 0.0 else 0.2) + abs(gd - 0.18) * 2
+                if (score < bestScore) { bestScore = score; best = outer to inner }
+            }
+        }
+        return best
     }
 
     /**
@@ -132,7 +221,13 @@ object BodyMarks {
      * [hfov]/[vfov] : champ (degrés). Null si on ne voit pas les deux pastilles (tête pas assez baissée, cachées…).
      */
     /** [arrow] : la flèche imprimée est collée (sinon on ne la cherche pas : un faisceau de fils allongé la simulait). */
-    fun measure(px: IntArray, w: Int, h: Int, pitchDeg: Double, hfov: Double, vfov: Double, arrow: Boolean = false): Result? {
+    /**
+     * [centered] : la caméra est au-dessus de l'axe de la nacelle (S8+). Sinon (S10, caméra à ~10 cm de l'axe), seule la
+     * paire reconnue par sa forme compte : les replis qui supposent l'axe sous la caméra donnaient de fausses mesures
+     * (reflets du mât, fils), et le corps tournait pour rien.
+     */
+    fun measure(px: IntArray, w: Int, h: Int, pitchDeg: Double, hfov: Double, vfov: Double, arrow: Boolean = false,
+                centered: Boolean = true): Result? {
         // La tête doit être bien baissée vers son corps (sinon ce qu'il voit n'est pas le Roomba).
         if (pitchDeg > -35) return null
         val fx = (w / 2.0) / tan(Math.toRadians(hfov / 2)); val fy = (h / 2.0) / tan(Math.toRadians(vfov / 2))
@@ -142,7 +237,17 @@ object BodyMarks {
         val below = cy + fy / tan(Math.toRadians(-pitchDeg))
         // Ni les reflets sur la tige de la nacelle (près du bas de l'image, autour du point sous la caméra), ni les têtes de
         // vis (minuscules) : seules les taches assez grosses, devant.
-        val marks = find(px, w, h).filter { it.size >= 12 && it.y < 0.95 * h && it.y < below - 0.08 * h }
+        val (all, inside) = analyze(px, w, h)
+        // La paire reconnue par sa forme d'abord (valable où que soit la caméra).
+        val a = Math.toRadians(-pitchDeg)
+        val ground = { m: Mark ->
+            val xn = (m.x - cx) / fx; val yn = (m.y - cy) / fy
+            val den = yn * cos(a) + kotlin.math.sin(a)
+            if (den < 1e-3) null else (xn / den) to ((cos(a) - yn * kotlin.math.sin(a)) / den)
+        }
+        shapePair(all.filter { it.y < 0.97 * h }, inside, w, h, ground)?.let { (f, b) -> return vanish(f, b, cx, cy, fx, fy, pitchDeg) }
+        if (!centered) return null
+        val marks = all.filter { it.size >= 12 && it.y < 0.95 * h && it.y < below - 0.08 * h }
         if (marks.isEmpty()) return null
         fun residual(a: Mark, b: Mark): Double {
             val dy = b.y - a.y
@@ -198,15 +303,24 @@ object BodyMarks {
         return vanish(front, back, cx, cy, fx, fy, pitchDeg)
     }
 
-    /** L'angle tête-corps d'après deux points de l'axe : point de fuite de la droite (arrière -> avant) sur l'horizon. */
+    /**
+     * L'angle tête-corps d'après deux points de l'axe (arrière -> avant) : on les ramène sur le plan du capot (rayon de la
+     * caméra inclinée de [pitchDeg], hauteur 1), et la direction arrière -> avant donne l'angle. Même résultat que le point
+     * de fuite, mais juste aussi quand l'axe est horizontal dans l'image (tête à 90° du corps). La place de la caméra
+     * au-dessus du capot ne change pas la direction d'une droite du capot.
+     */
     private fun vanish(front: Mark, back: Mark, cx: Double, cy: Double, fx: Double, fy: Double, pitchDeg: Double): Result? {
-        val horizon = cy - fy * tan(Math.toRadians(-pitchDeg))
-        val dy = front.y - back.y
-        if (abs(dy) < 1e-6) return null
-        val t = (horizon - front.y) / dy
-        val xv = front.x + (front.x - back.x) * t
-        // L'axe part vers la gauche de l'image : la tête est tournée à droite du corps.
-        val pan = -Math.toDegrees(atan((xv - cx) / fx * cos(Math.toRadians(pitchDeg))))
-        return Result(pan, front, back)
+        val a = Math.toRadians(-pitchDeg)
+        fun ground(m: Mark): Pair<Double, Double>? {
+            val xn = (m.x - cx) / fx; val yn = (m.y - cy) / fy
+            val den = yn * cos(a) + kotlin.math.sin(a)
+            if (den < 1e-3) return null // au-dessus de l'horizon
+            return xn / den to (cos(a) - yn * kotlin.math.sin(a)) / den
+        }
+        val f = ground(front) ?: return null; val b = ground(back) ?: return null
+        val dX = f.first - b.first; val dY = f.second - b.second
+        if (hypot(dX, dY) < 1e-9) return null
+        // L'axe part vers la gauche (dX < 0) : la tête est tournée à droite du corps.
+        return Result(-Math.toDegrees(kotlin.math.atan2(dX, dY)), front, back)
     }
 }

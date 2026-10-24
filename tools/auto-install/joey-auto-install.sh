@@ -55,21 +55,21 @@ install_on() {
   local apk="$REPO/app/build/outputs/apk/debug/app-debug.apk"
   local version model
   version=$(grep -o '"versionName": "[^"]*"' "$REPO/app/build/outputs/apk/debug/output-metadata.json" | cut -d'"' -f4)
-  model=$(adb -s "$dev" shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+  model=$(adb -s "$dev" shell getprop ro.product.model </dev/null 2>/dev/null | tr -d '\r')
   # Déjà installée à la main (développement sur ce PC) : on ne relance pas Joey pour rien (24/10 : chaque relance en
   # plein essai coupait la liaison avec le Roomba).
   local installed
-  installed=$(adb -s "$dev" shell dumpsys package com.joey.app 2>/dev/null | grep -m1 'versionName=' | cut -d= -f2 | tr -d '\r ')
+  installed=$(adb -s "$dev" shell dumpsys package com.joey.app </dev/null 2>/dev/null | grep -m1 'versionName=' | cut -d= -f2 | tr -d '\r ')
   if [ -n "$version" ] && [ "$installed" = "$version" ]; then
     log "Joey $version déjà installé sur $model : rien à faire."
     return 0
   fi
   log "Installation de Joey $version sur $model ($dev)…"
-  if adb -s "$dev" install -r "$apk" >>"$LOG" 2>&1; then
+  if adb -s "$dev" install -r "$apk" </dev/null >>"$LOG" 2>&1; then
     # Exempté de la mise en veille profonde d'Android (sinon, écran éteint, il coupe le Wi-Fi malgré Joey)
-    adb -s "$dev" shell dumpsys deviceidle whitelist +com.joey.app >/dev/null 2>&1
-    adb -s "$dev" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 # écran allumé, sinon Joey reste derrière la veille
-    adb -s "$dev" shell am start -n com.joey.app/.MainActivity >/dev/null 2>&1
+    adb -s "$dev" shell dumpsys deviceidle whitelist +com.joey.app </dev/null >/dev/null 2>&1
+    adb -s "$dev" shell input keyevent KEYCODE_WAKEUP </dev/null >/dev/null 2>&1 # écran allumé, sinon Joey reste derrière la veille
+    adb -s "$dev" shell am start -n com.joey.app/.MainActivity </dev/null >/dev/null 2>&1
     log "Joey $version installé et relancé sur $model."
     notify "Joey $version installé sur $model ✅"
   else

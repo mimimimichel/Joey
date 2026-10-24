@@ -179,7 +179,8 @@ object BodyMarks {
         val cand = marks.filter { it.size >= 8 && it.chr <= 15 }.take(20)
         if (cand.isEmpty()) return null
         // Blanc franc : au moins 170, et pas loin de la tache la plus claire (l'exposition varie d'une image à l'autre).
-        val white = maxOf(170.0, 0.85 * cand.maxOf { it.lum })
+        // Plafonné à 200 : un reflet saturé (255) ne doit pas faire rejeter de vraies pastilles à 210.
+        val white = maxOf(170.0, minOf(200.0, 0.85 * cand.maxOf { it.lum }))
         fun isInside(x: Double, y: Double): Boolean? {
             val ix = x.toInt(); val iy = y.toInt()
             if (ix < 0 || iy < 0 || ix >= w || iy >= h) return null

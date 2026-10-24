@@ -2164,6 +2164,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         var last: Double? = null
         // 5 essais, correction amortie : la nacelle dépasse la cible (24/10, rejoué depuis le PC : 14° -> -11° -> 6°).
         var searchTurns = 0
+        var headSearch = 0
         // Rotation totale du corps bornée (24/10 : ~600° en dix essais au bord du tapis, il l'a embarqué).
         var turnedTotal = 0.0
         for (attempt in 0 until 10) {
@@ -2189,10 +2190,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // Déjà mesuré, et le corps vient de se tourner vers la tête : le repère est bon, on ne cherche pas plus loin
                 // (24/10, S10 : presque dans l'axe, les pastilles sortaient de l'image ; chercher défaisait l'alignement).
                 if (last != null) break
-                if (searchTurns >= 4 || turnedTotal + 60 > 240) break
+                // D'abord la tête seule, d'un côté puis de l'autre (la nacelle dépasse : ~40° demandés font ~70°), sans
+                // tourner le corps ; puis le corps d'un tiers de tour, et la tête recommence.
+                if (headSearch < 2) {
+                    headSearch++
+                    head.look(if (headSearch == 1) 40.0 else -80.0, null, timeoutMs = 2500)
+                    Thread.sleep(300)
+                    continue
+                }
+                if (searchTurns >= 1 || turnedTotal + 120 > 240) break
+                head.look(40.0, null, timeoutMs = 2500) // à peu près où elle était
+                headSearch = 0
                 searchTurns++
-                turnedTotal += 60
-                val t = r.turn(60.0)
+                turnedTotal += 120
+                val t = r.turn(120.0)
                 if (t.startsWith("arrêté") || t == "interrompu") break
                 Thread.sleep(300)
                 continue

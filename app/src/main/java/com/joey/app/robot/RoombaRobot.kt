@@ -189,6 +189,12 @@ class RoombaRobot(
         runCatching { link.setWakeLine(true); sleeper(1000); link.setWakeLine(false) }
     }
 
+    /** La même impulsion dans un fil à part : la lecture des capteurs ne s'arrête pas 1 s (relecture du 24/10). */
+    private fun wakePulseAsync() {
+        lastWake = System.currentTimeMillis()
+        Thread { wakePulse() }.apply { isDaemon = true; start() }
+    }
+
     /** Réveille le Roomba, trouve la vitesse de liaison, lance la lecture des capteurs. Lève une exception claire sinon. */
     fun connect() {
         runCatching { link.setWakeLine(false) }
@@ -291,7 +297,7 @@ class RoombaRobot(
                 if (failures == 10) runCatching { onLink?.invoke(false) }
                 if (failures == 10 || (failures > 10 && failures % 100 == 0)) {
                     if (failures == 10 || failures % 3000 == 0) log("Roomba : pas de réponse, je le réveille (est-il allumé ? un fil a bougé ?)")
-                    wakePulse()
+                    wakePulseAsync()
                 }
                 // Réveillé (par le fil de réveil, ou par quelqu'un sur CLEAN), il attend « start » pour répondre.
                 if (failures % 20 == 0) runCatching { send(RoombaOI.start()); if (driving) send(RoombaOI.safe()) }
@@ -347,7 +353,7 @@ class RoombaRobot(
                     onContact?.invoke("proche", if (lb and 0x3C == 0 && lb and 0x03 != 0) -1 else if (lb and 0x0F == 0) 1 else 0)
                 // Près de sa base, son faisceau compte comme « mur virtuel » (24/10 : dix à côté de la base, aucun mur virtuel dans
                 // la maison) : on ne le note pas, sinon la carte interdit l'abord de la base.
-                if (s.irOmni in 160..175) lastDockIrAt = now
+                if (RoombaOI.isDockIr(s.irOmni)) lastDockIrAt = now
                 if (s.virtualWall == true && prev?.virtualWall != true && now - lastDockIrAt > 3000) onContact?.invoke("mur virtuel", 0)
                 // Les capteurs fins, 5 fois par seconde au plus (pour la carte) : proximité (6 directions) et mur à droite.
                 if (now - fineAt > 200) {
@@ -408,7 +414,7 @@ class RoombaRobot(
                 stop()
             }
             // Au repos (mode passif), il s'endort au bout de 5 min : petite impulsion chaque minute.
-            if (!driving && now - lastWake > 55_000) wakePulse()
+            if (!driving && now - lastWake > 55_000) wakePulseAsync()
         }
     }
 
@@ -456,10 +462,9 @@ class RoombaRobot(
             sleeper(100)
             val s = readSensors()
             if (s != null) {
-                val end = System.currentTimeMillis() + 2500
-                // Recule (sens du Roomba, quel que soit le montage du visage).
-                while (System.currentTimeMillis() < end) { wheels(if (reversed) 0.12 else -0.12, 0.0); sleeper(100) }
-                wheels(0.0, 0.0)
+                // Recule (sens du Roomba, quel que soit le montage du visage). Le mode complet coupe ses sécurités : on
+                // s'arrête si on l'arrête ou si on le soulève.
+                backOff(2500)
                 return null
             }
             log("Roomba : il s'est tu dès le mode complet sur sa base, je lui renvoie « start »")
@@ -486,10 +491,18 @@ class RoombaRobot(
         vacuuming = false
         if (!off) return "je n'arrive pas à quitter ma base (toujours sur ses contacts après 6 s)"
         // Encore un peu en arrière, pour dégager la base.
-        val back = System.currentTimeMillis() + 1200
-        while (System.currentTimeMillis() < back) { wheels(if (reversed) 0.12 else -0.12, 0.0); sleeper(100) }
-        wheels(0.0, 0.0)
+        backOff(1200)
         return null
+    }
+
+    /** Recule pendant [ms] ; s'arrête sur [stop] ou si une roue se soulève. */
+    private fun backOff(ms: Long) {
+        val g0 = stopGen
+        val end = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < end && stopGen == g0 && sensors?.wheelDrop != true) {
+            wheels(if (reversed) 0.12 else -0.12, 0.0); sleeper(100)
+        }
+        wheels(0.0, 0.0)
     }
 
     /** Renvoie « start » jusqu'à ce qu'il réponde (il a pu redémarrer : 115 200 bauds, mode éteint). */
@@ -561,8 +574,13 @@ class RoombaRobot(
         verdict + if (at115200) "" else " ; ATTENTION : il ne répond plus à 115 200 bauds"
     }
 
+    @Volatile private var singAt = 0L
+    /** Augmente à chaque [stop] : une boucle en cours (recul hors de la base) voit qu'on l'a arrêtée. */
+    @Volatile private var stopGen = 0
+
     /** Arrête tout (les roues ; il reste en mode sécurité). */
     fun stop() {
+        stopGen++
         cancel = true
         velUntil = 0L
         runCatching { wheels(0.0, 0.0) }
@@ -877,8 +895,13 @@ class RoombaRobot(
         if (!running || muted) return
         // Écrire une mélodie le rend muet ~2 s (24/10 : 6 lectures manquées après chaque mélodie) : jamais en roulant, il
         // s'arrêterait net faute de capteurs.
-        if (System.currentTimeMillis() - movingAt < 1500) return
-        runCatching { send(RoombaOI.song(2, t.notes)); send(RoombaOI.play(2)) }
+        val now = System.currentTimeMillis()
+        if (now - movingAt < 1500) return
+        // Une toutes les 4 s au plus (des appuis répétés sur l'écran le rendaient muet en continu), et jamais dans le fil
+        // de l'appelant (l'écran attendait le verrou de la liaison).
+        if (now - singAt < 4000) return
+        singAt = now
+        Thread { runCatching { send(RoombaOI.song(2, t.notes)); send(RoombaOI.play(2)) } }.apply { isDaemon = true; start() }
     }
 
     /**

@@ -72,10 +72,21 @@ object RoombaOI {
         bytes(LEDS, (if (debris) 1 else 0) or (if (spot) 2 else 0), color.coerceIn(0, 255), intensity.coerceIn(0, 255))
 
     // ---- capteurs ----------------------------------------------------------------------------------
+    /**
+     * Code infrarouge d'une base (160 à 175, bit 1 à zéro : 160, 161, 164, 165, 168, 169, 172, 173). 162 est le mur
+     * virtuel du Roomba 600, pas la base.
+     */
+    fun isDockIr(code: Int) = code in 160..175 && code and 2 == 0
+
+    /** Groupe de paquets 7 à 16. */
+    const val GROUP_7_16 = 1
+
     /** Paquets lus à chaque tour : (numéro, taille en octets). */
     val SENSOR_PACKETS = listOf(
-        7 to 1,   // pare-chocs et roues soulevées
-        9 to 1, 10 to 1, 11 to 1, 12 to 1, // vide : gauche, avant gauche, avant droit, droite
+        // Groupe 1 = paquets 7 à 16 (10 octets) : pare-chocs et roues soulevées, mur, 4 vides, mur virtuel, surintensité,
+        // saleté, octet inutilisé. Demandés par leur groupe pour ne jamais envoyer l'octet 7, qui est aussi l'ordre
+        // « reset » : un octet de tête perdu sur le fil redémarrait le Roomba (relecture du 24/10).
+        GROUP_7_16 to 10,
         21 to 1,  // état de charge
         22 to 2,  // tension (mV)
         23 to 2,  // courant (mA, signé)
@@ -96,7 +107,7 @@ object RoombaOI {
      * roulette avant (il avance vraiment ?).
      */
     val EXTRA_PACKETS = listOf(
-        8 to 1, 13 to 1, 14 to 1, 15 to 1, 17 to 1, 18 to 1, 24 to 1, 27 to 2,
+        17 to 1, 18 to 1, 24 to 1, 27 to 2,
         46 to 2, 47 to 2, 48 to 2, 49 to 2, 50 to 2, 51 to 2,
         52 to 1, 53 to 1, 58 to 1,
     )
@@ -150,7 +161,7 @@ object RoombaOI {
     ) {
         val wheelOvercurrent get() = overcurrent and 0x18 != 0
         /** La base (ses balises infrarouges) est en vue. */
-        val dockInSight get() = listOf(irOmni, irLeft, irRight).any { it in 160..175 }
+        val dockInSight get() = listOf(irOmni, irLeft, irRight).any { isDockIr(it) }
         val bump get() = bumpLeft || bumpRight
         val wheelDrop get() = wheelDropLeft || wheelDropRight
         val batteryPct: Int? get() = if (capacityMah in 500..10_000) (chargeMah * 100 / capacityMah).coerceIn(0, 100) else null
@@ -165,49 +176,55 @@ object RoombaOI {
      */
     fun parseSensors(b: ByteArray, extended: Boolean = false, modeOffset: Int = 0): Sensors? {
         if (b.size != sensorBytes(extended)) return null
+        // Position de chaque paquet dans la réponse, d'après la liste demandée.
+        val off = HashMap<Int, Int>()
+        var o = 0
+        for ((id, size) in if (extended) EXTENDED_PACKETS else SENSOR_PACKETS) { off[id] = o; o += size }
         fun u8(i: Int) = b[i].toInt() and 0xFF
         fun u16(i: Int) = (u8(i) shl 8) or u8(i + 1)
         fun s16(i: Int) = u16(i).toShort().toInt()
-        val bumps = u8(0)
-        val mode = u8(15) - modeOffset
-        val chargingState = u8(5)
+        fun p8(id: Int) = u8(off.getValue(id))
+        fun p16(id: Int) = u16(off.getValue(id))
+        val g = off.getValue(GROUP_7_16) // 7 pare-chocs, 8 mur, 9-12 vides, 13 mur virtuel, 14 surintensité, 15 saleté, 16 libre
+        val bumps = u8(g)
+        val mode = p8(35) - modeOffset
+        val chargingState = p8(21)
         // Contrôles de cohérence : bits inutilisés à zéro, mode et état de charge dans leurs plages
         if (bumps and 0xF0 != 0 || mode !in 0..3 || chargingState > 5) return null
-        for (i in 1..4) if (u8(i) > 1) return null
-        // Capteurs en plus : à partir de l'octet 21, dans l'ordre d'EXTRA_PACKETS (24 octets).
-        val e = SENSOR_BYTES
+        for (i in 1..6) if (u8(g + i) > 1) return null // mur, 4 vides, mur virtuel : 0 ou 1
+        if (u8(g + 7) and 0xE0 != 0) return null
         if (extended) {
-            if (u8(e) > 1 || u8(e + 1) > 1 || u8(e + 2) and 0xE0 != 0 || u16(e + 7) > 1023 || u8(e + 23) > 3) return null
-            for (k in 0 until 6) if (u16(e + 9 + 2 * k) > 4095) return null
+            if (p16(27) > 1023 || p8(58) > 3) return null
+            for (id in 46..51) if (p16(id) > 4095) return null
         }
         return Sensors(
             bumpRight = bumps and 1 != 0,
             bumpLeft = bumps and 2 != 0,
             wheelDropRight = bumps and 4 != 0,
             wheelDropLeft = bumps and 8 != 0,
-            cliff = (1..4).any { u8(it) == 1 },
+            cliff = (2..5).any { u8(g + it) == 1 },
             chargingState = chargingState,
-            voltageMv = u16(6),
-            currentMa = s16(8),
-            chargeMah = u16(10),
-            capacityMah = u16(12),
-            onHomeBase = u8(14) and 2 != 0,
+            voltageMv = p16(22),
+            currentMa = s16(off.getValue(23)),
+            chargeMah = p16(25),
+            capacityMah = p16(26),
+            onHomeBase = p8(34) and 2 != 0,
             oiMode = mode,
-            leftCounts = u16(16),
-            rightCounts = u16(18),
-            lightBumper = u8(20),
-            wall = if (extended) u8(e) == 1 else null,
-            virtualWall = if (extended) u8(e + 1) == 1 else null,
-            overcurrent = if (extended) u8(e + 2) else 0,
-            dirt = if (extended) u8(e + 3) else 0,
-            irOmni = if (extended) u8(e + 4) else 0,
-            buttons = if (extended) u8(e + 5) else 0,
-            batteryTempC = if (extended) b[e + 6].toInt() else null,
-            wallSignal = if (extended) u16(e + 7) else 0,
-            lightSignals = if (extended) IntArray(6) { u16(e + 9 + 2 * it) } else null,
-            irLeft = if (extended) u8(e + 21) else 0,
-            irRight = if (extended) u8(e + 22) else 0,
-            stasis = if (extended) u8(e + 23) else null,
+            leftCounts = p16(43),
+            rightCounts = p16(44),
+            lightBumper = p8(45),
+            wall = u8(g + 1) == 1,
+            virtualWall = u8(g + 6) == 1,
+            overcurrent = u8(g + 7),
+            dirt = u8(g + 8),
+            irOmni = if (extended) p8(17) else 0,
+            buttons = if (extended) p8(18) else 0,
+            batteryTempC = if (extended) b[off.getValue(24)].toInt() else null,
+            wallSignal = if (extended) p16(27) else 0,
+            lightSignals = if (extended) IntArray(6) { p16(46 + it) } else null,
+            irLeft = if (extended) p8(52) else 0,
+            irRight = if (extended) p8(53) else 0,
+            stasis = if (extended) p8(58) else null,
         )
     }
 

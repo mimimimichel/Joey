@@ -113,6 +113,9 @@ class FakeRoomba(private val baudOk: Int = 115_200) : SerialLink {
         for (id in ids) {
             when (id) {
                 7 -> out.add(if (bump || bumpAuto) 3 else 0)
+                // Groupe 1 (paquets 7 à 16) : pare-chocs, mur, 4 vides, mur virtuel, surintensité, saleté, octet libre.
+                1 -> { out.add(if (bump || bumpAuto) 3 else 0); out.add(0); out.add(if (cliff) 1 else 0); repeat(3) { out.add(0) }
+                    out.add(0); out.add(0); out.add(0); out.add(0) }
                 9 -> out.add(if (cliff) 1 else 0); 10, 11, 12 -> out.add(0)
                 21 -> out.add(if (onBase) 2 else 0)
                 22 -> { out.add(0x3A); out.add(0x98) }

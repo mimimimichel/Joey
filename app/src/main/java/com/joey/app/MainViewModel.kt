@@ -2122,8 +2122,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!gimbal.ready) return null
         follower.pause(12_000)
         var last: Double? = null
-        // 5 essais, correction amortie (80 %) : sur les petits angles la nacelle dépasse la cible (24/10, rejoué depuis le
-        // PC : 14° -> -11° -> 6°), sans amortir elle oscillait.
+        // 5 essais, correction amortie : la nacelle dépasse la cible (24/10, rejoué depuis le PC : 14° -> -11° -> 6°).
         for (attempt in 0 until 5) {
             head.look(null, marksTilt, timeoutMs = 1500)
             Thread.sleep(400)
@@ -2144,7 +2143,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             setBodyRef(abs - res.panDeg, r.heading) // maintenant bodyPan() vaut l'angle mesuré
             cable.correct(res.panDeg) // le compteur du câble suit l'angle réel (au tour près)
             if (kotlin.math.abs(res.panDeg) < 5) break
-            head.look(-0.8 * res.panDeg, marksTilt, timeoutMs = 2500)
+            // La correction se fait tête relevée : tête très baissée, la nacelle dépassait sa cible de 2 à 3 fois (24/10,
+            // 13:57 : -18° -> -70° -> +38° -> -36° -> +39°) ; à l'horizontale, elle va juste (un peu trop : amortie à 60 %).
+            head.look(null, 0.0, timeoutMs = 1500)
+            head.look(-0.6 * res.panDeg, 0.0, timeoutMs = 2500)
         }
         if (last == null) log("🎯 Pastilles invisibles : je recentre la nacelle")
         return last

@@ -344,4 +344,22 @@ class RoombaRobotTest {
         assertTrue(!f.onBase)
         r.disconnect()
     }
+
+    /** Le point d'approche de la base est du côté où il en sort (il accoste en avançant, il repart en reculant). */
+    @Test fun lePointDApprocheDeLaBaseEstDuBonCote() {
+        for (rev in listOf(false, true)) {
+            val f = FakeRoomba()
+            f.onBase = true
+            val r = RoombaRobot(f)
+            r.reversed = rev
+            r.connect()
+            Thread.sleep(200)
+            r.resetOdometry() // sur sa base : l'origine de la carte
+            r.drive(if (rev) -0.05 else 0.05) // quitter la base (il recule d'abord), puis un petit pas
+            val n = Navigator(r, NavGrid())
+            val (ax, _) = n.dockApproach()
+            assertTrue("monté à l'envers=$rev : sorti en x=${r.x}, approche en x=$ax", r.x * ax > 0)
+            r.disconnect()
+        }
+    }
 }

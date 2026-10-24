@@ -2403,8 +2403,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val n = nav
         if (gridAnchored && n != null && n.distanceTo(0.0, 0.0) > 1.0) {
             log("🏠 Je rentre à ma base par ma carte")
-            // La base est à l'origine ; il s'arrête 50 cm devant (le Roomba recule de ~30 cm en la quittant).
-            val res = navigateTo(0.5, 0.0, tries = 6, budget = 30.0)
+            // La base est à l'origine ; il s'arrête 50 cm devant, du côté où il en sort (le Roomba recule de ~30 cm en la
+            // quittant), puis le Roomba accoste avec ses balises.
+            val (ax, ay) = n.dockApproach()
+            val res = navigateTo(ax, ay, tries = 6, budget = 30.0)
             log("🏠 $res")
         }
         return r.seekDock()

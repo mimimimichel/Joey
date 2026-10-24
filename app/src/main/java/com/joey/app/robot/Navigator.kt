@@ -187,6 +187,14 @@ class Navigator(val robot: RoombaRobot, val grid: NavGrid, private val log: (Str
             .any { (fx, fy) -> hypot(fx - x, fy - y) > 0.5 && failedFrontiers.none { hypot(it.first - fx, it.second - fy) < 0.5 } }
     }
 
+    /**
+     * Le point où s'arrêter avant d'accoster : 50 cm devant la base, du côté où il en sort. La carte part de la base
+     * (origine, cap 0 = là où regarde Joey) ; le Roomba accoste en avançant, donc il quitte sa base en reculant : du côté
+     * des x négatifs si Joey regarde vers l'avant du Roomba, positifs s'il est monté à l'envers. (Avant la 0.70 : toujours
+     * +0,5 m, c'est-à-dire derrière la base, contre le mur, quand Joey regarde vers l'avant du Roomba.)
+     */
+    fun dockApproach(): Pair<Double, Double> = (if (robot.reversed) 0.5 else -0.5) to 0.0
+
     /** Cap (degrés, + = droite) pour regarder le point (x, y) depuis là où il est. */
     fun bearingTo(x: Double, y: Double) = Math.toDegrees(atan2(y - robot.y, x - robot.x))
 
